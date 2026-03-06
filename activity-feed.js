@@ -74,9 +74,15 @@ export function initActivityFeed() {
         });
     }
 
-    // Turn-level console summary: reset on generation start, print on message received
+    // Reset feed and console accumulator each turn
     if (event_types.GENERATION_STARTED) {
-        eventSource.on(event_types.GENERATION_STARTED, () => { turnToolCalls = []; });
+        eventSource.on(event_types.GENERATION_STARTED, () => {
+            turnToolCalls = [];
+            feedItems = [];
+            nextId = 0;
+            saveFeed();
+            if (panelEl?.classList.contains('open')) renderAllItems();
+        });
     }
     if (event_types.MESSAGE_RECEIVED) {
         eventSource.on(event_types.MESSAGE_RECEIVED, printTurnSummary);
