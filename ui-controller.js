@@ -8,6 +8,7 @@ import { getContext } from '../../../st-context.js';
 import { selected_world_info, world_names, loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { extension_settings } from '../../../extensions.js';
 import { getAutoSummaryCount, resetAutoSummaryCount } from './auto-summary.js';
+import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import {
     getTree,
     saveTree,
@@ -192,18 +193,19 @@ function populateLorebookDropdown() {
     }
 
     // Sort: TV-enabled first, then active in chat, then alphabetical
+    const activeBooks = getActiveTunnelVisionBooks();
     const sorted = [...world_names].sort((a, b) => {
         const aTV = isLorebookEnabled(a) ? 1 : 0;
         const bTV = isLorebookEnabled(b) ? 1 : 0;
         if (aTV !== bTV) return bTV - aTV;
-        const aActive = selected_world_info?.includes(a) ? 1 : 0;
-        const bActive = selected_world_info?.includes(b) ? 1 : 0;
+        const aActive = activeBooks.includes(a) ? 1 : 0;
+        const bActive = activeBooks.includes(b) ? 1 : 0;
         if (aActive !== bActive) return bActive - aActive;
         return a.localeCompare(b);
     });
 
     for (const name of sorted) {
-        const isActive = selected_world_info?.includes(name);
+        const isActive = activeBooks.includes(name);
         const tvEnabled = isLorebookEnabled(name);
         const tree = getTree(name);
         const hasTree = !!tree?.root?.children?.length;
