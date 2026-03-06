@@ -7,7 +7,7 @@
 [![BunnyMo Compatible](https://img.shields.io/badge/BunnyMo-Compatible-pink.svg)](https://github.com/Coneja-Chibi/BunnyMo)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-green.svg)](LICENSE)
 
-*A [RoleCall](https://github.com/Coneja-Chibi) project by its Founder, built for the SillyTavern community.* 🐇
+*A [RoleCall](https://github.com/Coneja-Chibi) project by its Founder, built for the SillyTavern community as a proof of concept.* 🐇
 
 ---
 
