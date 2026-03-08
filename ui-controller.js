@@ -31,9 +31,10 @@ import {
     isTrackerTitle,
     setTrackerUid,
     syncTrackerUidsForLorebook,
+    SETTING_DEFAULTS,
 } from './tree-store.js';
 import { buildTreeFromMetadata, buildTreeWithLLM, generateSummariesForTree, ingestChatMessages } from './tree-builder.js';
-import { registerTools, unregisterTools, getDefaultToolDescriptions } from './tool-registry.js';
+import { registerTools, unregisterTools, getDefaultToolDescriptions, stripDynamicContent } from './tool-registry.js';
 import { runDiagnostics } from './diagnostics.js';
 import { applyRecurseLimit } from './index.js';
 import { refreshHiddenToolCallMessages } from './activity-feed.js';
@@ -103,11 +104,20 @@ export function bindUIEvents() {
     // Search mode radio
     $('input[name="tv_search_mode"]').on('change', onSearchModeChange);
 
+    // Collapsed tree depth
+    $('#tv_collapsed_depth').on('change', onCollapsedDepthChange);
+
+    // Selective retrieval
+    $('#tv_selective_retrieval').on('change', onSelectiveRetrievalToggle);
+
     // Recurse limit
     $('#tv_recurse_limit').on('change', onRecurseLimitChange);
 
     // LLM build detail level
     $('#tv_llm_detail').on('change', onLlmDetailChange);
+
+    // Tree granularity
+    $('#tv_tree_granularity').on('change', onTreeGranularityChange);
 
     // LLM chunk size
     $('#tv_chunk_tokens').on('change', onChunkTokensChange);
@@ -119,9 +129,19 @@ export function bindUIEvents() {
     // Chat ingest
     $('#tv_ingest_chat').on('click', onIngestChat);
 
-    // Mandatory tool calls & stealth mode
+    // Mandatory tool calls & prompt injection settings
     $('#tv_mandatory_tools').on('change', onMandatoryToolsToggle);
+    $('#tv_mandatory_position').on('change', onPromptInjectionChange);
+    $('#tv_mandatory_depth').on('change', onPromptInjectionChange);
+    $('#tv_mandatory_role').on('change', onPromptInjectionChange);
+    $('#tv_mandatory_prompt_text').on('change', onMandatoryPromptTextChange);
+    $('#tv_mandatory_prompt_reset').on('click', onMandatoryPromptReset);
+    $('#tv_notebook_position').on('change', onPromptInjectionChange);
+    $('#tv_notebook_depth').on('change', onPromptInjectionChange);
+    $('#tv_notebook_role').on('change', onPromptInjectionChange);
     $('#tv_stealth_mode').on('change', onStealthModeToggle);
+    $('#tv_ephemeral_results').on('change', onEphemeralResultsToggle);
+    $('.tv_ephemeral_tool').on('change', onEphemeralToolFilterChange);
 
     // !commands settings
     $('#tv_commands_enabled').on('change', onCommandsEnabledToggle);
@@ -178,6 +198,13 @@ export function refreshUI() {
     // Sync search mode radio
     $(`input[name="tv_search_mode"][value="${settings.searchMode || 'traversal'}"]`).prop('checked', true);
 
+    // Sync collapsed depth
+    $('#tv_collapsed_depth').val(settings.collapsedDepth ?? 2);
+    $('#tv_collapsed_depth_section').toggle((settings.searchMode || 'traversal') === 'collapsed');
+
+    // Sync selective retrieval
+    $('#tv_selective_retrieval').prop('checked', settings.selectiveRetrieval === true);
+
     // Sync recurse limit
     const recurseLimit = settings.recurseLimit ?? 5;
     $('#tv_recurse_limit').val(recurseLimit);
@@ -185,6 +212,9 @@ export function refreshUI() {
 
     // Sync LLM detail level
     $('#tv_llm_detail').val(settings.llmBuildDetail || 'full');
+
+    // Sync tree granularity
+    $('#tv_tree_granularity').val(settings.treeGranularity ?? 0);
 
     // Sync LLM chunk size
     $('#tv_chunk_tokens').val(settings.llmChunkTokens ?? 30000);
@@ -196,9 +226,28 @@ export function refreshUI() {
     $('#tv_dedup_threshold').val(settings.vectorDedupThreshold ?? 0.85);
     updateDedupStatus(dedupEnabled);
 
-    // Sync mandatory tool calls & stealth mode
+    // Sync mandatory tool calls & prompt injection
     $('#tv_mandatory_tools').prop('checked', settings.mandatoryTools === true);
+    $('#tv_mandatory_prompt_options').toggle(settings.mandatoryTools === true);
+    $('#tv_mandatory_position').val(settings.mandatoryPromptPosition || 'in_chat');
+    $('#tv_mandatory_depth').val(settings.mandatoryPromptDepth ?? 1);
+    $('#tv_mandatory_role').val(settings.mandatoryPromptRole || 'system');
+    $('#tv_mandatory_prompt_text').val(settings.mandatoryPromptText || '');
+    $('#tv_mandatory_depth_row').toggle((settings.mandatoryPromptPosition || 'in_chat') === 'in_chat');
+
+    // Sync notebook injection settings
+    $('#tv_notebook_position').val(settings.notebookPromptPosition || 'in_chat');
+    $('#tv_notebook_depth').val(settings.notebookPromptDepth ?? 1);
+    $('#tv_notebook_role').val(settings.notebookPromptRole || 'system');
+    $('#tv_notebook_depth_row').toggle((settings.notebookPromptPosition || 'in_chat') === 'in_chat');
+
     $('#tv_stealth_mode').prop('checked', settings.stealthMode === true);
+    $('#tv_ephemeral_results').prop('checked', settings.ephemeralResults === true);
+    $('#tv_ephemeral_filter_options').toggle(settings.ephemeralResults === true);
+    const filterList = settings.ephemeralToolFilter || [];
+    $('.tv_ephemeral_tool').each(function () {
+        $(this).prop('checked', filterList.includes($(this).val()));
+    });
 
     // Sync !commands settings
     $('#tv_commands_enabled').prop('checked', settings.commandsEnabled !== false);
@@ -414,8 +463,9 @@ function renderToolPromptOverrides() {
     const defaults = getDefaultToolDescriptions();
 
     for (const [toolName, defaultDesc] of Object.entries(defaults)) {
-        const currentValue = overrides[toolName] || defaultDesc;
-        const isModified = !!overrides[toolName] && overrides[toolName] !== defaultDesc;
+        const rawOverride = overrides[toolName] ? stripDynamicContent(overrides[toolName]) : null;
+        const currentValue = rawOverride || defaultDesc;
+        const isModified = !!rawOverride && rawOverride !== defaultDesc;
         const shortName = toolName.replace('TunnelVision_', '');
 
         const $block = $(`<div class="tv-tool-prompt-block ${isModified ? 'tv-tool-prompt-modified' : ''}"></div>`);
@@ -434,7 +484,7 @@ function renderToolPromptOverrides() {
 
 function onToolPromptChange() {
     const toolName = $(this).data('tool');
-    const value = $(this).val();
+    const value = stripDynamicContent($(this).val());
     const settings = getSettings();
     if (!settings.toolPromptOverrides) settings.toolPromptOverrides = {};
 
@@ -469,8 +519,26 @@ function onSearchModeChange() {
     const settings = getSettings();
     settings.searchMode = mode;
     saveSettingsDebounced();
+    $('#tv_collapsed_depth_section').toggle(mode === 'collapsed');
     // Re-register to rebuild tool description with new mode
     registerTools();
+}
+
+function onCollapsedDepthChange() {
+    const raw = Number($('#tv_collapsed_depth').val());
+    const clamped = Math.min(4, Math.max(1, Math.round(raw) || 2));
+    $('#tv_collapsed_depth').val(clamped);
+    const settings = getSettings();
+    settings.collapsedDepth = clamped;
+    saveSettingsDebounced();
+    registerTools();
+}
+
+async function onSelectiveRetrievalToggle() {
+    const settings = getSettings();
+    settings.selectiveRetrieval = $(this).prop('checked');
+    saveSettingsDebounced();
+    await registerTools();
 }
 
 function onRecurseLimitChange() {
@@ -488,6 +556,12 @@ function onRecurseLimitChange() {
 function onLlmDetailChange() {
     const settings = getSettings();
     settings.llmBuildDetail = $('#tv_llm_detail').val();
+    saveSettingsDebounced();
+}
+
+function onTreeGranularityChange() {
+    const settings = getSettings();
+    settings.treeGranularity = Number($('#tv_tree_granularity').val()) || 0;
     saveSettingsDebounced();
 }
 
@@ -657,6 +731,52 @@ function onMandatoryToolsToggle() {
     const settings = getSettings();
     settings.mandatoryTools = $(this).prop('checked');
     saveSettingsDebounced();
+    $('#tv_mandatory_prompt_options').toggle(settings.mandatoryTools);
+}
+
+function onPromptInjectionChange() {
+    const settings = getSettings();
+    const $el = $(this);
+    const id = $el.attr('id') || '';
+
+    if (id.startsWith('tv_mandatory_')) {
+        const field = id.replace('tv_mandatory_', '');
+        if (field === 'position') {
+            settings.mandatoryPromptPosition = $el.val();
+            $('#tv_mandatory_depth_row').toggle($el.val() === 'in_chat');
+        } else if (field === 'depth') {
+            settings.mandatoryPromptDepth = Math.max(1, Math.round(Number($el.val()) || 1));
+            $el.val(settings.mandatoryPromptDepth);
+        } else if (field === 'role') {
+            settings.mandatoryPromptRole = $el.val();
+        }
+    } else if (id.startsWith('tv_notebook_')) {
+        const field = id.replace('tv_notebook_', '');
+        if (field === 'position') {
+            settings.notebookPromptPosition = $el.val();
+            $('#tv_notebook_depth_row').toggle($el.val() === 'in_chat');
+        } else if (field === 'depth') {
+            settings.notebookPromptDepth = Math.max(1, Math.round(Number($el.val()) || 1));
+            $el.val(settings.notebookPromptDepth);
+        } else if (field === 'role') {
+            settings.notebookPromptRole = $el.val();
+        }
+    }
+
+    saveSettingsDebounced();
+}
+
+function onMandatoryPromptTextChange() {
+    const settings = getSettings();
+    settings.mandatoryPromptText = $(this).val() || '';
+    saveSettingsDebounced();
+}
+
+function onMandatoryPromptReset() {
+    const settings = getSettings();
+    settings.mandatoryPromptText = SETTING_DEFAULTS.mandatoryPromptText;
+    $('#tv_mandatory_prompt_text').val(settings.mandatoryPromptText);
+    saveSettingsDebounced();
 }
 
 function onStealthModeToggle() {
@@ -664,6 +784,23 @@ function onStealthModeToggle() {
     settings.stealthMode = $(this).prop('checked');
     saveSettingsDebounced();
     void refreshHiddenToolCallMessages({ syncFlags: true });
+}
+
+function onEphemeralResultsToggle() {
+    const settings = getSettings();
+    settings.ephemeralResults = $(this).prop('checked');
+    $('#tv_ephemeral_filter_options').toggle(settings.ephemeralResults);
+    saveSettingsDebounced();
+}
+
+function onEphemeralToolFilterChange() {
+    const settings = getSettings();
+    const selected = [];
+    $('.tv_ephemeral_tool:checked').each(function () {
+        selected.push($(this).val());
+    });
+    settings.ephemeralToolFilter = selected;
+    saveSettingsDebounced();
 }
 
 // ─── Commands Settings ───────────────────────────────────────────

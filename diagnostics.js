@@ -42,11 +42,13 @@ export async function runDiagnostics() {
     results.push(checkSettingsExist());
     results.push(checkApiConnected());
     results.push(checkToolCallingSupport());
+    results.push(checkPromptPostProcessing());
     results.push(...checkActiveLorebooksExist());
     results.push(...checkTreesValid());
     results.push(...await checkEntryUidsValid());
     results.push(...checkNodeSummaries());
     results.push(...checkDuplicateUids());
+    results.push(...await checkNearDuplicateEntries());
     results.push(...await checkEmptyLorebooks());
     results.push(...checkNodeIntegrity());
     results.push(...await checkToolRuntimeDuringDiagnostics());
@@ -56,12 +58,16 @@ export async function runDiagnostics() {
     results.push(checkWorldInfoApi());
     results.push(checkOrphanedTrees());
     results.push(checkSearchMode());
+    results.push(checkSelectiveRetrieval());
     results.push(checkRecurseLimit());
     results.push(checkLlmBuildDetail());
     results.push(checkLlmChunkSize());
     results.push(checkVectorDedupConfig());
     results.push(...checkSummariesNode());
     results.push(...checkCollapsedTreeSize());
+    results.push(...checkOversizedLeafNodes());
+    results.push(...checkGranularityMismatch());
+    results.push(...checkLargeLorebookSettings());
     results.push(...checkMultiDocConsistency());
     results.push(checkPopupAvailability());
     results.push(...checkActivityFeedEvent());
@@ -70,6 +76,7 @@ export async function runDiagnostics() {
     results.push(checkWiSuppressionEvent());
     results.push(checkChatIngestRequirements());
     results.push(checkMandatoryToolsEvent());
+    results.push(checkPromptInjectionSettings());
     results.push(checkCommandsConfig());
     results.push(checkAutoSummaryConfig());
     results.push(checkMultiBookMode());
@@ -78,6 +85,7 @@ export async function runDiagnostics() {
     results.push(...checkArcNodes());
     results.push(checkNotebookConfig());
     results.push(checkStealthMode());
+    results.push(checkEphemeralResults());
     results.push(checkAutoHideSummarized());
     results.push(checkConstantPassthrough());
     results.push(...checkBookDescriptions());
@@ -115,16 +123,55 @@ function checkApiConnected() {
     return pass(`API connected (${main_api})`);
 }
 
-/** Check that the current API/model supports tool calling. */
+/** Check that the current API/model supports tool calling with specific guidance. */
 function checkToolCallingSupport() {
     try {
         const supported = ToolManager.isToolCallingSupported();
         if (supported) {
             return pass('Current API supports tool calling');
         }
-        return warn('Current API/model may not support tool calling. TunnelVision requires tool call support.');
+
+        // Give specific guidance on what's wrong
+        if (main_api !== 'openai') {
+            return fail('Tool calling requires Chat Completion mode. Your current API (' + main_api + ') is Text Completion. Switch to a Chat Completion API (OpenAI, Claude, Gemini, etc.) in ST connection settings.');
+        }
+
+        const context = getContext();
+        const ccSettings = context.chatCompletionSettings;
+
+        if (ccSettings && !ccSettings.function_calling) {
+            return fail('"Enable function calling" is OFF in your Chat Completion preset. Turn it on: AI Response Configuration → Function Calling → Enable.');
+        }
+
+        return warn('Current API/model may not support tool calling. Check your model supports function calls.');
     } catch (e) {
-        return warn(`Could not verify tool calling support: ${e.message}`);
+        return warn('Could not verify tool calling support: ' + e.message);
+    }
+}
+
+/** Check that Prompt Post-Processing mode is compatible with tool calling. */
+function checkPromptPostProcessing() {
+    try {
+        if (main_api !== 'openai') {
+            return pass('PPP check not applicable for non-Chat Completion APIs');
+        }
+
+        const context = getContext();
+        const ccSettings = context.chatCompletionSettings;
+        if (!ccSettings) {
+            return warn('Could not read Chat Completion settings to check PPP mode.');
+        }
+
+        const ppp = ccSettings.custom_prompt_post_processing;
+        // These are the modes that preserve tool calls in the prompt
+        const toolCompatible = ['', 'merge_tools', 'semi_tools', 'strict_tools'];
+        if (toolCompatible.includes(ppp)) {
+            return pass('Prompt Post-Processing mode (' + (ppp || 'None') + ') is compatible with tool calling');
+        }
+
+        return warn('Prompt Post-Processing is set to "' + ppp + '" which strips tool calls from the prompt. Switch to a *_tools variant (e.g. "merge_tools") or "None" for TunnelVision to work.');
+    } catch (e) {
+        return warn('Could not check PPP mode: ' + e.message);
     }
 }
 
@@ -333,6 +380,28 @@ function checkToolPromptOverrides() {
         }
     }
 
+    // Auto-fix: strip stale baked-in dynamic content (tree overview, tracker list) from overrides
+    for (const name of Object.keys(overrides)) {
+        const val = overrides[name];
+        if (typeof val !== 'string') continue;
+
+        // New delimiter format
+        let cutIdx = val.indexOf('---TV_DYNAMIC_BELOW---');
+        // Legacy: tree overview baked in before delimiter was introduced
+        if (cutIdx < 0) cutIdx = val.indexOf('\n\nFull tree index:\n');
+        if (cutIdx < 0) cutIdx = val.indexOf('\n\nTop-level tree:\n');
+
+        if (cutIdx >= 0) {
+            const cleaned = val.substring(0, cutIdx).trimEnd();
+            if (cleaned) {
+                overrides[name] = cleaned;
+            } else {
+                delete overrides[name];
+            }
+            fixed++;
+        }
+    }
+
     // Warn about invalid tool names
     const remaining = Object.keys(overrides);
     const invalid = remaining.filter(name => !ALL_TOOL_NAMES.includes(name));
@@ -419,6 +488,71 @@ function checkDuplicateUids() {
     }
 
     return results;
+}
+
+/** Check for near-duplicate entry titles that suggest redundant content. */
+async function checkNearDuplicateEntries() {
+    const results = [];
+    const activeBooks = getActiveTunnelVisionBooks();
+
+    for (const bookName of activeBooks) {
+        const bookData = await loadWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+
+        // Collect all non-disabled entry titles
+        const entries = [];
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable) continue;
+            const title = (entry.comment || entry.key?.[0] || '').trim().toLowerCase();
+            if (title) {
+                entries.push({ uid: entry.uid, title, original: entry.comment || entry.key?.[0] || `#${entry.uid}` });
+            }
+        }
+
+        // Simple O(n²) check for very similar titles (small n per lorebook, so acceptable)
+        const dupes = [];
+        const seen = new Set();
+        for (let i = 0; i < entries.length; i++) {
+            if (seen.has(i)) continue;
+            for (let j = i + 1; j < entries.length; j++) {
+                if (seen.has(j)) continue;
+                if (titlesAreSimilar(entries[i].title, entries[j].title)) {
+                    dupes.push(`"${entries[i].original}" (UID ${entries[i].uid}) ≈ "${entries[j].original}" (UID ${entries[j].uid})`);
+                    seen.add(j);
+                }
+            }
+        }
+
+        if (dupes.length > 0) {
+            results.push(warn(`Lorebook "${bookName}" has ${dupes.length} near-duplicate entry pair(s): ${dupes.slice(0, 3).join('; ')}${dupes.length > 3 ? ` (+${dupes.length - 3} more)` : ''}. Consider merging with TunnelVision_MergeSplit or manually.`));
+        }
+    }
+
+    if (results.length === 0 && activeBooks.length > 0) {
+        results.push(pass('No near-duplicate entry titles detected'));
+    }
+
+    return results;
+}
+
+/**
+ * Check if two titles are similar enough to be potential duplicates.
+ * Uses simple heuristics: exact match after normalization, or one contains the other.
+ * @param {string} a - Normalized (lowercase, trimmed) title
+ * @param {string} b - Normalized (lowercase, trimmed) title
+ * @returns {boolean}
+ */
+function titlesAreSimilar(a, b) {
+    if (a === b) return true;
+    // One contains the other and they're close in length
+    if (a.length > 3 && b.length > 3) {
+        if (a.includes(b) || b.includes(a)) {
+            const lenRatio = Math.min(a.length, b.length) / Math.max(a.length, b.length);
+            return lenRatio > 0.6;
+        }
+    }
+    return false;
 }
 
 /** Check that enabled lorebooks actually have active (non-disabled) entries. */
@@ -519,6 +653,19 @@ function checkSearchMode() {
     const oldValue = settings.searchMode;
     settings.searchMode = 'traversal';
     return warn(`Invalid search mode "${oldValue}". Auto-reset to "traversal".`);
+}
+
+/** Check selective retrieval configuration. */
+function checkSelectiveRetrieval() {
+    const settings = getSettings();
+    if (!settings.selectiveRetrieval) {
+        return pass('Selective retrieval: off (all entries injected on retrieve)');
+    }
+    const limit = Number(settings.recurseLimit) || 5;
+    if (limit < 3) {
+        return warn('Selective retrieval is on but recurse limit is below 3. The model needs at least 2 calls per leaf (manifest + entry pick). Consider raising the recurse limit.');
+    }
+    return pass('Selective retrieval: on (model picks individual entries from manifests)');
 }
 
 /** Check that recurse limit is sane. Warn if very high. */
@@ -635,7 +782,108 @@ function checkCollapsedTreeSize() {
 
         const estimate = nodeCount * 80;
         if (estimate > MAX_LEN) {
-            results.push(warn(`"${bookName}" tree has ${nodeCount} nodes. In collapsed mode, the overview may be truncated (est. ${estimate} chars vs ${MAX_LEN} limit). Consider using traversal mode or simplifying the tree.`));
+            const depth = settings.collapsedDepth ?? 2;
+            results.push(warn(`"${bookName}" tree has ${nodeCount} nodes. In collapsed mode, the overview may be truncated (est. ${estimate} chars vs ${MAX_LEN} limit). Try lowering Collapsed Tree Depth (currently ${depth}) or using traversal mode.`));
+        }
+    }
+
+    return results;
+}
+
+/** Check for leaf nodes with too many entries, suggesting a rebuild with higher granularity. */
+function checkOversizedLeafNodes() {
+    const results = [];
+    const activeBooks = getActiveTunnelVisionBooks();
+    const settings = getSettings();
+    const granularity = Number(settings.treeGranularity) || 0;
+
+    for (const bookName of activeBooks) {
+        const tree = getTree(bookName);
+        if (!tree || !tree.root) continue;
+
+        const oversized = [];
+        const threshold = 20; // flag leaves with 20+ entries regardless of granularity
+        function scan(node) {
+            const isLeaf = (node.children || []).length === 0;
+            if (isLeaf && (node.entryUids || []).length > threshold) {
+                oversized.push({ label: node.label, count: node.entryUids.length });
+            }
+            for (const child of (node.children || [])) scan(child);
+        }
+        scan(tree.root);
+
+        if (oversized.length > 0) {
+            const top3 = oversized.sort((a, b) => b.count - a.count).slice(0, 3);
+            const examples = top3.map(n => `"${n.label}" (${n.count})`).join(', ');
+            const hint = granularity < 3
+                ? ' Try rebuilding with higher Tree Granularity (Detailed or Extensive).'
+                : ' Consider rebuilding the tree or manually splitting these categories.';
+            results.push(warn(`"${bookName}" has ${oversized.length} leaf node(s) with 20+ entries: ${examples}.${hint}`));
+        }
+    }
+
+    return results;
+}
+
+/** Check if granularity setting matches lorebook size. */
+function checkGranularityMismatch() {
+    const results = [];
+    const activeBooks = getActiveTunnelVisionBooks();
+    const settings = getSettings();
+    const granularity = Number(settings.treeGranularity) || 0;
+
+    if (granularity === 0) return results; // auto mode, no mismatch possible
+
+    for (const bookName of activeBooks) {
+        const tree = getTree(bookName);
+        if (!tree || !tree.root) continue;
+
+        const totalEntries = getAllEntryUids(tree.root).length;
+        let recommended;
+        if (totalEntries >= 3000) recommended = 4;
+        else if (totalEntries >= 1000) recommended = 3;
+        else if (totalEntries >= 200) recommended = 2;
+        else recommended = 1;
+
+        if (granularity < recommended - 1) {
+            const labels = { 1: 'Minimal', 2: 'Moderate', 3: 'Detailed', 4: 'Extensive' };
+            results.push(warn(`"${bookName}" has ${totalEntries} entries but granularity is set to ${labels[granularity] || granularity}. With this many entries, more splitting is recommended (${labels[recommended]} or Auto). Rebuild to apply.`));
+        }
+    }
+
+    return results;
+}
+
+/** Check if large lorebooks are using settings that will cause issues at build/retrieval time. */
+function checkLargeLorebookSettings() {
+    const results = [];
+    const activeBooks = getActiveTunnelVisionBooks();
+    const settings = getSettings();
+
+    for (const bookName of activeBooks) {
+        const tree = getTree(bookName);
+        if (!tree || !tree.root) continue;
+
+        const totalEntries = getAllEntryUids(tree.root).length;
+        if (totalEntries < 500) continue; // only check large lorebooks
+
+        // Warn if using traversal mode with large lorebooks — collapsed is better
+        if ((settings.searchMode || 'traversal') === 'traversal') {
+            results.push(warn(`"${bookName}" has ${totalEntries} entries. Collapsed Tree mode is recommended for large lorebooks — it reduces tool calls and improves retrieval accuracy. Change in Advanced Settings > Search Mode.`));
+        }
+
+        // Warn if collapsed depth is too high for large lorebooks
+        if ((settings.searchMode || 'traversal') === 'collapsed') {
+            const depth = settings.collapsedDepth ?? 2;
+            if (depth > 2 && totalEntries >= 1000) {
+                results.push(warn(`"${bookName}" has ${totalEntries} entries with collapsed depth set to ${depth}. This may produce a very large tool description. Try depth 1-2 for lorebooks this size.`));
+            }
+        }
+
+        // Warn if chunk size is very small for large lorebooks (will cause many sequential LLM calls)
+        const chunkLimit = settings.llmChunkTokens || 30000;
+        if (chunkLimit < 20000 && totalEntries >= 1000) {
+            results.push(warn(`LLM Chunk Size is ${chunkLimit.toLocaleString()} chars with ${totalEntries} entries in "${bookName}". This will cause many LLM calls during tree building. Consider raising to 30,000+ for faster builds.`));
         }
     }
 
@@ -736,6 +984,53 @@ function checkMandatoryToolsEvent() {
         return warn('event_types.GENERATION_STARTED not found. Mandatory tool calls setting will not work. Requires newer ST version.');
     }
     return pass('GENERATION_STARTED event available for mandatory tool calls');
+}
+
+/** Check prompt injection settings for validity and auto-fix bad values. */
+function checkPromptInjectionSettings() {
+    const settings = getSettings();
+    const validPositions = ['in_chat', 'in_prompt'];
+    const validRoles = ['system', 'user', 'assistant'];
+    const warnings = [];
+    let fixed = null;
+
+    // Mandatory prompt settings
+    if (settings.mandatoryTools) {
+        if (!validPositions.includes(settings.mandatoryPromptPosition)) {
+            settings.mandatoryPromptPosition = 'in_chat';
+            fixed = (fixed || '') + ' Auto-reset invalid mandatory prompt position to "in_chat".';
+        }
+        if (!validRoles.includes(settings.mandatoryPromptRole)) {
+            settings.mandatoryPromptRole = 'system';
+            fixed = (fixed || '') + ' Auto-reset invalid mandatory prompt role to "system".';
+        }
+        if (settings.mandatoryPromptPosition === 'in_prompt' && settings.mandatoryPromptDepth > 0) {
+            warnings.push('Mandatory prompt is set to "In System Prompt" — depth is ignored in this mode.');
+        }
+        if (!settings.mandatoryPromptText || settings.mandatoryPromptText.trim().length === 0) {
+            warnings.push('Mandatory tools is enabled but the prompt text is empty. The model will receive no instruction.');
+        }
+    }
+
+    // Notebook prompt settings
+    if (settings.notebookEnabled !== false) {
+        if (!validPositions.includes(settings.notebookPromptPosition)) {
+            settings.notebookPromptPosition = 'in_chat';
+            fixed = (fixed || '') + ' Auto-reset invalid notebook prompt position to "in_chat".';
+        }
+        if (!validRoles.includes(settings.notebookPromptRole)) {
+            settings.notebookPromptRole = 'system';
+            fixed = (fixed || '') + ' Auto-reset invalid notebook prompt role to "system".';
+        }
+    }
+
+    if (fixed) {
+        warnings.push(fixed.trim());
+    }
+    if (warnings.length > 0) {
+        return { status: 'warn', message: warnings.join(' | '), fix: fixed?.trim() || null };
+    }
+    return pass('Prompt injection settings valid');
 }
 
 /** Check !commands configuration: prerequisites, settings validation, and auto-fix. */
@@ -966,6 +1261,27 @@ function checkStealthMode() {
         return warn('Hide tool-call messages: ON. TunnelVision tool-call messages are visually hidden in chat. Disable if you need to debug tool call behavior.');
     }
     return pass('Hide tool-call messages: off (tool calls visible in chat)');
+}
+
+/** Check ephemeral tool results configuration. */
+function checkEphemeralResults() {
+    const settings = getSettings();
+    if (!settings.ephemeralResults) {
+        return pass('Ephemeral tool results: off (old results stay in context)');
+    }
+    if (!event_types || !event_types.GENERATION_STARTED) {
+        return warn('Ephemeral results is enabled but GENERATION_STARTED event is unavailable. Results will not be stripped.');
+    }
+    const filter = settings.ephemeralToolFilter;
+    if (!Array.isArray(filter) || filter.length === 0) {
+        return warn('Ephemeral results is enabled but no tools are selected for stripping. Nothing will be cleared. Select at least one tool in the filter list.');
+    }
+    if (filter.includes('TunnelVision_Notebook')) {
+        settings.ephemeralToolFilter = filter.filter(n => n !== 'TunnelVision_Notebook');
+        return { status: 'warn', message: 'Notebook was in the ephemeral filter list but is always protected. Auto-removed.', fix: 'Removed TunnelVision_Notebook from ephemeral filter.' };
+    }
+    const toolNames = filter.join(', ').replace(/TunnelVision_/g, '');
+    return warn(`Ephemeral tool results: ON. Stripping old results for: ${toolNames}. Notebook is always protected. This saves context tokens but stripped data cannot be recovered.`);
 }
 
 /** Check auto-hide summarized messages config. */

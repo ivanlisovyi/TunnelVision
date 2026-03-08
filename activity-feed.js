@@ -71,6 +71,8 @@ const TOOL_DISPLAY = {
     'TunnelVision_Summarize':  { icon: 'fa-file-lines',      verb: 'Summarized', color: '#fdcb6e' },
     'TunnelVision_MergeSplit': { icon: 'fa-code-merge',       verb: 'Merged/Split', color: '#0984e3' },
     'TunnelVision_Notebook':   { icon: 'fa-note-sticky',     verb: 'Noted', color: '#a29bfe' },
+    // BlackBox
+    'BlackBox_Pick':           { icon: 'fa-cube',            verb: 'Picked', color: '#00cec9' },
 };
 
 /**
@@ -417,7 +419,7 @@ function onToolCallsPerformed(invocations) {
     const items = [];
 
     for (const invocation of invocations) {
-        if (!ALL_TOOL_NAMES.includes(invocation?.name)) continue;
+        if (!ALL_TOOL_NAMES.includes(invocation?.name) && !TOOL_DISPLAY[invocation?.name]) continue;
 
         const params = parseInvocationParameters(invocation.parameters);
         const retrievedEntries = invocation.name === 'TunnelVision_Search'
@@ -922,6 +924,11 @@ function buildToolSummary(toolName, params, result, retrievedEntries = []) {
             const action = params.action || 'write';
             const title = params.title || '';
             return title ? `${action}: "${truncate(title, 40)}"` : action;
+        }
+        case 'BlackBox_Pick': {
+            const dir = params.director || '?';
+            const mood = params.mood || '?';
+            return `${dir} × ${mood}`;
         }
         default:
             return '';

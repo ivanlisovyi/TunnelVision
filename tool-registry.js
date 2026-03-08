@@ -12,7 +12,7 @@ import { getCharaFilename } from '../../../utils.js';
 import { callGenericPopup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { isLorebookEnabled, getSettings, getTree, getBookDescription, syncTrackerUidsForLorebook } from './tree-store.js';
 
-import { getDefinition as getSearchDef, TOOL_NAME as SEARCH_NAME } from './tools/search.js';
+import { getDefinition as getSearchDef, getTreeOverview, TOOL_NAME as SEARCH_NAME } from './tools/search.js';
 import { getDefinition as getRememberDef, TOOL_NAME as REMEMBER_NAME } from './tools/remember.js';
 import { getDefinition as getUpdateDef, TOOL_NAME as UPDATE_NAME } from './tools/update.js';
 import { getDefinition as getForgetDef, TOOL_NAME as FORGET_NAME } from './tools/forget.js';
@@ -23,6 +23,30 @@ import { getDefinition as getNotebookDef, TOOL_NAME as NOTEBOOK_NAME } from './t
 
 /** All tool names for bulk unregister. */
 const ALL_TOOL_NAMES = [SEARCH_NAME, REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, REORGANIZE_NAME, SUMMARIZE_NAME, MERGESPLIT_NAME, NOTEBOOK_NAME];
+
+/**
+ * Delimiter that separates user-editable prompt text from dynamically injected content
+ * (tree overview, tracker list). Everything after this marker is regenerated on each
+ * registerTools() call, so user edits above the line persist across chat switches.
+ */
+export const DYNAMIC_DELIMITER = '\n\n---TV_DYNAMIC_BELOW---\n';
+
+/**
+ * Strip dynamic content (tree overview, tracker list) from a description string.
+ * Returns only the user-editable portion above the delimiter.
+ * Also handles legacy format where tree overview was baked in without a delimiter.
+ * @param {string} text
+ * @returns {string}
+ */
+export function stripDynamicContent(text) {
+    if (!text) return text;
+    // New delimiter
+    let idx = text.indexOf('---TV_DYNAMIC_BELOW---');
+    // Legacy: tree overview baked in before delimiter existed
+    if (idx < 0) idx = text.indexOf('\n\nFull tree index:\n');
+    if (idx < 0) idx = text.indexOf('\n\nTop-level tree:\n');
+    return idx >= 0 ? text.substring(0, idx).trimEnd() : text;
+}
 
 /** Tools that can be gated with per-tool confirmation. Only destructive/mutating tools. */
 const CONFIRMABLE_TOOLS = new Set([REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, SUMMARIZE_NAME, REORGANIZE_NAME, MERGESPLIT_NAME]);
@@ -405,14 +429,22 @@ export async function registerTools() {
         // Clone def to avoid mutating the original
         let registrationDef = { ...def };
 
-        // Apply user prompt override (description only)
+        // Apply user prompt override (description only), stripping any stale dynamic content
         if (promptOverrides[name] && typeof promptOverrides[name] === 'string') {
-            registrationDef.description = promptOverrides[name];
+            registrationDef.description = stripDynamicContent(promptOverrides[name]);
         }
 
-        // Inject tracker list into Search and Update descriptions
+        // Build dynamic suffix (tree overview + tracker list) — injected after delimiter
+        let dynamicSuffix = '';
+        if (name === SEARCH_NAME) {
+            const treeOverview = getTreeOverview();
+            if (treeOverview) dynamicSuffix += treeOverview;
+        }
         if (_trackerListCache && (name === SEARCH_NAME || name === UPDATE_NAME)) {
-            registrationDef.description = registrationDef.description + _trackerListCache;
+            dynamicSuffix += _trackerListCache;
+        }
+        if (dynamicSuffix) {
+            registrationDef.description = registrationDef.description + DYNAMIC_DELIMITER + dynamicSuffix;
         }
 
         // Wrap action with confirmation gate for confirmable tools

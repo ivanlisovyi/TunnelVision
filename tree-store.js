@@ -267,7 +267,7 @@ export function getEntriesForNodes(root, nodeIds) {
 }
 
 /** Default settings values. Adding a new setting = add one line here. */
-const SETTING_DEFAULTS = {
+export const SETTING_DEFAULTS = {
     globalEnabled: true,
     trees: {},
     enabledLorebooks: {},
@@ -276,10 +276,12 @@ const SETTING_DEFAULTS = {
     connectionProfile: null,
     disabledTools: {},
     searchMode: 'traversal',
+    collapsedDepth: 2,
     recurseLimit: 5,
     enableVectorDedup: false,
     vectorDedupThreshold: 0.85,
     llmBuildDetail: 'lite',
+    treeGranularity: 0,
     llmChunkTokens: 30000,
     commandsEnabled: true,
     commandPrefix: '!',
@@ -289,7 +291,17 @@ const SETTING_DEFAULTS = {
     multiBookMode: 'unified',
     trackerUids: {},
     mandatoryTools: false,
+    mandatoryPromptPosition: 'in_chat',
+    mandatoryPromptDepth: 1,
+    mandatoryPromptRole: 'system',
+    mandatoryPromptText: '[IMPORTANT INSTRUCTION: You MUST use at least one TunnelVision tool call this turn. Before responding to the user, search the lorebook for relevant context using TunnelVision_Search. If important new information emerged in the conversation, also use TunnelVision_Remember to save it. Do NOT skip tool calls — they are mandatory every generation.]',
     notebookEnabled: true,
+    notebookPromptPosition: 'in_chat',
+    notebookPromptDepth: 1,
+    notebookPromptRole: 'system',
+    selectiveRetrieval: false,
+    ephemeralResults: false,
+    ephemeralToolFilter: ['TunnelVision_Search', 'TunnelVision_Summarize', 'TunnelVision_MergeSplit'],
     stealthMode: false,
     autoHideSummarized: true,
     passthroughConstant: true,

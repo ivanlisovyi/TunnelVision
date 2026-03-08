@@ -193,16 +193,17 @@ function buildUnifiedTreeOverview() {
 
 /**
  * Build a unified collapsed-tree overview merging all active lorebook trees.
+ * @param {number} [maxDepth=Infinity]
  * @returns {string}
  */
-function buildUnifiedCollapsedOverview() {
+function buildUnifiedCollapsedOverview(maxDepth = Infinity) {
     const activeBooks = getActiveTunnelVisionBooks();
     if (activeBooks.length === 0) return '';
 
     if (activeBooks.length === 1) {
         const tree = getTree(activeBooks[0]);
         if (!tree || !tree.root) return '';
-        return `Lorebook: ${activeBooks[0]}\n` + formatCollapsedNode(tree.root, 0, true);
+        return `Lorebook: ${activeBooks[0]}\n` + formatCollapsedNode(tree.root, 0, true, maxDepth);
     }
 
     let overview = 'Unified Knowledge Tree (all lorebooks merged):\n';
@@ -211,7 +212,7 @@ function buildUnifiedCollapsedOverview() {
         if (!tree || !tree.root) continue;
         // Show each book's children at the top level
         for (const child of (tree.root.children || [])) {
-            overview += formatCollapsedNode(child, 1);
+            overview += formatCollapsedNode(child, 1, false, maxDepth);
         }
         if ((tree.root.entryUids || []).length > 0) {
             overview += `  [${tree.root.id}] ${bookName} root (${(tree.root.entryUids || []).length} direct entries)\n`;
@@ -223,12 +224,13 @@ function buildUnifiedCollapsedOverview() {
 // ─── Collapsed Mode Helpers ──────────────────────────────────────
 
 /**
- * Build a full collapsed-tree view showing ALL nodes at ALL levels.
- * The model sees the entire tree structure at once and picks node IDs directly.
+ * Build a full collapsed-tree view showing nodes up to maxDepth levels.
+ * The model sees the tree structure at once and picks node IDs directly.
  * When multiple lorebooks are active, each gets a selectable document-level node.
+ * @param {number} [maxDepth=Infinity]
  * @returns {string}
  */
-function buildCollapsedTreeOverview() {
+function buildCollapsedTreeOverview(maxDepth = Infinity) {
     const activeBooks = getActiveTunnelVisionBooks();
     if (activeBooks.length === 0) return '';
 
@@ -248,22 +250,23 @@ function buildCollapsedTreeOverview() {
         } else {
             overview += `Lorebook: ${bookName}\n`;
         }
-        // Show full tree under this document, indented one level deeper in multi-doc
+        // Show tree under this document, indented one level deeper in multi-doc
         const baseDepth = multiDoc ? 1 : 0;
-        overview += formatCollapsedNode(tree.root, baseDepth, true);
+        overview += formatCollapsedNode(tree.root, baseDepth, true, maxDepth);
         overview += '\n';
     }
     return overview;
 }
 
 /**
- * Recursively format a node and all descendants for collapsed-tree display.
+ * Recursively format a node and descendants for collapsed-tree display.
  * @param {import('../tree-store.js').TreeNode} node
  * @param {number} depth
  * @param {boolean} isRoot
+ * @param {number} [maxDepth=Infinity] - Stop recursing at this depth and show a navigate hint instead
  * @returns {string}
  */
-function formatCollapsedNode(node, depth, isRoot = false) {
+function formatCollapsedNode(node, depth, isRoot = false, maxDepth = Infinity) {
     const indent = '  '.repeat(depth);
     const children = node.children || [];
     const directEntries = (node.entryUids || []).length;
@@ -288,10 +291,18 @@ function formatCollapsedNode(node, depth, isRoot = false) {
         if (node.summary) {
             text += `${indent}  ${node.summary}\n`;
         }
+
+        // Depth-limited: show navigate hint instead of recursing into children
+        if (maxDepth !== Infinity && depth >= maxDepth && children.length > 0) {
+            const subCount = children.length;
+            const totalBelow = totalEntries - directEntries;
+            text += `${indent}  → Navigate into this node to see ${subCount} sub-categories (${totalBelow} entries)\n`;
+            return text;
+        }
     }
 
     for (const child of children) {
-        text += formatCollapsedNode(child, depth + 1);
+        text += formatCollapsedNode(child, depth + 1, false, maxDepth);
     }
 
     return text;
@@ -356,6 +367,88 @@ function pushResolvedEntries(results, seenEntries, bookName, uidMap, uids) {
 }
 
 /**
+ * Build a manifest of entry titles/keys for a node WITHOUT injecting full content.
+ * Used in selective retrieval mode so the model can pick specific entries.
+ * @param {string} nodeId
+ * @returns {Promise<{manifest: string, count: number}>}
+ */
+async function buildEntryManifest(nodeId) {
+    const lines = [];
+    let count = 0;
+    const seen = new Set();
+
+    const resolveFromBook = (bookName, uidMap, uids) => {
+        for (const uid of uids) {
+            const key = `${bookName}:${uid}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const entry = uidMap.get(uid);
+            if (!entry?.content || entry.disable) continue;
+            count++;
+            const title = entry.comment || entry.key?.[0] || `Entry #${uid}`;
+            const keys = (entry.key || []).slice(0, 5).join(', ');
+            const preview = (entry.content || '').substring(0, 120).replace(/\n/g, ' ');
+            lines.push(`  - [UID ${uid}] "${title}" (${bookName})${keys ? ` — keys: ${keys}` : ''}\n    ${preview}${entry.content.length > 120 ? '...' : ''}`);
+        }
+    };
+
+    if (isDocNode(nodeId)) {
+        const bookName = resolveDocNodeBook(nodeId);
+        if (!bookName) return { manifest: '', count: 0 };
+        const tree = getTree(bookName);
+        if (!tree?.root) return { manifest: '', count: 0 };
+        const uids = getAllEntryUids(tree.root);
+        const bookData = await loadWorldInfo(bookName);
+        if (!bookData?.entries) return { manifest: '', count: 0 };
+        resolveFromBook(bookName, buildUidMap(bookData.entries), uids);
+    } else {
+        for (const bookName of getActiveTunnelVisionBooks()) {
+            const tree = getTree(bookName);
+            if (!tree?.root) continue;
+            const node = findNodeById(tree.root, nodeId);
+            if (!node) continue;
+            const uids = getAllEntryUids(node);
+            const bookData = await loadWorldInfo(bookName);
+            if (!bookData?.entries) continue;
+            resolveFromBook(bookName, buildUidMap(bookData.entries), uids);
+        }
+    }
+
+    return { manifest: lines.join('\n'), count };
+}
+
+/**
+ * Resolve specific entries by UID across all active lorebooks.
+ * Used in selective retrieval mode when the model picks entries from the manifest.
+ * @param {number[]} uids
+ * @returns {Promise<string>}
+ */
+async function resolveEntriesByUid(uids) {
+    const results = [];
+    const seen = new Set();
+
+    for (const bookName of getActiveTunnelVisionBooks()) {
+        const bookData = await loadWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+        const uidMap = buildUidMap(bookData.entries);
+
+        for (const uid of uids) {
+            const numUid = Number(uid);
+            if (!isFinite(numUid)) continue;
+            const entry = uidMap.get(numUid);
+            if (!entry?.content || entry.disable) continue;
+            const key = `${bookName}:${numUid}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const title = entry.comment || entry.key?.[0] || `Entry #${numUid}`;
+            results.push(`[Lorebook: ${bookName} | UID: ${numUid} | Title: ${title}]\n${entry.content}`);
+        }
+    }
+
+    return results.join('\n\n');
+}
+
+/**
  * Find which book a node belongs to.
  * Handles both real tree nodes and virtual document-level nodes.
  * @param {string} nodeId
@@ -383,6 +476,53 @@ function findNodeAcrossBooks(nodeId) {
 // ─── Tool Definition ─────────────────────────────────────────────
 
 /**
+ * Build the dynamic tree overview portion of the Search description.
+ * Separated from the static instruction text so prompt overrides don't bake in the tree.
+ * @returns {string} Tree overview text to append to the description, or empty string
+ */
+export function getTreeOverview() {
+    const activeBooks = getActiveTunnelVisionBooks();
+    if (activeBooks.length === 0) return '';
+
+    let hasValidTree = false;
+    for (const bookName of activeBooks) {
+        const tree = getTree(bookName);
+        if (tree && tree.root && ((tree.root.children || []).length > 0 || (tree.root.entryUids || []).length > 0)) {
+            hasValidTree = true;
+            break;
+        }
+    }
+    if (!hasValidTree) return '';
+
+    const settings = getSettings();
+    const searchMode = settings.searchMode || 'traversal';
+    const isCollapsed = searchMode === 'collapsed';
+    const multiBookMode = settings.multiBookMode || 'unified';
+    const useUnified = multiBookMode === 'unified' && activeBooks.length > 1;
+    const collapsedDepth = isCollapsed ? (settings.collapsedDepth ?? 2) : Infinity;
+
+    let treeOverview;
+    if (useUnified) {
+        treeOverview = isCollapsed
+            ? buildUnifiedCollapsedOverview(collapsedDepth)
+            : buildUnifiedTreeOverview();
+    } else {
+        treeOverview = isCollapsed
+            ? buildCollapsedTreeOverview(collapsedDepth)
+            : buildTopLevelOverview();
+    }
+
+    // Cap tree overview to avoid blowing up context window
+    const maxLen = isCollapsed ? 6000 : 4000;
+    if (treeOverview.length > maxLen) {
+        treeOverview = treeOverview.substring(0, maxLen - 100) + '\n  ... (tree truncated, use node IDs to retrieve content)\n';
+    }
+
+    const header = isCollapsed ? '\n\nFull tree index:\n' : '\n\nTop-level tree:\n';
+    return header + treeOverview;
+}
+
+/**
  * Returns the tool definition for ToolManager.registerFunctionTool().
  * @returns {Object|null} Tool definition or null if no valid trees exist
  */
@@ -403,26 +543,11 @@ export function getDefinition() {
     const settings = getSettings();
     const searchMode = settings.searchMode || 'traversal';
     const isCollapsed = searchMode === 'collapsed';
+    const selective = settings.selectiveRetrieval === true;
 
-    const multiBookMode = settings.multiBookMode || 'unified';
-    const useUnified = multiBookMode === 'unified' && activeBooks.length > 1;
-
-    let treeOverview;
-    if (useUnified) {
-        treeOverview = isCollapsed
-            ? buildUnifiedCollapsedOverview()
-            : buildUnifiedTreeOverview();
-    } else {
-        treeOverview = isCollapsed
-            ? buildCollapsedTreeOverview()
-            : buildTopLevelOverview();
-    }
-
-    // Cap description to avoid blowing up context window
-    const maxLen = isCollapsed ? 6000 : 4000;
-    if (treeOverview.length > maxLen) {
-        treeOverview = treeOverview.substring(0, maxLen - 100) + '\n  ... (tree truncated, use node IDs to retrieve content)\n';
-    }
+    const selectiveNote = selective
+        ? '\n\nSELECTIVE RETRIEVAL: When you retrieve a node, you will see a manifest of entry titles and previews instead of full content. Pick the entries you need by their UIDs using entry_uids to get their full content.'
+        : '';
 
     const description = isCollapsed
         ? `Search lorebook knowledge by selecting from the full tree index below. Use this to find relevant world info, character details, lore, or rules for the current scene.
@@ -435,10 +560,7 @@ HOW TO USE (Collapsed-Tree Mode):
 
 TIP: Pick the most specific (deepest) node that matches your need. Retrieving a branch returns ALL descendant entries, which may include irrelevant content.
 
-CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword across ALL active lorebooks. Useful when you're not sure which category something is in, or need to find a specific character/place/item by name.
-
-Full tree index:
-${treeOverview}`
+CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword across ALL active lorebooks. Useful when you're not sure which category something is in, or need to find a specific character/place/item by name.${selectiveNote}`
         : `Search lorebook knowledge by navigating a hierarchical tree. Use this to find relevant world info, character details, lore, or rules for the current scene.
 
 HOW TO USE (Traversal Mode):
@@ -446,10 +568,18 @@ HOW TO USE (Traversal Mode):
 2. If the selected node has sub-categories, call again with that node_id to go deeper
 3. When you find the right category, use action "retrieve" to get the actual content
 
-CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword across ALL active lorebooks. Useful when you're not sure which category something is in, or need to find a specific character/place/item by name.
+CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword across ALL active lorebooks. Useful when you're not sure which category something is in, or need to find a specific character/place/item by name.${selectiveNote}`;
 
-Top-level tree:
-${treeOverview}`;
+    // Entry UIDs parameter for selective retrieval
+    const entryUidsParam = selective
+        ? {
+            entry_uids: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'Specific entry UIDs to retrieve full content for. Use after seeing the entry manifest from a retrieve call.',
+            },
+        }
+        : {};
 
     // Collapsed mode: node_ids accepts multiple IDs in one call
     const parameters = isCollapsed
@@ -479,6 +609,7 @@ ${treeOverview}`;
                     type: 'string',
                     description: 'Brief explanation of why these nodes are relevant to the current scene.',
                 },
+                ...entryUidsParam,
             },
         }
         : {
@@ -502,6 +633,7 @@ ${treeOverview}`;
                     type: 'string',
                     description: 'Brief explanation of why this branch is relevant to the current scene.',
                 },
+                ...entryUidsParam,
             },
         };
 
@@ -515,16 +647,21 @@ ${treeOverview}`;
                 console.log(`[TunnelVision] Search | ${args.reasoning}`);
             }
 
+            // Selective retrieval: resolve specific entries by UID
+            if (selective && Array.isArray(args.entry_uids) && args.entry_uids.length > 0) {
+                return handleSelectiveEntryRetrieval(args.entry_uids);
+            }
+
             // Cross-book keyword search
             if (args.action === 'search') {
-                return handleCrossBookSearch(args);
+                return handleCrossBookSearch(args, selective);
             }
 
             // Collapsed mode: support node_ids (array) or node_id (string)
             if (isCollapsed) {
-                return handleCollapsedSearch(args);
+                return handleCollapsedSearch(args, selective);
             }
-            return handleTraversalSearch(args);
+            return handleTraversalSearch(args, selective);
         },
         formatMessage: async (args) => {
             if (args?.action === 'search') return 'Searching across all lorebooks...';
@@ -543,10 +680,26 @@ ${treeOverview}`;
 }
 
 /**
+ * Handle selective entry retrieval: model provides specific UIDs to get full content.
+ * @param {number[]} entryUids
+ * @returns {Promise<string>}
+ */
+async function handleSelectiveEntryRetrieval(entryUids) {
+    const content = await resolveEntriesByUid(entryUids);
+    if (!content) {
+        return `No entries found for UIDs: ${entryUids.join(', ')}. Double-check the UIDs from the manifest — they must be numeric entry UIDs, not node IDs.`;
+    }
+    console.log(`[TunnelVision] Selective retrieval: ${entryUids.length} UID(s) requested`);
+    return content;
+}
+
+/**
  * Handle search in collapsed-tree mode.
  * Supports multi-node retrieval in a single call.
+ * @param {Object} args
+ * @param {boolean} selective - If true, return manifest instead of full content
  */
-async function handleCollapsedSearch(args) {
+async function handleCollapsedSearch(args, selective = false) {
     // Gather all requested node IDs
     let nodeIds = [];
     if (Array.isArray(args.node_ids) && args.node_ids.length > 0) {
@@ -588,11 +741,20 @@ async function handleCollapsedSearch(args) {
             notFound.push(nodeId);
             continue;
         }
-        const content = await resolveNodeEntries(nodeId);
-        if (content) {
-            const entryCount = getAllEntryUids(found.node).length;
-            retrieved.push({ label: found.node.label, count: entryCount });
-            allContent.push(content);
+
+        if (selective) {
+            const { manifest, count } = await buildEntryManifest(nodeId);
+            if (manifest) {
+                retrieved.push({ label: found.node.label, count });
+                allContent.push(`Category: ${found.node.label} (${count} entries)\n${manifest}`);
+            }
+        } else {
+            const content = await resolveNodeEntries(nodeId);
+            if (content) {
+                const entryCount = getAllEntryUids(found.node).length;
+                retrieved.push({ label: found.node.label, count: entryCount });
+                allContent.push(content);
+            }
         }
     }
 
@@ -604,19 +766,24 @@ async function handleCollapsedSearch(args) {
     }
 
     const summary = retrieved.map(r => `"${r.label}" (${r.count})`).join(', ');
-    console.log(`[TunnelVision] Retrieved from ${retrieved.length} node(s): ${summary}`);
+    console.log(`[TunnelVision] Retrieved from ${retrieved.length} node(s): ${summary}${selective ? ' (manifest)' : ''}`);
 
     let response = allContent.join('\n\n');
     if (notFound.length > 0) {
         response += `\n\n[Warning: Node(s) not found: ${notFound.join(', ')}]`;
+    }
+    if (selective) {
+        response += '\n\nTo get full content, call again with entry_uids containing the UIDs you want.';
     }
     return response;
 }
 
 /**
  * Handle search in traversal mode (original step-by-step navigation).
+ * @param {Object} args
+ * @param {boolean} selective - If true, return manifest instead of full content
  */
-async function handleTraversalSearch(args) {
+async function handleTraversalSearch(args, selective = false) {
     if (!args?.node_id) {
         return 'No node_id provided. Select a node from the tree above.';
     }
@@ -650,6 +817,18 @@ async function handleTraversalSearch(args) {
         return response;
     }
 
+    // Selective mode: show manifest instead of full content
+    if (selective) {
+        const { manifest, count } = await buildEntryManifest(args.node_id);
+        if (!manifest) {
+            return `Node "${node.label}" has no entry content. Try a different branch.`;
+        }
+        console.log(`[TunnelVision] Showing manifest for "${node.label}": ${count} entries`);
+        let response = `Category: ${node.label} — ${count} entries found:\n\n${manifest}`;
+        response += '\n\nTo get full content, call again with entry_uids containing the UIDs you want.';
+        return response;
+    }
+
     const content = await resolveNodeEntries(args.node_id);
     if (!content) {
         return `Node "${node.label}" has no entry content. Try a different branch.`;
@@ -672,7 +851,7 @@ const SEARCH_PREVIEW_LEN = 200;
  * Matches against entry title (comment), keywords, and content.
  * Returns matching entries with source book, UID, tree location, and content preview.
  */
-async function handleCrossBookSearch(args) {
+async function handleCrossBookSearch(args, selective = false) {
     const query = (args.query || '').trim();
     if (!query) {
         return 'Search requires a "query" — a keyword or phrase to find across lorebooks.';
@@ -735,7 +914,9 @@ async function handleCrossBookSearch(args) {
         if (r.keys) response += `  Keys: ${r.keys}\n`;
         response += `  ${r.preview}${r.preview.length >= SEARCH_PREVIEW_LEN ? '...' : ''}\n\n`;
     }
-    response += `Use action "retrieve" with node_id to get full content, or Update/Forget with the UID.`;
+    response += selective
+        ? 'To get full entry content, call again with entry_uids containing the UIDs you want. Or use Update/Forget with a UID.'
+        : 'Use action "retrieve" with node_id to get full content, or Update/Forget with the UID.';
     return response;
 }
 

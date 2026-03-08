@@ -23,7 +23,39 @@ import {
     getSettings,
 } from './tree-store.js';
 
-const MAX_ENTRIES_PER_NODE = 10;
+/**
+ * Granularity presets control how aggressively the builder splits entries.
+ * Higher levels = more categories, fewer entries per node = deeper/wider trees.
+ */
+const GRANULARITY_PRESETS = {
+    1: { targetCategories: '3-5', maxEntries: 20, label: 'Minimal' },
+    2: { targetCategories: '5-8', maxEntries: 12, label: 'Moderate' },
+    3: { targetCategories: '8-15', maxEntries: 8, label: 'Detailed' },
+    4: { targetCategories: '12-20', maxEntries: 5, label: 'Extensive' },
+};
+
+/**
+ * Get the effective granularity level.
+ * Level 0 = auto: picks based on entry count so small lorebooks aren't over-split.
+ * Levels 1-4 = manual override regardless of lorebook size.
+ * @param {number} [entryCount] - Number of entries (used only for auto-detection)
+ * @returns {{ targetCategories: string, maxEntries: number, label: string, level: number }}
+ */
+function getEffectiveGranularity(entryCount = 0) {
+    const settings = getSettings();
+    let level = Number(settings.treeGranularity) || 0;
+
+    if (level === 0) {
+        // Auto: scale splitting based on lorebook size
+        if (entryCount >= 3000) level = 4;
+        else if (entryCount >= 1000) level = 3;
+        else if (entryCount >= 200) level = 2;
+        else level = 1;
+    }
+
+    level = Math.min(4, Math.max(1, level));
+    return { ...GRANULARITY_PRESETS[level], level };
+}
 
 /** Strip thinking/reasoning blocks from LLM responses. */
 const THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
@@ -188,6 +220,38 @@ export async function buildTreeWithLLM(lorebookName, options = {}) {
     return withConnectionProfile(() => _buildTreeWithLLM(lorebookName, options));
 }
 
+/** Default max concurrent LLM calls during build phases. */
+const BUILD_CONCURRENCY = 3;
+
+/**
+ * Run an array of async tasks with bounded concurrency.
+ * @param {Array<() => Promise>} tasks - Factory functions that return promises
+ * @param {number} limit - Max concurrent tasks
+ * @returns {Promise<Array>} Results in order
+ */
+async function runWithConcurrency(tasks, limit = BUILD_CONCURRENCY) {
+    const results = new Array(tasks.length);
+    let nextIdx = 0;
+
+    async function worker() {
+        while (nextIdx < tasks.length) {
+            const idx = nextIdx++;
+            try {
+                results[idx] = await tasks[idx]();
+            } catch (e) {
+                results[idx] = e;
+            }
+        }
+    }
+
+    const workers = [];
+    for (let i = 0; i < Math.min(limit, tasks.length); i++) {
+        workers.push(worker());
+    }
+    await Promise.all(workers);
+    return results;
+}
+
 async function _buildTreeWithLLM(lorebookName, options = {}) {
     const progress = options.onProgress || (() => {});
     const detail_ = options.onDetail || (() => {});
@@ -213,16 +277,14 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
 
     // Format all entries and split into chunks with overfill
     const chunks = chunkEntries(activeEntries, detail, chunkLimit);
-    const totalSteps = chunks.length + 2; // chunks + subdivide + summaries
-    let currentStep = 0;
+    const gran = getEffectiveGranularity(activeEntries.length);
     console.log(`[TunnelVision] Categorizing ${activeEntries.length} entries in ${chunks.length} chunk(s) (limit: ${chunkLimit} chars)`);
+    console.log(`[TunnelVision] Using granularity level ${gran.level} (${gran.label}): ${gran.targetCategories} top-level categories, max ${gran.maxEntries} entries/node`);
 
-    // First chunk: fresh categorization
-    currentStep++;
-    const chunkPct = (i) => Math.round((i / chunks.length) * 60); // 0-60% for chunking
-    progress(`Categorizing chunk 1/${chunks.length}`, chunkPct(0));
+    // First chunk: fresh categorization (must run alone to establish categories)
+    progress(`Categorizing chunk 1/${chunks.length}`, 0);
     detail_(`${activeEntries.length} entries across ${chunks.length} chunk(s)`);
-    const firstPrompt = buildCategorizationPrompt(lorebookName, chunks[0]);
+    const firstPrompt = buildCategorizationPrompt(lorebookName, chunks[0], activeEntries.length);
     const firstResponse = await generateRaw({
         prompt: firstPrompt,
         systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
@@ -232,22 +294,32 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
     const allUids = activeEntries.map(e => e.uid);
     const tree = await parseLLMTreeResponse(lorebookName, firstResponse, allUids);
 
-    // Subsequent chunks: merge into existing categories
-    for (let i = 1; i < chunks.length; i++) {
-        currentStep++;
-        progress(`Categorizing chunk ${i + 1}/${chunks.length}`, chunkPct(i));
+    // Subsequent chunks: run in parallel — each gets the same category snapshot
+    if (chunks.length > 1) {
         const existingCategories = extractCategoryLabels(tree.root);
-        const contPrompt = buildContinuationPrompt(lorebookName, chunks[i], existingCategories);
-        try {
-            const contResponse = await generateRaw({
-                prompt: contPrompt,
-                systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
+        const chunkTasks = [];
+        for (let i = 1; i < chunks.length; i++) {
+            const chunkIdx = i;
+            chunkTasks.push(() => {
+                progress(`Categorizing chunks (${chunkIdx + 1}/${chunks.length})`, Math.round((chunkIdx / chunks.length) * 60));
+                const contPrompt = buildContinuationPrompt(lorebookName, chunks[chunkIdx], existingCategories, activeEntries.length);
+                return generateRaw({
+                    prompt: contPrompt,
+                    systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
+                });
             });
-            if (contResponse) {
-                mergeLLMResponse(tree, contResponse, allUids);
+        }
+
+        const chunkResults = await runWithConcurrency(chunkTasks, BUILD_CONCURRENCY);
+
+        // Merge results sequentially (merging is cheap, just node assignment)
+        for (let i = 0; i < chunkResults.length; i++) {
+            const resp = chunkResults[i];
+            if (resp && typeof resp === 'string') {
+                mergeLLMResponse(tree, resp, allUids);
+            } else if (resp instanceof Error) {
+                console.warn(`[TunnelVision] Chunk ${i + 2}/${chunks.length} categorization failed:`, resp);
             }
-        } catch (e) {
-            console.warn(`[TunnelVision] Chunk ${i + 1}/${chunks.length} categorization failed:`, e);
         }
     }
 
@@ -262,18 +334,16 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
     saveTree(lorebookName, tree);
     console.log('[TunnelVision] Chunked categorization complete, saved intermediate tree.');
 
-    // PageIndex pattern: recursively subdivide large nodes
-    currentStep++;
+    // PageIndex pattern: recursively subdivide large nodes (parallel siblings)
     progress('Subdividing large nodes…', 65);
-    detail_('Splitting categories with 10+ entries into sub-categories');
-    await subdivideLargeNodes(tree.root, lorebookName);
+    detail_(`Splitting categories with ${gran.maxEntries}+ entries (granularity: ${gran.label})`);
+    await subdivideLargeNodes(tree.root, bookData, activeEntries.length);
     saveTree(lorebookName, tree);
 
-    // PageIndex pattern: generate per-node summaries from actual content
-    currentStep++;
+    // PageIndex pattern: generate per-node summaries (parallel with batching)
     progress('Generating summaries…', 80);
     detail_('LLM writing descriptions for each category');
-    await _generateSummariesForTree(tree.root, lorebookName);
+    await _generateSummariesForTree(tree.root, lorebookName, true, bookData);
 
     saveTree(lorebookName, tree);
     return tree;
@@ -343,10 +413,12 @@ function extractCategoryLabels(root) {
  * @param {string[]} existingCategories
  * @returns {string}
  */
-function buildContinuationPrompt(lorebookName, entries, existingCategories) {
+function buildContinuationPrompt(lorebookName, entries, existingCategories, totalEntryCount = 0) {
     const detail = getSettings().llmBuildDetail || 'full';
     const entryList = entries.map(e => `  - ${formatEntryForLLM(e, detail)}`).join('\n');
     const catList = existingCategories.map(c => `  - ${c}`).join('\n');
+    const gran = getEffectiveGranularity(totalEntryCount);
+    const subCatHint = gran.level >= 3 ? ' Prefer creating new sub-categories over placing entries in broad existing ones.' : '';
 
     return `You are continuing to organize a lorebook called "${lorebookName}". Previous entries have already been categorized.
 
@@ -356,7 +428,7 @@ ${catList}
 Here are the NEW entries to categorize:
 ${entryList}
 
-Assign each entry to an existing category, or create new categories if none fit. Every entry UID must appear exactly once.
+Assign each entry to an existing category, or create new categories if none fit.${subCatHint} Every entry UID must appear exactly once.
 
 Respond with ONLY valid JSON in this exact format:
 {
@@ -453,51 +525,113 @@ function mergeLLMResponse(tree, response, validUids) {
  */
 export async function generateSummariesForTree(node, lorebookName, _isRoot = true) {
     if (_isRoot) {
-        return withConnectionProfile(() => _generateSummariesForTree(node, lorebookName, true));
+        return withConnectionProfile(() => _generateSummariesForTree(node, lorebookName, true, null));
     }
-    return _generateSummariesForTree(node, lorebookName, _isRoot);
+    return _generateSummariesForTree(node, lorebookName, _isRoot, null);
 }
 
-async function _generateSummariesForTree(node, lorebookName, _isRoot = true) {
-    const bookData = await loadWorldInfo(lorebookName);
+/**
+ * Internal summary generator — batches nodes and runs in parallel.
+ * @param {import('./tree-store.js').TreeNode} rootNode
+ * @param {string} lorebookName
+ * @param {boolean} _isRoot
+ * @param {Object} [cachedBookData] - Pre-loaded book data to avoid redundant loads
+ */
+async function _generateSummariesForTree(rootNode, lorebookName, _isRoot = true, cachedBookData = null) {
+    const bookData = cachedBookData || await loadWorldInfo(lorebookName);
     if (!bookData || !bookData.entries) return;
 
     const settings = getSettings();
     const detail = settings.llmBuildDetail || 'full';
 
-    // Skip root node — it's just a container, not a real category
-    if (!_isRoot) {
-        const allUids = getAllEntryUids(node);
-        if (allUids.length > 0) {
+    // Collect all non-root nodes that need summaries
+    const nodesToSummarize = [];
+    function collectNodes(node, isRoot) {
+        if (!isRoot) {
+            const uids = getAllEntryUids(node);
+            if (uids.length > 0) nodesToSummarize.push(node);
+        }
+        for (const child of (node.children || [])) collectNodes(child, false);
+    }
+    collectNodes(rootNode, true);
+
+    if (nodesToSummarize.length === 0) {
+        if (_isRoot) await generateBookSummary(rootNode, lorebookName);
+        return;
+    }
+
+    // Batch nodes into groups of up to 5 for fewer LLM calls
+    const BATCH_SIZE = 5;
+    const batches = [];
+    for (let i = 0; i < nodesToSummarize.length; i += BATCH_SIZE) {
+        batches.push(nodesToSummarize.slice(i, i + BATCH_SIZE));
+    }
+
+    console.log(`[TunnelVision] Generating summaries: ${nodesToSummarize.length} nodes in ${batches.length} batch(es)`);
+
+    // Build tasks for each batch
+    const batchTasks = batches.map((batch, batchIdx) => () => {
+        // Build a multi-node summary prompt
+        const sections = batch.map(node => {
+            const uids = getAllEntryUids(node);
             const entryTexts = [];
-            for (const uid of allUids.slice(0, 15)) {
+            for (const uid of uids.slice(0, 10)) {
                 const entry = findEntryByUid(bookData.entries, uid);
                 if (entry) {
-                    entryTexts.push(`- ${formatEntryForLLM(entry, detail, { includeUid: false, contentLimit: 200 })}`);
+                    entryTexts.push(`  - ${formatEntryForLLM(entry, detail, { includeUid: false })}`);
                 }
             }
+            return `Category "${node.label}" (${uids.length} entries):\n${entryTexts.join('\n')}`;
+        });
 
-            if (entryTexts.length > 0) {
-                try {
-                    const summary = await generateRaw({
-                        prompt: `Entries from lorebook category "${node.label}":\n${entryTexts.join('\n')}\n\nWrite a brief 1-2 sentence description of what topics and information these entries cover. Return ONLY the description.`,
-                        systemPrompt: 'You are a summarization assistant. Return only the requested description, no commentary.',
-                    });
-                    if (summary) node.summary = summary.trim();
-                } catch (e) {
-                    console.warn(`[TunnelVision] Summary generation failed for "${node.label}":`, e);
+        const prompt = batch.length === 1
+            ? `Entries from lorebook category "${batch[0].label}":\n${sections[0].split('\n').slice(1).join('\n')}\n\nWrite a brief 1-2 sentence description of what topics and information these entries cover. Return ONLY the description.`
+            : `Write a brief 1-2 sentence summary for EACH of the following lorebook categories. Return ONLY a JSON object mapping category name to its summary.\n\n${sections.join('\n\n')}\n\nRespond with ONLY JSON: { "Category Name": "summary text", ... }`;
+
+        return generateRaw({
+            prompt,
+            systemPrompt: 'You are a summarization assistant. Return only the requested output, no commentary.',
+        }).then(response => ({ batchIdx, batch, response }))
+            .catch(e => {
+                console.warn(`[TunnelVision] Summary batch ${batchIdx + 1} failed:`, e);
+                return { batchIdx, batch, response: null };
+            });
+    });
+
+    // Run batches in parallel with concurrency limit
+    const results = await runWithConcurrency(batchTasks, BUILD_CONCURRENCY);
+
+    // Parse results and assign summaries to nodes
+    for (const result of results) {
+        if (!result || result instanceof Error || !result.response) continue;
+        const { batch, response } = result;
+
+        if (batch.length === 1) {
+            // Single-node batch: response is the summary directly
+            batch[0].summary = response.trim();
+        } else {
+            // Multi-node batch: parse JSON mapping
+            try {
+                const jsonMatch = response.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    for (const node of batch) {
+                        // Try exact match, then case-insensitive
+                        const summary = parsed[node.label]
+                            || Object.entries(parsed).find(([k]) => k.toLowerCase() === node.label.toLowerCase())?.[1];
+                        if (summary) node.summary = String(summary).trim();
+                    }
                 }
+            } catch (e) {
+                console.warn('[TunnelVision] Failed to parse batched summary response:', e);
+                // Fallback: if only one entry in response, try to assign to first unsummarized node
             }
         }
     }
 
-    for (const child of node.children) {
-        await _generateSummariesForTree(child, lorebookName, false);
-    }
-
-    // After all children are summarized, generate a book-level summary for the root
-    if (_isRoot && node.children.length > 0) {
-        await generateBookSummary(node, lorebookName);
+    // Generate book-level summary after all nodes are done
+    if (_isRoot && rootNode.children.length > 0) {
+        await generateBookSummary(rootNode, lorebookName);
     }
 }
 
@@ -507,7 +641,7 @@ async function _generateSummariesForTree(node, lorebookName, _isRoot = true) {
  */
 async function generateBookSummary(rootNode, lorebookName) {
     // Don't overwrite user-set description
-    const { getBookDescription } = await import('./tree-store.js');
+    const { getBookDescription, setBookDescription } = await import('./tree-store.js');
     if (getBookDescription(lorebookName)) return;
 
     const categoryList = rootNode.children
@@ -524,6 +658,7 @@ async function generateBookSummary(rootNode, lorebookName) {
         });
         if (summary) {
             rootNode.summary = summary.trim();
+            setBookDescription(lorebookName, rootNode.summary);
             console.log(`[TunnelVision] Generated book summary for "${lorebookName}": ${rootNode.summary}`);
         }
     } catch (e) {
@@ -534,20 +669,26 @@ async function generateBookSummary(rootNode, lorebookName) {
 /**
  * Recursively subdivide nodes with too many entries.
  * Mirrors PageIndex's process_large_node_recursively().
+ * Sibling nodes are subdivided in parallel for speed.
+ * @param {import('./tree-store.js').TreeNode} node
+ * @param {Object} bookData - Cached lorebook data (loaded once, passed through)
+ * @param {number} totalEntryCount
  */
-async function subdivideLargeNodes(node, lorebookName) {
-    const bookData = await loadWorldInfo(lorebookName);
+async function subdivideLargeNodes(node, bookData, totalEntryCount = 0) {
     if (!bookData || !bookData.entries) return;
 
-    if (node.entryUids.length > MAX_ENTRIES_PER_NODE && node.children.length === 0) {
+    const maxPerNode = getEffectiveGranularity(totalEntryCount).maxEntries;
+    if (node.entryUids.length > maxPerNode && node.children.length === 0) {
         const detail = getSettings().llmBuildDetail || 'full';
         const nodeEntries = node.entryUids.map(uid => findEntryByUid(bookData.entries, uid)).filter(Boolean);
 
-        if (nodeEntries.length > MAX_ENTRIES_PER_NODE) {
+        if (nodeEntries.length > maxPerNode) {
             try {
+                const gran = getEffectiveGranularity(totalEntryCount);
+                const subCatCount = Math.min(6, Math.ceil(nodeEntries.length / gran.maxEntries));
                 const entryList = nodeEntries.map(e => `  ${formatEntryForLLM(e, detail)}`).join('\n');
                 const response = await generateRaw({
-                    prompt: `You have ${nodeEntries.length} lorebook entries in "${node.label}". Split into 2-4 sub-categories.\n\nEntries:\n${entryList}\n\nRespond ONLY with JSON: { "subcategories": [{ "label": "Name", "entries": [uid1, uid2] }] }`,
+                    prompt: `You have ${nodeEntries.length} lorebook entries in "${node.label}". Split into 2-${subCatCount} sub-categories.\n\nEntries:\n${entryList}\n\nRespond ONLY with JSON: { "subcategories": [{ "label": "Name", "entries": [uid1, uid2] }] }`,
                     systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
                 });
                 if (response) {
@@ -579,13 +720,16 @@ async function subdivideLargeNodes(node, lorebookName) {
         }
     }
 
-    for (const child of node.children) {
-        await subdivideLargeNodes(child, lorebookName);
+    // Recurse into children in parallel — sibling nodes are independent
+    if (node.children.length > 0) {
+        const childTasks = node.children.map(child => () => subdivideLargeNodes(child, bookData, totalEntryCount));
+        await runWithConcurrency(childTasks, BUILD_CONCURRENCY);
     }
 }
 
-function buildCategorizationPrompt(lorebookName, entries) {
+function buildCategorizationPrompt(lorebookName, entries, totalEntryCount = 0) {
     const detail = getSettings().llmBuildDetail || 'full';
+    const gran = getEffectiveGranularity(totalEntryCount);
     const entryList = entries.map(e => `  - ${formatEntryForLLM(e, detail)}`).join('\n');
 
     return `You are organizing a lorebook called "${lorebookName}" into a hierarchical tree for efficient retrieval.
@@ -593,7 +737,7 @@ function buildCategorizationPrompt(lorebookName, entries) {
 Here are the entries:
 ${entryList}
 
-Create a JSON hierarchy that groups these entries into logical categories. Use 2-4 top-level categories, each with optional sub-categories. Every entry UID must appear exactly once.
+Create a JSON hierarchy that groups these entries into logical categories. Use ${gran.targetCategories} top-level categories, each with sub-categories where natural. Aim for no more than ${gran.maxEntries} entries per leaf node. Every entry UID must appear exactly once.
 
 Respond with ONLY valid JSON in this exact format:
 {

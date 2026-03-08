@@ -18,7 +18,8 @@
  *   auto-summary.js — Automatic summary injection every N messages.
  */
 
-import { eventSource, event_types, extension_prompt_types, setExtensionPrompt } from '../../../../script.js';
+import { eventSource, event_types, extension_prompt_types, extension_prompt_roles, setExtensionPrompt } from '../../../../script.js';
+import { getContext } from '../../../st-context.js';
 import { ToolManager } from '../../../tool-calling.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
@@ -147,10 +148,78 @@ const TV_PROMPT_KEY = 'tunnelvision_mandatory';
 const TV_NOTEBOOK_KEY = 'tunnelvision_notebook';
 
 /**
+ * Map a position setting string to the ST extension_prompt_types enum.
+ */
+function mapPositionSetting(val) {
+    switch (val) {
+        case 'in_prompt': return extension_prompt_types.IN_PROMPT;
+        case 'in_chat':
+        default: return extension_prompt_types.IN_CHAT;
+    }
+}
+
+/**
+ * Map a role setting string to the ST extension_prompt_roles enum.
+ */
+function mapRoleSetting(val) {
+    switch (val) {
+        case 'user': return extension_prompt_roles.USER;
+        case 'assistant': return extension_prompt_roles.ASSISTANT;
+        case 'system':
+        default: return extension_prompt_roles.SYSTEM;
+    }
+}
+
+/**
+ * Strip TunnelVision tool results from older chat messages to save context tokens.
+ * Only strips tools in the user-configured filter list. Notebook is always immune
+ * (its results are action confirmations, not retrievable data).
+ * Only strips from messages before the last user message (current turn is preserved).
+ * Mutates chat data permanently — results cannot be recovered.
+ */
+function stripOldToolResults() {
+    const settings = getSettings();
+    const filterList = settings.ephemeralToolFilter;
+    if (!Array.isArray(filterList) || filterList.length === 0) return;
+
+    // Notebook is always immune — it stores action confirmations the model needs
+    const strippable = new Set(filterList.filter(n => n !== 'TunnelVision_Notebook'));
+    if (strippable.size === 0) return;
+
+    const context = getContext();
+    const chat = context.chat;
+    if (!chat || chat.length < 2) return;
+
+    // Find the last user message index — everything before it is "old"
+    let lastUserIdx = -1;
+    for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i].is_user) { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx < 1) return;
+
+    let stripped = 0;
+    for (let i = 0; i < lastUserIdx; i++) {
+        const invocations = chat[i]?.extra?.tool_invocations;
+        if (!Array.isArray(invocations)) continue;
+
+        for (const inv of invocations) {
+            if (!inv.name || !strippable.has(inv.name)) continue;
+            if (!inv.result || inv.result === ' ') continue;
+            inv.result = ' ';
+            stripped++;
+        }
+    }
+
+    if (stripped > 0) {
+        console.log(`[TunnelVision] Ephemeral mode: cleared ${stripped} old tool result(s) from context`);
+    }
+}
+
+/**
  * Inject or clear the mandatory tool call system prompt before each generation.
  * Runs before ST assembles the next request, so it can validate TV tool state first.
  */
-async function onGenerationStarted() {
+async function onGenerationStarted(type, opts) {
     const settings = getSettings();
     let runtimeState = null;
 
@@ -158,20 +227,38 @@ async function onGenerationStarted() {
         runtimeState = await preflightToolRuntimeState({ repair: true, reason: 'generation', log: true });
     }
 
-    // Mandatory tool call instruction
+    // Ephemeral mode: strip old TunnelVision tool results from context
+    if (settings.ephemeralResults) {
+        stripOldToolResults();
+    }
+
+    // Detect recursive tool-call passes: if the last chat message is a tool invocation,
+    // ST is re-running Generate() after processing tool results. Skip mandatory injection
+    // to prevent infinite tool-call loops (the model sees "you MUST call a tool" every pass).
+    const context = getContext();
+    const lastMsg = context.chat?.[context.chat.length - 1];
+    const isRecursiveToolPass = lastMsg?.extra?.tool_invocations != null;
+
+    // Mandatory tool call instruction (only on first pass, not recursive)
+    const mandatoryPosition = mapPositionSetting(settings.mandatoryPromptPosition);
+    const mandatoryDepth = settings.mandatoryPromptDepth ?? 1;
+    const mandatoryRole = mapRoleSetting(settings.mandatoryPromptRole);
+
     if (
-        settings.globalEnabled !== false
+        !isRecursiveToolPass
+        && settings.globalEnabled !== false
         && settings.mandatoryTools
         && runtimeState?.activeBooks?.length > 0
         && runtimeState.expectedToolNames.length > 0
         && runtimeState.eligibleToolNames.length > 0
     ) {
-        const prompt = `[IMPORTANT INSTRUCTION: You MUST use at least one TunnelVision tool call this turn. Before responding to the user, search the lorebook for relevant context using TunnelVision_Search. If important new information emerged in the conversation, also use TunnelVision_Remember to save it. Do NOT skip tool calls — they are mandatory every generation.]`;
-        setExtensionPrompt(TV_PROMPT_KEY, prompt, extension_prompt_types.IN_PROMPT, 0);
+        const prompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use at least one TunnelVision tool call this turn.]';
+        setExtensionPrompt(TV_PROMPT_KEY, prompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
     } else {
-        setExtensionPrompt(TV_PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+        setExtensionPrompt(TV_PROMPT_KEY, '', mandatoryPosition, mandatoryDepth, false, mandatoryRole);
         if (
-            settings.globalEnabled !== false
+            !isRecursiveToolPass
+            && settings.globalEnabled !== false
             && settings.mandatoryTools
             && runtimeState
             && runtimeState.activeBooks.length > 0
@@ -183,11 +270,15 @@ async function onGenerationStarted() {
     }
 
     // Inject notebook contents every turn (if enabled and notes exist)
+    const notebookPosition = mapPositionSetting(settings.notebookPromptPosition);
+    const notebookDepth = settings.notebookPromptDepth ?? 1;
+    const notebookRole = mapRoleSetting(settings.notebookPromptRole);
+
     if (settings.globalEnabled !== false && settings.notebookEnabled !== false) {
         const notebookPrompt = buildNotebookPrompt();
-        setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, extension_prompt_types.IN_PROMPT, 0);
+        setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, notebookPosition, notebookDepth, false, notebookRole);
     } else {
-        setExtensionPrompt(TV_NOTEBOOK_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+        setExtensionPrompt(TV_NOTEBOOK_KEY, '', notebookPosition, notebookDepth, false, notebookRole);
     }
 }
 
