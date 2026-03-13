@@ -11,8 +11,9 @@ import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 
 const TV_AUTOSUMMARY_KEY = 'tunnelvision_autosummary';
+const TV_COUNTER_META_KEY = 'tunnelvision_autosummary_count';
 
-/** Message count since last summary, keyed by chatId */
+/** Message count since last summary, keyed by chatId (in-memory cache). */
 const counters = new Map();
 const pendingSummaries = new Map();
 
@@ -48,6 +49,49 @@ function getChatId() {
     }
 }
 
+/**
+ * Read the persisted counter from chat metadata.
+ * Falls back to 0 if metadata is unavailable.
+ */
+function loadPersistedCount() {
+    try {
+        const val = getContext().chatMetadata?.[TV_COUNTER_META_KEY];
+        return typeof val === 'number' ? val : 0;
+    } catch {
+        return 0;
+    }
+}
+
+/**
+ * Persist the counter to chat metadata so it survives page refreshes.
+ */
+function persistCount(count) {
+    try {
+        const context = getContext();
+        if (context.chatMetadata) {
+            context.chatMetadata[TV_COUNTER_META_KEY] = count;
+            context.saveMetadataDebounced?.();
+        }
+    } catch {
+        // Metadata not available — in-memory only
+    }
+}
+
+/**
+ * Get the current counter for a chat, syncing from persisted metadata
+ * if the in-memory cache is missing (e.g. after page refresh).
+ */
+function getCount(chatId) {
+    if (counters.has(chatId)) {
+        return counters.get(chatId);
+    }
+    const persisted = loadPersistedCount();
+    if (persisted > 0) {
+        counters.set(chatId, persisted);
+    }
+    return persisted;
+}
+
 function onMessageReceived() {
     const settings = getSettings();
     if (!settings.autoSummaryEnabled || settings.globalEnabled === false) return;
@@ -55,8 +99,9 @@ function onMessageReceived() {
     const chatId = getChatId();
     if (!chatId) return;
 
-    const count = (counters.get(chatId) || 0) + 1;
+    const count = getCount(chatId) + 1;
     counters.set(chatId, count);
+    persistCount(count);
 }
 
 function onGenerationForAutoSummary() {
@@ -67,9 +112,12 @@ function onGenerationForAutoSummary() {
     }
 
     const chatId = getChatId();
-    if (!chatId) return;
+    if (!chatId) {
+        clearPrompt();
+        return;
+    }
 
-    const count = counters.get(chatId) || 0;
+    const count = getCount(chatId);
     const interval = settings.autoSummaryInterval || 20;
     const activeBooks = getActiveTunnelVisionBooks();
     if (activeBooks.length === 0) {
@@ -93,6 +141,13 @@ function onGenerationForAutoSummary() {
 
 function onChatChanged() {
     clearPrompt();
+    const chatId = getChatId();
+    if (chatId && !counters.has(chatId)) {
+        const persisted = loadPersistedCount();
+        if (persisted > 0) {
+            counters.set(chatId, persisted);
+        }
+    }
 }
 
 function clearPrompt() {
@@ -106,13 +161,14 @@ export function markAutoSummaryComplete() {
     counters.set(chatId, 0);
     pendingSummaries.delete(chatId);
     clearPrompt();
+    persistCount(0);
 }
 
 /** Get the current counter for the active chat. Used by UI. */
 export function getAutoSummaryCount() {
     const chatId = getChatId();
     if (!chatId) return 0;
-    return counters.get(chatId) || 0;
+    return getCount(chatId);
 }
 
 /** Reset the counter for the active chat. Used by UI and diagnostics. */
@@ -123,4 +179,5 @@ export function resetAutoSummaryCount() {
     counters.set(chatId, 0);
     pendingSummaries.delete(chatId);
     clearPrompt();
+    persistCount(0);
 }

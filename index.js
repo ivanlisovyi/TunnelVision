@@ -23,7 +23,7 @@ import { getContext } from '../../../st-context.js';
 import { ToolManager } from '../../../tool-calling.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
-import { preflightToolRuntimeState, registerTools } from './tool-registry.js';
+import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { buildNotebookPrompt } from './tools/notebook.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
@@ -218,14 +218,16 @@ function stripOldToolResults() {
 /**
  * Inject or clear the mandatory tool call system prompt before each generation.
  * Runs before ST assembles the next request, so it can validate TV tool state first.
+ *
+ * IMPORTANT: All prompt injection and chat mutation is done synchronously (before
+ * any await) so it takes effect even if ST's event emitter doesn't await async
+ * handlers. The async preflight runs afterward as a background repair for future
+ * generations.
  */
 async function onGenerationStarted(type, opts) {
     const settings = getSettings();
-    let runtimeState = null;
 
-    if (settings.globalEnabled !== false) {
-        runtimeState = await preflightToolRuntimeState({ repair: true, reason: 'generation', log: true });
-    }
+    // ── Synchronous section — must complete before ST builds the prompt ──
 
     // Ephemeral mode: strip old TunnelVision tool results from context
     if (settings.ephemeralResults) {
@@ -237,36 +239,26 @@ async function onGenerationStarted(type, opts) {
     // to prevent infinite tool-call loops (the model sees "you MUST call a tool" every pass).
     const context = getContext();
     const lastMsg = context.chat?.[context.chat.length - 1];
-    const isRecursiveToolPass = lastMsg?.extra?.tool_invocations != null;
+    const invocations = lastMsg?.extra?.tool_invocations;
+    const isRecursiveToolPass = Array.isArray(invocations) && invocations.length > 0;
 
     // Mandatory tool call instruction (only on first pass, not recursive)
     const mandatoryPosition = mapPositionSetting(settings.mandatoryPromptPosition);
     const mandatoryDepth = settings.mandatoryPromptDepth ?? 1;
     const mandatoryRole = mapRoleSetting(settings.mandatoryPromptRole);
 
+    const activeBooks = getActiveTunnelVisionBooks();
+
     if (
         !isRecursiveToolPass
         && settings.globalEnabled !== false
         && settings.mandatoryTools
-        && runtimeState?.activeBooks?.length > 0
-        && runtimeState.expectedToolNames.length > 0
-        && runtimeState.eligibleToolNames.length > 0
+        && activeBooks.length > 0
     ) {
         const prompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use at least one TunnelVision tool call this turn.]';
         setExtensionPrompt(TV_PROMPT_KEY, prompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
     } else {
         setExtensionPrompt(TV_PROMPT_KEY, '', mandatoryPosition, mandatoryDepth, false, mandatoryRole);
-        if (
-            !isRecursiveToolPass
-            && settings.globalEnabled !== false
-            && settings.mandatoryTools
-            && runtimeState
-            && runtimeState.activeBooks.length > 0
-            && runtimeState.expectedToolNames.length > 0
-            && runtimeState.eligibleToolNames.length === 0
-        ) {
-            console.warn('[TunnelVision] Mandatory tools enabled, but no eligible TunnelVision tools are available for this generation.');
-        }
     }
 
     // Inject notebook contents every turn (if enabled and notes exist)
@@ -279,6 +271,22 @@ async function onGenerationStarted(type, opts) {
         setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, notebookPosition, notebookDepth, false, notebookRole);
     } else {
         setExtensionPrompt(TV_NOTEBOOK_KEY, '', notebookPosition, notebookDepth, false, notebookRole);
+    }
+
+    // ── Async section — background repair, safe to run after prompt is built ──
+
+    if (settings.globalEnabled !== false) {
+        const runtimeState = await preflightToolRuntimeState({ repair: true, reason: 'generation', log: true });
+
+        if (
+            !isRecursiveToolPass
+            && settings.mandatoryTools
+            && runtimeState.activeBooks.length > 0
+            && runtimeState.expectedToolNames.length > 0
+            && runtimeState.eligibleToolNames.length === 0
+        ) {
+            console.warn('[TunnelVision] Mandatory tools enabled, but no eligible TunnelVision tools are available for this generation.');
+        }
     }
 }
 

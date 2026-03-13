@@ -394,22 +394,49 @@ function wrapWithConfirmation(originalAction, displayName) {
     };
 }
 
+/** Guard against overlapping registerTools() calls — a second call waits for the
+ *  first to finish then re-runs, preventing interleaved unregister/register cycles. */
+let _registerLock = null;
+let _registerQueued = false;
+
 /**
  * Register all TunnelVision tools with ToolManager.
  * Each tool's getDefinition() may return null if preconditions aren't met
  * (e.g. Search returns null if no valid trees exist).
  */
 export async function registerTools() {
-    unregisterTools();
+    if (_registerLock) {
+        _registerQueued = true;
+        await _registerLock;
+        if (!_registerQueued) return;
+    }
 
+    let unlock;
+    _registerLock = new Promise(r => { unlock = r; });
+    _registerQueued = false;
+
+    try {
+        await _doRegisterTools();
+    } finally {
+        _registerLock = null;
+        unlock();
+    }
+}
+
+async function _doRegisterTools() {
     const activeBooks = getActiveTunnelVisionBooks();
     if (activeBooks.length === 0) {
         _trackerListCache = '';
+        unregisterTools();
         return;
     }
 
-    // Pre-fetch tracker list for injection into Search and Update descriptions
+    // Pre-fetch tracker list BEFORE unregistering so tools remain available during async I/O
     _trackerListCache = await getTrackerList();
+
+    // Unregister right before the synchronous re-registration loop to minimize
+    // the window where tools are absent.
+    unregisterTools();
 
     const settings = getSettings();
     const disabled = settings.disabledTools || {};
