@@ -5,7 +5,7 @@
  * piggybacks on the next generation by injecting an extension prompt.
  */
 
-import { eventSource, event_types, setExtensionPrompt, extension_prompt_types } from '../../../../script.js';
+import { eventSource, event_types, setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
@@ -131,8 +131,8 @@ function onGenerationForAutoSummary() {
             console.log(`[TunnelVision] Auto-summary pending after ${count} messages`);
         }
 
-        const prompt = `[AUTO-SUMMARY INSTRUCTION: ${count} messages have passed since the last summary. You MUST call TunnelVision_Summarize this turn to create a summary of recent events. Write a descriptive title and thorough summary of what has happened in the last ~${count} messages. After summarizing, continue responding to the user normally.]`;
-        setExtensionPrompt(TV_AUTOSUMMARY_KEY, prompt, extension_prompt_types.IN_PROMPT, 0);
+        const prompt = `[AUTO-SUMMARY REQUIRED — ${count} messages since last summary. You MUST call TunnelVision_Summarize this turn BEFORE responding. Write a descriptive title and thorough summary of what has happened in the last ~${count} messages. This is non-negotiable — call the tool now.]`;
+        setExtensionPrompt(TV_AUTOSUMMARY_KEY, prompt, extension_prompt_types.IN_CHAT, 1, false, extension_prompt_roles.SYSTEM);
         return;
     }
 
@@ -151,7 +151,7 @@ function onChatChanged() {
 }
 
 function clearPrompt() {
-    setExtensionPrompt(TV_AUTOSUMMARY_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+    setExtensionPrompt(TV_AUTOSUMMARY_KEY, '', extension_prompt_types.IN_CHAT, 1, false, extension_prompt_roles.SYSTEM);
 }
 
 export function markAutoSummaryComplete() {
