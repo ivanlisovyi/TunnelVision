@@ -71,6 +71,12 @@ function persistCount(count) {
     } catch {
         // Metadata not available — in-memory only
     }
+
+    // Keep the settings UI in sync
+    try {
+        const el = document.getElementById('tv_auto_summary_count');
+        if (el) el.value = count;
+    } catch { /* UI not ready */ }
 }
 
 function getCount(chatId) {
