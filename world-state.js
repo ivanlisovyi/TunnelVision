@@ -53,13 +53,22 @@ export function buildWorldStatePrompt() {
     const state = getWorldState();
     if (!state?.text) return '';
 
+    const settings = getSettings();
+    const maxChars = settings.worldStateMaxChars || 3000;
+
+    let text = state.text;
+    if (text.length > maxChars) {
+        const cutoff = text.lastIndexOf('\n', maxChars);
+        text = text.substring(0, cutoff > maxChars * 0.5 ? cutoff : maxChars) + '\n[...truncated]';
+    }
+
     return [
         '[Rolling World State — Your maintained memory of the current story.',
         'This is automatically kept up-to-date. Reference it to stay grounded in the scene,',
         'know what\'s happening, and maintain consistency. Do NOT repeat this information',
         'verbatim in your responses — use it to inform your writing.]',
         '',
-        state.text,
+        text,
     ].join('\n');
 }
 

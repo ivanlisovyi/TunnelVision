@@ -37,8 +37,9 @@ export function getWatermark() {
  * Set the last-summarized message ID watermark for the current chat.
  * @param {number} messageId
  */
-function setWatermark(messageId) {
+export function setWatermark(messageId) {
     const context = getContext();
+    if (!context.chatMetadata) return;
     context.chatMetadata[WATERMARK_KEY] = messageId;
     context.saveMetadataDebounced?.();
 }

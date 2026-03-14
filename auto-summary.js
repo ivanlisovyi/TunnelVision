@@ -9,6 +9,7 @@ import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
+import { isProcessorRunning, hasRecentArchive } from './post-turn-processor.js';
 
 const TV_COUNTER_META_KEY = 'tunnelvision_autosummary_count';
 
@@ -118,6 +119,12 @@ function onAiMessageReceived() {
     const count = getCount(chatId);
 
     if (count >= interval) {
+        // Skip if the post-turn processor is currently running or just archived a scene,
+        // to avoid producing a duplicate summary for the same range of messages.
+        if (isProcessorRunning() || hasRecentArchive()) {
+            console.log('[TunnelVision] Auto-summary deferred — post-turn processor active or recently archived');
+            return;
+        }
         runBackgroundSummary(chatId, count).catch(e => {
             console.error('[TunnelVision] Background auto-summary failed:', e);
         });
@@ -192,7 +199,7 @@ async function runBackgroundSummary(chatId, count) {
     const activeBooks = getActiveTunnelVisionBooks();
     if (activeBooks.length === 0) return;
 
-    const { book: lorebook, error } = resolveTargetBook(activeBooks.length === 1 ? activeBooks[0] : activeBooks[0]);
+    const { book: lorebook, error } = resolveTargetBook(activeBooks[0]);
     if (error || !lorebook) {
         console.warn('[TunnelVision] Auto-summary: could not resolve target lorebook:', error);
         return;
@@ -220,7 +227,7 @@ async function runBackgroundSummary(chatId, count) {
         }
 
         const messageCount = Math.min(chat.length, count);
-        const result = await runQuietSummarize(lorebook, chat, messageCount);
+        const result = await runQuietSummarize(lorebook, chat, messageCount, '', { background: true });
         const factsMsg = result.factsCreated > 0 ? ` + ${result.factsCreated} fact(s)` : '';
         toastr.success(`Auto-summary saved: "${result.title}"${factsMsg}`, 'TunnelVision');
     } catch (e) {

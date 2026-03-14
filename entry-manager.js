@@ -50,6 +50,17 @@ export async function getCachedWorldInfo(bookName) {
 }
 
 /**
+ * Synchronous cache-only access to world info. Returns null if not cached.
+ * Use this when you need data synchronously (e.g. in GENERATION_STARTED sync section)
+ * and can tolerate a cache miss on the first turn.
+ * @param {string} bookName
+ * @returns {Object|null}
+ */
+export function getCachedWorldInfoSync(bookName) {
+    return _worldInfoCache.get(bookName) || null;
+}
+
+/**
  * Invalidate the world info cache for a specific book (after writes)
  * or all books (at turn boundaries).
  * @param {string} [bookName] - If omitted, clears entire cache.
@@ -202,7 +213,7 @@ export function escapeHtml(str) {
  * @param {string} [params.nodeId] - Tree node to assign to (defaults to root)
  * @returns {Promise<{uid: number, comment: string, nodeLabel: string}>}
  */
-export async function createEntry(bookName, { content, comment, keys, nodeId, _bookData }) {
+export async function createEntry(bookName, { content, comment, keys, nodeId, _bookData, background = false }) {
     if (!content || !content.trim()) {
         throw new Error('Entry content cannot be empty.');
     }
@@ -213,7 +224,7 @@ export async function createEntry(bookName, { content, comment, keys, nodeId, _b
         content = content.substring(0, MAX_ENTRY_CONTENT_LENGTH);
         console.warn(`[TunnelVision] Entry content truncated to ${MAX_ENTRY_CONTENT_LENGTH} chars for "${comment}"`);
     }
-    if (++_turnEntryCount > MAX_ENTRIES_PER_TURN) {
+    if (!background && ++_turnEntryCount > MAX_ENTRIES_PER_TURN) {
         throw new Error(`Rate limit: maximum ${MAX_ENTRIES_PER_TURN} entries per turn exceeded. Wait for the next generation.`);
     }
 

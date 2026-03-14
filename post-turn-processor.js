@@ -32,6 +32,7 @@ const METADATA_KEY = 'tunnelvision_postturn';
 let _initialized = false;
 let _processorRunning = false;
 let _lastCountedChatLength = 0;
+let _lastArchivedAt = 0;
 
 // ── Persistence ──────────────────────────────────────────────────
 
@@ -96,18 +97,24 @@ function shouldProcess() {
 // ── Tracker Entry Loading ────────────────────────────────────────
 
 async function loadTrackerEntries(activeBooks) {
+    const booksWithTrackers = activeBooks
+        .map(bookName => ({ bookName, uids: getTrackerUids(bookName) }))
+        .filter(b => b.uids.length > 0);
+
+    if (booksWithTrackers.length === 0) return [];
+
+    const bookDataResults = await Promise.all(
+        booksWithTrackers.map(b => getCachedWorldInfo(b.bookName)),
+    );
+
     const trackers = [];
-
-    for (const bookName of activeBooks) {
-        const trackerUids = getTrackerUids(bookName);
-        if (trackerUids.length === 0) continue;
-
-        const bookData = await getCachedWorldInfo(bookName);
+    for (let i = 0; i < booksWithTrackers.length; i++) {
+        const { bookName, uids } = booksWithTrackers[i];
+        const bookData = bookDataResults[i];
         if (!bookData?.entries) continue;
 
         const uidMap = buildUidMap(bookData.entries);
-
-        for (const uid of trackerUids) {
+        for (const uid of uids) {
             const entry = uidMap.get(uid);
             if (!entry || entry.disable) continue;
             trackers.push({
@@ -144,9 +151,7 @@ export async function runPostTurnProcessor(force = false) {
     if (!chat || chat.length < 4) return null;
 
     const chatId = getChatId();
-    const { book: targetBook, error } = resolveTargetBook(
-        activeBooks.length === 1 ? activeBooks[0] : activeBooks[0],
-    );
+    const { book: targetBook, error } = resolveTargetBook(activeBooks[0]);
     if (error || !targetBook) return null;
 
     _processorRunning = true;
@@ -193,6 +198,7 @@ export async function runPostTurnProcessor(force = false) {
             const archiveResult = await archiveScene(targetBook, chat, sceneChange, chatId);
             result.sceneArchived = archiveResult.archived;
             result.errors += archiveResult.errors;
+            if (archiveResult.archived) _lastArchivedAt = Date.now();
         }
 
         if (getChatId() !== chatId) return null;
@@ -295,6 +301,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
                     comment: String(fact.title).trim(),
                     keys: Array.isArray(fact.keys) ? fact.keys.map(k => String(k).trim()).filter(Boolean) : [],
                     nodeId: null,
+                    background: true,
                 });
                 result.factsCreated++;
             } catch (e) {
@@ -346,7 +353,7 @@ async function archiveScene(targetBook, chat, sceneChange, chatId) {
         if (getChatId() !== chatId) return result;
 
         const titleHint = sceneChange.description || '';
-        const summaryResult = await runQuietSummarize(targetBook, chat, archiveCount, titleHint);
+        const summaryResult = await runQuietSummarize(targetBook, chat, archiveCount, titleHint, { background: true });
 
         if (summaryResult?.title) {
             result.archived = true;
@@ -398,10 +405,12 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
         const updates = parseJsonFromLLM(response, { type: 'array' });
         if (!Array.isArray(updates) || updates.length === 0) return result;
 
+        const trackerMap = new Map(trackers.map(t => [t.uid, t]));
+
         for (const update of updates) {
             if (!update?.uid || !update?.content) continue;
 
-            const tracker = trackers.find(t => t.uid === Number(update.uid));
+            const tracker = trackerMap.get(Number(update.uid));
             if (!tracker) continue;
 
             if (tracker.content.trim() === String(update.content).trim()) continue;
@@ -491,4 +500,9 @@ export function getLastProcessedIndex() {
 /** Check if the processor is currently running. */
 export function isProcessorRunning() {
     return _processorRunning;
+}
+
+/** Returns true if a scene was archived within the last 30 seconds. */
+export function hasRecentArchive() {
+    return _lastArchivedAt > 0 && (Date.now() - _lastArchivedAt) < 30_000;
 }

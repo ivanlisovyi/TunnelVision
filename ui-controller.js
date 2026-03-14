@@ -142,6 +142,7 @@ export function bindUIEvents() {
     $('#tv_notebook_position').on('change', onPromptInjectionChange);
     $('#tv_notebook_depth').on('change', onPromptInjectionChange);
     $('#tv_notebook_role').on('change', onPromptInjectionChange);
+    $('#tv_total_injection_budget').on('change', onTotalInjectionBudgetChange);
     $('#tv_stealth_mode').on('change', onStealthModeToggle);
     $('#tv_ephemeral_results').on('change', onEphemeralResultsToggle);
     $('.tv_ephemeral_tool').on('change', onEphemeralToolFilterChange);
@@ -160,6 +161,7 @@ export function bindUIEvents() {
     // World state settings
     $('#tv_world_state_enabled').on('change', onWorldStateToggle);
     $('#tv_world_state_interval').on('change', onWorldStateIntervalChange);
+    $('#tv_world_state_max_chars').on('change', onWorldStateMaxCharsChange);
     $('#tv_world_state_position').on('change', onWorldStateInjectionChange);
     $('#tv_world_state_depth').on('change', onWorldStateInjectionChange);
     $('#tv_world_state_role').on('change', onWorldStateInjectionChange);
@@ -277,6 +279,7 @@ export function refreshUI() {
     $('#tv_notebook_role').val(settings.notebookPromptRole || 'system');
     $('#tv_notebook_depth_row').toggle((settings.notebookPromptPosition || 'in_chat') === 'in_chat');
 
+    $('#tv_total_injection_budget').val(settings.totalInjectionBudget ?? 0);
     $('#tv_stealth_mode').prop('checked', settings.stealthMode === true);
     $('#tv_ephemeral_results').prop('checked', settings.ephemeralResults === true);
     $('#tv_ephemeral_filter_options').toggle(settings.ephemeralResults === true);
@@ -302,6 +305,7 @@ export function refreshUI() {
     $('#tv_world_state_enabled').prop('checked', wsEnabled);
     $('#tv_world_state_options').toggle(wsEnabled);
     $('#tv_world_state_interval').val(settings.worldStateInterval ?? 10);
+    $('#tv_world_state_max_chars').val(settings.worldStateMaxChars ?? 3000);
     $('#tv_world_state_position').val(settings.worldStatePosition || 'in_chat');
     $('#tv_world_state_depth').val(settings.worldStateDepth ?? 2);
     $('#tv_world_state_role').val(settings.worldStateRole || 'system');
@@ -857,6 +861,15 @@ function onMandatoryPromptReset() {
     saveSettingsDebounced();
 }
 
+function onTotalInjectionBudgetChange() {
+    const raw = Number($('#tv_total_injection_budget').val());
+    const clamped = Math.max(Math.round(raw) || 0, 0);
+    $('#tv_total_injection_budget').val(clamped);
+    const settings = getSettings();
+    settings.totalInjectionBudget = clamped;
+    saveSettingsDebounced();
+}
+
 function onStealthModeToggle() {
     const settings = getSettings();
     settings.stealthMode = $(this).prop('checked');
@@ -952,6 +965,15 @@ function onWorldStateIntervalChange() {
     $('#tv_world_state_interval').val(clamped);
     const settings = getSettings();
     settings.worldStateInterval = clamped;
+    saveSettingsDebounced();
+}
+
+function onWorldStateMaxCharsChange() {
+    const raw = Number($('#tv_world_state_max_chars').val());
+    const clamped = Math.min(Math.max(Math.round(raw) || 3000, 500), 10000);
+    $('#tv_world_state_max_chars').val(clamped);
+    const settings = getSettings();
+    settings.worldStateMaxChars = clamped;
     saveSettingsDebounced();
 }
 

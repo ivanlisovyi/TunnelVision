@@ -331,6 +331,24 @@
 
                         <hr class="tv-adv-divider" />
 
+                        <!-- ═══ Total Injection Budget ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Total Injection Budget</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Caps the <strong>combined</strong> size of all TunnelVision context injections (memory system prompt + world state + smart context + notebook).
+                                Use this to control how much of your context window TunnelVision consumes. Set to 0 for unlimited (each injection is governed only by its own per-feature limit).
+                            </div>
+                            <div class="tv-number-row">
+                                <input id="tv_total_injection_budget" type="number" class="tv-number-input" min="0" max="50000" step="500" value="0" />
+                                <span class="tv-number-label">characters (0 = unlimited)</span>
+                            </div>
+                            <div class="tv-help-text" style="margin-top: 4px;">
+                                Rough guide: 1000 chars ≈ 250 tokens. A budget of <strong>8000</strong> (~2000 tokens) is a sensible starting point. Priority order when trimming: memory system prompt &gt; world state &gt; smart context &gt; notebook.
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
                         <!-- ═══ Hide Tool-Call Messages ═══ -->
                         <div class="tv-adv-section">
                             <div class="tv-adv-section-title">Hide Tool-Call Messages</div>
@@ -660,6 +678,13 @@
                                 </div>
                                 <div class="tv-help-text" style="margin-top: 4px;">
                                     How often the world state is refreshed via a background LLM call. Lower values keep it more current but use more API calls.
+                                </div>
+                                <div class="tv-number-row" style="margin-top: 6px;">
+                                    <label class="tv-number-label" for="tv_world_state_max_chars">Max characters:</label>
+                                    <input id="tv_world_state_max_chars" type="number" class="tv-number-input" min="500" max="10000" step="100" value="3000" />
+                                </div>
+                                <div class="tv-help-text" style="margin-top: 4px;">
+                                    Hard cap on the world state text injected into context. The LLM is asked to keep it concise, but this enforces a limit. 3000 chars ≈ ~750 tokens.
                                 </div>
 
                                 <div style="margin-top: 8px;">

@@ -28,7 +28,7 @@ import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntr
 import { getWorldStateText, updateWorldState, clearWorldState } from './world-state.js';
 import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
-import { hideSummarizedMessages } from './tools/summarize.js';
+import { hideSummarizedMessages, setWatermark } from './tools/summarize.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -612,7 +612,7 @@ async function handleMaintainCommand() {
  * @param {string} [titleHint] - Optional title hint
  * @returns {Promise<{title: string, uid: number}>}
  */
-export async function runQuietSummarize(lorebook, chat, messageCount, titleHint = '') {
+export async function runQuietSummarize(lorebook, chat, messageCount, titleHint = '', { background = false } = {}) {
     const recentContext = formatChatExcerpt(chat, messageCount);
 
     const titleInstruction = titleHint
@@ -695,6 +695,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         comment: `[Summary] ${parsed.title}`,
         keys,
         nodeId: targetNodeId,
+        background,
     });
 
     // Create separate Remember entries for extracted facts
@@ -710,6 +711,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
                     content: fact.content.trim(),
                     comment: fact.title.trim(),
                     keys: factKeys,
+                    background,
                 });
                 factsCreated.push(factResult.uid);
             } catch (e) {
@@ -719,6 +721,14 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
     }
 
     markAutoSummaryComplete();
+
+    // Always advance the watermark so the scene archiver knows what's been covered,
+    // regardless of whether messages are visually hidden.
+    try {
+        const currentMsgId = (chat?.length || 1) - 1;
+        const coveredEnd = Math.max(0, currentMsgId - 1);
+        setWatermark(coveredEnd);
+    } catch { /* metadata not available */ }
 
     // Hide summarized messages if the setting is enabled
     try {

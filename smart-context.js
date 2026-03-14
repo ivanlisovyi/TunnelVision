@@ -19,7 +19,7 @@
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfo, buildUidMap } from './entry-manager.js';
+import { getCachedWorldInfoSync } from './entry-manager.js';
 
 // ── Entity Extraction ────────────────────────────────────────────
 
@@ -28,7 +28,7 @@ import { getCachedWorldInfo, buildUidMap } from './entry-manager.js';
  * Uses entry titles and keys as the vocabulary to match against.
  * @param {Array} chat - Chat messages array
  * @param {number} lookback - How many messages to scan
- * @returns {Set<string>} Lowercased entity terms found in recent messages
+ * @returns {string} Lowercased combined text from recent messages
  */
 function extractMentionsFromChat(chat, lookback) {
     const start = Math.max(0, chat.length - lookback);
@@ -75,10 +75,11 @@ function scoreEntry(entry, recentText) {
 
 /**
  * Build proactive context from lorebook entries matching recent chat mentions.
- * Called synchronously at GENERATION_STARTED — must be fast (no LLM calls).
- * @returns {Promise<string>} Formatted context string for injection, or empty string
+ * Called synchronously at GENERATION_STARTED — must be fast (no LLM calls, no awaits).
+ * Uses cache-only data access; returns empty on the first turn before cache is warm.
+ * @returns {string} Formatted context string for injection, or empty string
  */
-export async function buildSmartContextPrompt() {
+export function buildSmartContextPrompt() {
     const settings = getSettings();
     if (!settings.smartContextEnabled || settings.globalEnabled === false) return '';
 
@@ -101,7 +102,7 @@ export async function buildSmartContextPrompt() {
     const trackerUidSets = new Map();
 
     for (const bookName of activeBooks) {
-        const bookData = await getCachedWorldInfo(bookName);
+        const bookData = getCachedWorldInfoSync(bookName);
         if (!bookData?.entries) continue;
 
         const trackerSet = new Set(getTrackerUids(bookName));

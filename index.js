@@ -285,66 +285,79 @@ async function onGenerationStarted(type, opts) {
         const mandatoryRole = mapRoleSetting(settings.mandatoryPromptRole);
 
         const activeBooks = getActiveTunnelVisionBooks();
+        const enabled = settings.globalEnabled !== false;
 
-        if (
-            !isRecursiveToolPass
-            && settings.globalEnabled !== false
-            && settings.mandatoryTools
-            && activeBooks.length > 0
-        ) {
-            const prompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use TunnelVision tools this turn. Search for relevant context, Remember new facts, Update stale entries, and use Notebook for plans.]';
-            setExtensionPrompt(TV_PROMPT_KEY, prompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
-        } else {
-            setExtensionPrompt(TV_PROMPT_KEY, '', mandatoryPosition, mandatoryDepth, false, mandatoryRole);
-        }
+        // ── Collect all injection prompts ────────────────────────────
+        // Priority order: mandatory > world state > smart context > notebook
+        // (if a total budget is set, lower-priority prompts get trimmed first)
 
         const notebookPosition = mapPositionSetting(settings.notebookPromptPosition);
         const notebookDepth = settings.notebookPromptDepth ?? 1;
         const notebookRole = mapRoleSetting(settings.notebookPromptRole);
-
-        if (settings.globalEnabled !== false && settings.notebookEnabled !== false) {
-            const notebookPrompt = buildNotebookPrompt();
-            setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, notebookPosition, notebookDepth, false, notebookRole);
-        } else {
-            setExtensionPrompt(TV_NOTEBOOK_KEY, '', notebookPosition, notebookDepth, false, notebookRole);
-        }
-
-        // Inject rolling world state every turn (if enabled and exists)
         const wsPosition = mapPositionSetting(settings.worldStatePosition);
         const wsDepth = settings.worldStateDepth ?? 2;
         const wsRole = mapRoleSetting(settings.worldStateRole);
-
-        if (settings.globalEnabled !== false && settings.worldStateEnabled) {
-            const worldStatePrompt = buildWorldStatePrompt();
-            setExtensionPrompt(TV_WORLDSTATE_KEY, worldStatePrompt, wsPosition, wsDepth, false, wsRole);
-        } else {
-            setExtensionPrompt(TV_WORLDSTATE_KEY, '', wsPosition, wsDepth, false, wsRole);
-        }
-
-        // Smart context pre-fetch (placeholder — populated async below)
         const scPosition = mapPositionSetting(settings.smartContextPosition);
         const scDepth = settings.smartContextDepth ?? 3;
         const scRole = mapRoleSetting(settings.smartContextRole);
-        setExtensionPrompt(TV_SMARTCTX_KEY, '', scPosition, scDepth, false, scRole);
+
+        let mandatoryPrompt = '';
+        let worldStatePrompt = '';
+        let smartContextPrompt = '';
+        let notebookPrompt = '';
+
+        if (enabled) {
+            if (!isRecursiveToolPass && settings.mandatoryTools && activeBooks.length > 0) {
+                mandatoryPrompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use TunnelVision tools this turn.]';
+            }
+            if (settings.worldStateEnabled) {
+                worldStatePrompt = buildWorldStatePrompt();
+            }
+            if (settings.smartContextEnabled) {
+                smartContextPrompt = buildSmartContextPrompt();
+            }
+            if (settings.notebookEnabled !== false) {
+                notebookPrompt = buildNotebookPrompt();
+            }
+        }
+
+        // ── Apply total injection budget (if configured) ────────────
+        const budget = settings.totalInjectionBudget || 0;
+        if (budget > 0) {
+            let remaining = budget;
+            // Priority: mandatory > world state > smart context > notebook
+            const slots = [
+                { name: 'mandatory', get: () => mandatoryPrompt, set: v => { mandatoryPrompt = v; } },
+                { name: 'worldState', get: () => worldStatePrompt, set: v => { worldStatePrompt = v; } },
+                { name: 'smartContext', get: () => smartContextPrompt, set: v => { smartContextPrompt = v; } },
+                { name: 'notebook', get: () => notebookPrompt, set: v => { notebookPrompt = v; } },
+            ];
+            for (const slot of slots) {
+                const text = slot.get();
+                if (!text) continue;
+                if (text.length <= remaining) {
+                    remaining -= text.length;
+                } else if (remaining > 200) {
+                    const cutoff = text.lastIndexOf('\n', remaining);
+                    slot.set(text.substring(0, cutoff > remaining * 0.5 ? cutoff : remaining) + '\n[...budget limit reached]');
+                    remaining = 0;
+                } else {
+                    slot.set('');
+                }
+            }
+        }
+
+        // ── Inject all prompts ──────────────────────────────────────
+        setExtensionPrompt(TV_PROMPT_KEY, mandatoryPrompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
+        setExtensionPrompt(TV_WORLDSTATE_KEY, worldStatePrompt, wsPosition, wsDepth, false, wsRole);
+        setExtensionPrompt(TV_SMARTCTX_KEY, smartContextPrompt, scPosition, scDepth, false, scRole);
+        setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, notebookPosition, notebookDepth, false, notebookRole);
     } catch (e) {
         console.error('[TunnelVision] Error in onGenerationStarted synchronous section:', e);
         if (!settings) return;
     }
 
-    // ── Async section — background repair + smart context injection ──
-
-    // Smart context pre-fetch (async because it loads lorebook data)
-    if (settings.globalEnabled !== false && settings.smartContextEnabled) {
-        try {
-            const scPrompt = await buildSmartContextPrompt();
-            const scPosition = mapPositionSetting(settings.smartContextPosition);
-            const scDepth = settings.smartContextDepth ?? 3;
-            const scRole = mapRoleSetting(settings.smartContextRole);
-            setExtensionPrompt(TV_SMARTCTX_KEY, scPrompt, scPosition, scDepth, false, scRole);
-        } catch (e) {
-            console.warn('[TunnelVision] Smart context pre-fetch failed:', e);
-        }
-    }
+    // ── Async section — background repair ──
 
     if (settings.globalEnabled !== false) {
         const runtimeState = await preflightToolRuntimeState({ repair: true, reason: 'generation', log: true });
