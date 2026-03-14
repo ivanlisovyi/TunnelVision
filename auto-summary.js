@@ -198,7 +198,8 @@ async function runBackgroundSummary(chatId, count) {
         const { runQuietSummarize } = await import('./commands.js');
         const messageCount = Math.min(chat.length, count);
         const result = await runQuietSummarize(lorebook, chat, messageCount);
-        toastr.success(`Auto-summary saved: "${result.title}"`, 'TunnelVision');
+        const factsMsg = result.factsCreated > 0 ? ` + ${result.factsCreated} fact(s)` : '';
+        toastr.success(`Auto-summary saved: "${result.title}"${factsMsg}`, 'TunnelVision');
     } catch (e) {
         console.error('[TunnelVision] Auto-summary failed:', e);
         toastr.error(`Auto-summary failed: ${e.message}`, 'TunnelVision');

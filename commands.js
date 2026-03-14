@@ -20,11 +20,12 @@ import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.j
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument } from '../../../slash-commands/SlashCommandArgument.js';
 import { loadWorldInfo } from '../../../world-info.js';
-import { getSettings, getSelectedLorebook, ensureSummariesNode } from './tree-store.js';
+import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNodeById, createTreeNode, saveTree } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
 import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
+import { hideSummarizedMessages } from './tools/summarize.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -182,7 +183,8 @@ async function handleSummarizeCommand(_namedArgs, unnamedArgs) {
 
     try {
         const result = await runQuietSummarize(lorebook, chat, messageCount, title);
-        toastr.success(`Summary saved: "${result.title}"`, 'TunnelVision');
+        const factsMsg = result.factsCreated > 0 ? ` + ${result.factsCreated} fact(s) saved` : '';
+        toastr.success(`Summary saved: "${result.title}"${factsMsg}`, 'TunnelVision');
     } catch (e) {
         console.error('[TunnelVision] /tv-summarize failed:', e);
         toastr.error(`Summary failed: ${e.message}`, 'TunnelVision');
@@ -493,12 +495,30 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
 
     const quietPrompt = [
         'You are a summarization assistant for a roleplay.',
-        'Summarize the following conversation excerpt into a lorebook entry for long-term memory.',
+        'Analyze the following conversation excerpt and produce TWO things:',
+        '1. A concise SUMMARY of the scene (what happened, narrative arc)',
+        '2. A list of discrete FACTS that emerged (new information, state changes, relationship shifts, decisions made)',
+        '',
         titleInstruction,
-        'Write the summary in past tense, third person, capturing key actions, participants, outcomes, and emotional beats.',
-        'Be concise but thorough.',
-        '\nRespond with ONLY a JSON object (no markdown, no code fences):',
-        '{"title": "short descriptive title", "summary": "the summary text", "participants": ["name1", "name2"]}',
+        'For the summary: write in past tense, third person. Capture key actions, outcomes, and emotional beats. Be concise — this replaces re-reading the scene.',
+        'For "when": estimate the in-world date/time from story context (e.g. "Late evening, Day 3", "Morning after the festival"). Use whatever granularity the story supports. If no time cues exist, write "unspecified".',
+        'For significance: "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
+        'For facts: extract only NEW information that was not previously established. Each fact should be a standalone piece of knowledge (a character trait revealed, an item acquired, a location discovered, a relationship change, etc.). Skip facts that are just restatements of the summary.',
+        '',
+        'For arc: if the events belong to an ongoing storyline or narrative thread, provide a short arc name (e.g. "The Curse Investigation", "Elena & Ren\'s Romance"). If this is a standalone scene with no clear thread, omit the field or set it to null.',
+        '',
+        'Respond with ONLY a JSON object (no markdown, no code fences):',
+        '{',
+        '  "title": "short descriptive title",',
+        '  "when": "in-world date/time estimate",',
+        '  "summary": "the scene summary text",',
+        '  "participants": ["name1", "name2"],',
+        '  "significance": "minor|moderate|major|critical",',
+        '  "arc": "narrative thread name or null",',
+        '  "facts": [',
+        '    {"title": "short fact title", "content": "factual description in third person", "keys": ["keyword1", "keyword2"]}',
+        '  ]',
+        '}',
         `\nConversation to summarize:\n${recentContext}`,
     ].join('\n');
 
@@ -511,19 +531,79 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
 
     const summariesNodeId = ensureSummariesNode(lorebook);
     const participants = Array.isArray(parsed.participants) ? parsed.participants : [];
-    const content = `[Scene Summary — moderate]\nParticipants: ${participants.join(', ') || '(unspecified)'}\n\n${parsed.summary.trim()}`;
-    const keys = [...participants.map(p => String(p).trim()).filter(Boolean), 'summary:moderate'];
+    const significance = ['minor', 'moderate', 'major', 'critical'].includes(parsed.significance)
+        ? parsed.significance : 'moderate';
+    const whenLine = parsed.when && parsed.when !== 'unspecified' ? `When: ${parsed.when}\n` : '';
+
+    // Resolve arc — find existing or create new
+    let targetNodeId = summariesNodeId;
+    if (parsed.arc && typeof parsed.arc === 'string' && parsed.arc.trim()) {
+        const arcName = parsed.arc.trim();
+        const tree = getTree(lorebook);
+        if (tree?.root) {
+            const summNode = findNodeById(tree.root, summariesNodeId);
+            if (summNode) {
+                const existing = (summNode.children || []).find(
+                    c => c.label?.toLowerCase() === arcName.toLowerCase(),
+                );
+                if (existing) {
+                    targetNodeId = existing.id;
+                } else {
+                    const arcNode = createTreeNode(arcName, '');
+                    arcNode.isArc = true;
+                    summNode.children = summNode.children || [];
+                    summNode.children.push(arcNode);
+                    saveTree(lorebook, tree);
+                    targetNodeId = arcNode.id;
+                    console.log(`[TunnelVision] Auto-created arc "${arcName}" (${arcNode.id})`);
+                }
+            }
+        }
+    }
+
+    const content = `[Scene Summary — ${significance}]\n${whenLine}Participants: ${participants.join(', ') || '(unspecified)'}\n\n${parsed.summary.trim()}`;
+    const keys = [...participants.map(p => String(p).trim()).filter(Boolean), `summary:${significance}`];
 
     const result = await createEntry(lorebook, {
         content,
         comment: `[Summary] ${parsed.title}`,
         keys,
-        nodeId: summariesNodeId,
+        nodeId: targetNodeId,
     });
 
+    // Create separate Remember entries for extracted facts
+    const factsCreated = [];
+    if (Array.isArray(parsed.facts)) {
+        for (const fact of parsed.facts) {
+            if (!fact?.title || !fact?.content) continue;
+            try {
+                const factKeys = Array.isArray(fact.keys)
+                    ? fact.keys.map(k => String(k).trim()).filter(Boolean)
+                    : [];
+                const factResult = await createEntry(lorebook, {
+                    content: fact.content.trim(),
+                    comment: fact.title.trim(),
+                    keys: factKeys,
+                });
+                factsCreated.push(factResult.uid);
+            } catch (e) {
+                console.warn(`[TunnelVision] Failed to create fact entry "${fact.title}":`, e);
+            }
+        }
+    }
+
     markAutoSummaryComplete();
-    console.log(`[TunnelVision] Background summary created: "${parsed.title}" (UID ${result.uid})`);
-    return { title: parsed.title, uid: result.uid };
+
+    // Hide summarized messages if the setting is enabled
+    try {
+        await hideSummarizedMessages(messageCount);
+    } catch (e) {
+        console.warn('[TunnelVision] Failed to hide summarized messages:', e);
+    }
+
+    const factsMsg = factsCreated.length > 0 ? ` + ${factsCreated.length} fact(s)` : '';
+    console.log(`[TunnelVision] Background summary created: "${parsed.title}" (UID ${result.uid})${factsMsg}`);
+    return { title: parsed.title, uid: result.uid, factsCreated: factsCreated.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -575,8 +655,31 @@ function resolveIngestLorebook(activeBooks, requested) {
 function formatChatExcerpt(chat, count) {
     return chat.slice(-count).map(m => {
         const name = m.is_user ? 'User' : m.name || 'Assistant';
-        return `${name}: ${m.mes}`;
+        const ts = m.send_date ? `[${formatTimestamp(m.send_date)}] ` : '';
+        return `${ts}${name}: ${m.mes}`;
     }).join('\n');
+}
+
+/**
+ * Format a SillyTavern send_date into a compact timestamp.
+ * ST stores send_date as a numeric string like "20260313142215" (YYYYMMDDHHmmss)
+ * or sometimes as an ISO string.
+ * @param {string|number} raw
+ * @returns {string}
+ */
+function formatTimestamp(raw) {
+    const s = String(raw).trim();
+    // Numeric format: YYYYMMDDHHmmss (14 digits)
+    if (/^\d{14}$/.test(s)) {
+        return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)} ${s.slice(8, 10)}:${s.slice(10, 12)}`;
+    }
+    // Try parsing as a date
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) {
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    return s;
 }
 
 /**

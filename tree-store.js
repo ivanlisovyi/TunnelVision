@@ -317,7 +317,18 @@ export const SETTING_DEFAULTS = {
     mandatoryPromptPosition: 'in_chat',
     mandatoryPromptDepth: 1,
     mandatoryPromptRole: 'system',
-    mandatoryPromptText: '[IMPORTANT INSTRUCTION: You MUST use at least one TunnelVision tool call this turn. Before responding to the user, search the lorebook for relevant context using TunnelVision_Search. If important new information emerged in the conversation, also use TunnelVision_Remember to save it. Do NOT skip tool calls — they are mandatory every generation.]',
+    mandatoryPromptText: `[TUNNELVISION — MANDATORY TOOL USE]
+You have access to a long-term memory system via TunnelVision tools. You MUST use them every turn. Follow this workflow:
+
+1. SEARCH first: Use TunnelVision_Search to retrieve relevant lorebook entries for the current scene — characters present, locations, ongoing events, relationships. This is your memory; without it you are guessing.
+
+2. REMEMBER new facts: If anything new and important emerged this turn — a name, a revelation, a decision, a relationship shift, a new location detail — use TunnelVision_Remember to save it. Ask yourself: "If this conversation continued 50 messages from now, would I need to know this?" If yes, save it.
+
+3. UPDATE stale entries: If you retrieved an entry via Search and notice it is now outdated (a character's mood changed, a status shifted, inventory changed, a relationship evolved), use TunnelVision_Update to correct it. Keeping entries current is critical.
+
+4. NOTEBOOK for plans: Use TunnelVision_Notebook to write yourself private notes — narrative threads to revisit, pacing plans, follow-up reminders, character voice notes. These persist and are shown to you every turn.
+
+Do NOT skip tool calls. At minimum, Search every turn. Remember and Update whenever the conversation produces or changes facts. Use Notebook to stay organized.`,
     notebookEnabled: true,
     notebookPromptPosition: 'in_chat',
     notebookPromptDepth: 1,

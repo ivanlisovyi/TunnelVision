@@ -265,7 +265,7 @@ async function onGenerationStarted(type, opts) {
         && settings.mandatoryTools
         && activeBooks.length > 0
     ) {
-        const prompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use at least one TunnelVision tool call this turn.]';
+        const prompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use TunnelVision tools this turn. Search for relevant context, Remember new facts, Update stale entries, and use Notebook for plans.]';
         setExtensionPrompt(TV_PROMPT_KEY, prompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
     } else {
         setExtensionPrompt(TV_PROMPT_KEY, '', mandatoryPosition, mandatoryDepth, false, mandatoryRole);
