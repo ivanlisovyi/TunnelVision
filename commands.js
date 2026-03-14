@@ -24,7 +24,7 @@ import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNod
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
 import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid } from './entry-manager.js';
-import { markAutoSummaryComplete } from './auto-summary.js';
+import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { hideSummarizedMessages } from './tools/summarize.js';
 
 // ---------------------------------------------------------------------------
@@ -157,7 +157,20 @@ function registerSlashCommands() {
         helpString: 'Ingest recent chat messages into a TunnelVision lorebook. Does not trigger generation.',
     }));
 
-    console.log('[TunnelVision] Registered slash commands: /tv-summarize, /tv-remember, /tv-search, /tv-forget, /tv-merge, /tv-split, /tv-ingest');
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'tv-counter',
+        callback: handleCounterCommand,
+        aliases: ['tvcounter'],
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'New counter value (number). Omit to view current count.',
+                typeList: [ARGUMENT_TYPE.NUMBER],
+            }),
+        ],
+        helpString: 'View or set the auto-summary message counter. Usage: /tv-counter (view) or /tv-counter 10 (set to 10) or /tv-counter 0 (reset).',
+    }));
+
+    console.log('[TunnelVision] Registered slash commands: /tv-summarize, /tv-remember, /tv-search, /tv-forget, /tv-merge, /tv-split, /tv-ingest, /tv-counter');
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +483,26 @@ async function handleIngestCommand(_namedArgs, unnamedArgs) {
         console.error('[TunnelVision] /tv-ingest failed:', e);
         toastr.error(`Ingest failed: ${e.message}`, 'TunnelVision');
     }
+    return '';
+}
+
+async function handleCounterCommand(_namedArgs, unnamedArgs) {
+    const arg = typeof unnamedArgs === 'string' ? unnamedArgs.trim() : '';
+
+    if (arg === '') {
+        const count = getAutoSummaryCount();
+        toastr.info(`Auto-summary counter: ${count}`, 'TunnelVision');
+        return '';
+    }
+
+    const value = Number(arg);
+    if (!isFinite(value) || value < 0) {
+        toastr.warning('Provide a non-negative number, e.g. /tv-counter 0', 'TunnelVision');
+        return '';
+    }
+
+    setAutoSummaryCount(value);
+    toastr.success(`Auto-summary counter set to ${Math.round(value)}`, 'TunnelVision');
     return '';
 }
 

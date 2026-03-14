@@ -233,3 +233,12 @@ export function resetAutoSummaryCount() {
     counters.set(chatId, 0);
     persistCount(0);
 }
+
+export function setAutoSummaryCount(value) {
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const clamped = Math.max(0, Math.round(Number(value)) || 0);
+    counters.set(chatId, clamped);
+    persistCount(clamped);
+}

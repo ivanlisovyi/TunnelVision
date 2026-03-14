@@ -594,7 +594,8 @@
                                 <code>/tv-forget [name or UID]</code> — Disable an entry<br/>
                                 <code>/tv-merge [description]</code> — Merge two entries<br/>
                                 <code>/tv-split [name or UID]</code> — Split an entry<br/>
-                                <code>/tv-ingest [lorebook]</code> — Ingest chat into lorebook
+                                <code>/tv-ingest [lorebook]</code> — Ingest chat into lorebook<br/>
+                                <code>/tv-counter [value]</code> — View or set auto-summary counter
                             </div>
                         </div>
 
@@ -617,8 +618,10 @@
                                     <input id="tv_auto_summary_interval" type="number" class="tv-number-input" min="5" max="200" step="5" value="20" />
                                     <span class="tv-number-label">messages</span>
                                 </div>
-                                <div id="tv_auto_summary_counter" class="tv-help-text" style="margin-top: 4px;">
-                                    Messages since last summary: <strong id="tv_auto_summary_count">0</strong>
+                                <div id="tv_auto_summary_counter" class="tv-help-text" style="margin-top: 4px; display: flex; align-items: center; gap: 6px;">
+                                    Messages since last summary:
+                                    <input id="tv_auto_summary_count" type="number" class="tv-number-input" min="0" max="9999" step="1" value="0" style="width: 55px;" />
+                                    <button id="tv_auto_summary_reset" class="tv-btn tv-btn-sm" title="Reset counter to 0">Reset</button>
                                 </div>
                             </div>
                             <label class="tv-toggle" style="margin-top: 8px;">

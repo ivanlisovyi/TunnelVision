@@ -6,7 +6,7 @@
 import { saveSettingsDebounced } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { world_names, loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
-import { getAutoSummaryCount, resetAutoSummaryCount } from './auto-summary.js';
+import { getAutoSummaryCount, resetAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import {
     getTree,
@@ -150,6 +150,8 @@ export function bindUIEvents() {
     // Auto-summary settings
     $('#tv_auto_summary_enabled').on('change', onAutoSummaryToggle);
     $('#tv_auto_summary_interval').on('change', onAutoSummaryIntervalChange);
+    $('#tv_auto_summary_count').on('change', onAutoSummaryCountChange);
+    $('#tv_auto_summary_reset').on('click', onAutoSummaryCountReset);
     $('#tv_auto_hide_summarized').on('change', onAutoHideSummarizedToggle);
     $('#tv_passthrough_constant').on('change', onPassthroughConstantToggle);
 
@@ -257,7 +259,7 @@ export function refreshUI() {
     $('#tv_auto_summary_enabled').prop('checked', autoEnabled);
     $('#tv_auto_summary_options').toggle(autoEnabled);
     $('#tv_auto_summary_interval').val(settings.autoSummaryInterval ?? 20);
-    $('#tv_auto_summary_count').text(getAutoSummaryCount());
+    $('#tv_auto_summary_count').val(getAutoSummaryCount());
     $('#tv_auto_hide_summarized').prop('checked', settings.autoHideSummarized !== false);
     $('#tv_passthrough_constant').prop('checked', settings.passthroughConstant !== false);
 
@@ -835,6 +837,18 @@ function onAutoSummaryIntervalChange() {
     const settings = getSettings();
     settings.autoSummaryInterval = clamped;
     saveSettingsDebounced();
+}
+
+function onAutoSummaryCountChange() {
+    const raw = Number($('#tv_auto_summary_count').val());
+    const clamped = Math.max(0, Math.round(raw) || 0);
+    $('#tv_auto_summary_count').val(clamped);
+    setAutoSummaryCount(clamped);
+}
+
+function onAutoSummaryCountReset() {
+    resetAutoSummaryCount();
+    $('#tv_auto_summary_count').val(0);
 }
 
 function onAutoHideSummarizedToggle() {
