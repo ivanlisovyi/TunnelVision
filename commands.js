@@ -12,6 +12,8 @@
  *   /tv-merge [desc]       — Background merge via quiet prompt
  *   /tv-split [name|UID]   — Background split via quiet prompt
  *   /tv-ingest [book]      — Direct chat ingestion (no generation)
+ *   /tv-worldstate [action]— View, refresh, or clear the rolling world state
+ *   /tv-maintain            — Run memory lifecycle maintenance now
  */
 
 import { generateQuietPrompt, setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
@@ -23,6 +25,8 @@ import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNod
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
 import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo } from './entry-manager.js';
+import { getWorldStateText, updateWorldState, clearWorldState } from './world-state.js';
+import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { hideSummarizedMessages } from './tools/summarize.js';
 
@@ -169,7 +173,27 @@ function registerSlashCommands() {
         helpString: 'View or set the auto-summary message counter. Usage: /tv-counter (view) or /tv-counter 10 (set to 10) or /tv-counter 0 (reset).',
     }));
 
-    console.log('[TunnelVision] Registered slash commands: /tv-summarize, /tv-remember, /tv-search, /tv-forget, /tv-merge, /tv-split, /tv-ingest, /tv-counter');
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'tv-worldstate',
+        callback: handleWorldStateCommand,
+        aliases: ['tvworldstate', 'tvws'],
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'Action: "view" (default), "refresh" (force update), or "clear" (reset)',
+                typeList: [ARGUMENT_TYPE.STRING],
+            }),
+        ],
+        helpString: 'View, refresh, or clear the rolling world state. Usage: /tv-worldstate (view) | /tv-worldstate refresh | /tv-worldstate clear',
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'tv-maintain',
+        callback: handleMaintainCommand,
+        aliases: ['tvmaintain'],
+        helpString: 'Run memory lifecycle maintenance now — detects duplicates and compresses verbose entries.',
+    }));
+
+    console.log('[TunnelVision] Registered slash commands: /tv-summarize, /tv-remember, /tv-search, /tv-forget, /tv-merge, /tv-split, /tv-ingest, /tv-counter, /tv-worldstate, /tv-maintain');
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +525,77 @@ async function handleCounterCommand(_namedArgs, unnamedArgs) {
 
     setAutoSummaryCount(value);
     toastr.success(`Auto-summary counter set to ${Math.round(value)}`, 'TunnelVision');
+    return '';
+}
+
+async function handleWorldStateCommand(_namedArgs, unnamedArgs) {
+    const action = (typeof unnamedArgs === 'string' ? unnamedArgs.trim() : '').toLowerCase() || 'view';
+
+    if (action === 'clear') {
+        clearWorldState();
+        toastr.info('World state cleared', 'TunnelVision');
+        return '';
+    }
+
+    if (action === 'refresh') {
+        const check = preflight();
+        if (check) return check;
+
+        toastr.info('Updating world state...', 'TunnelVision');
+        try {
+            const result = await updateWorldState(true);
+            if (result) {
+                toastr.success('World state updated', 'TunnelVision');
+
+                const { callGenericPopup, POPUP_TYPE } = await import('../../../popup.js');
+                await callGenericPopup(
+                    `<div style="max-height:500px;overflow-y:auto;"><h3>Rolling World State</h3><pre style="white-space:pre-wrap;font-size:0.9em;">${escapeHtml(result.text)}</pre></div>`,
+                    POPUP_TYPE.TEXT,
+                );
+            } else {
+                toastr.warning('World state update returned no result. Make sure you have enough messages in the chat.', 'TunnelVision');
+            }
+        } catch (e) {
+            toastr.error(`World state update failed: ${e.message}`, 'TunnelVision');
+        }
+        return '';
+    }
+
+    // Default: view
+    const text = getWorldStateText();
+    if (!text) {
+        toastr.info('No world state yet. Use "/tv-worldstate refresh" to generate one, or enable auto-updates in settings.', 'TunnelVision');
+        return '';
+    }
+
+    const { callGenericPopup, POPUP_TYPE } = await import('../../../popup.js');
+    await callGenericPopup(
+        `<div style="max-height:500px;overflow-y:auto;"><h3>Rolling World State</h3><pre style="white-space:pre-wrap;font-size:0.9em;">${escapeHtml(text)}</pre></div>`,
+        POPUP_TYPE.TEXT,
+    );
+    return '';
+}
+
+async function handleMaintainCommand() {
+    const check = preflight();
+    if (check) return check;
+
+    toastr.info('Running memory lifecycle maintenance...', 'TunnelVision');
+    try {
+        const result = await runLifecycleMaintenance(true);
+        if (result) {
+            const parts = [];
+            if (result.entriesCompressed > 0) parts.push(`${result.entriesCompressed} entries compressed`);
+            if (result.duplicatesFound > 0) parts.push(`${result.duplicatesFound} duplicate pairs found (see console)`);
+            if (result.errors > 0) parts.push(`${result.errors} error(s)`);
+            const summary = parts.length > 0 ? parts.join(', ') : 'no changes needed';
+            toastr.success(`Maintenance complete: ${summary}`, 'TunnelVision');
+        } else {
+            toastr.warning('Lifecycle maintenance returned no result. Ensure you have an active chat with lorebook entries.', 'TunnelVision');
+        }
+    } catch (e) {
+        toastr.error(`Maintenance failed: ${e.message}`, 'TunnelVision');
+    }
     return '';
 }
 

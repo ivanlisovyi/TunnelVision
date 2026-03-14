@@ -104,6 +104,10 @@ export async function runDiagnostics() {
         collect(checkPromptInjectionSettings),
         collect(checkCommandsConfig),
         collect(checkAutoSummaryConfig),
+        collect(checkWorldStateConfig),
+        collect(checkPostTurnConfig),
+        collect(checkSmartContextConfig),
+        collect(checkLifecycleConfig),
         collect(checkMultiBookMode),
         collect(checkConnectionProfile),
         collect(checkArcNodes),
@@ -1095,6 +1099,73 @@ function checkAutoSummaryConfig() {
         return warn(`Auto-summary interval is ${interval}. Very low values will create excessive summaries.`);
     }
     return pass(`Auto-summary: enabled (every ${interval} messages)`);
+}
+
+/** Check rolling world state configuration. */
+function checkWorldStateConfig() {
+    const settings = getSettings();
+    if (!settings.worldStateEnabled) {
+        return pass('Rolling world state: disabled');
+    }
+    const interval = Number(settings.worldStateInterval);
+    if (!isFinite(interval) || interval < 1) {
+        settings.worldStateInterval = 10;
+        return warn('World state interval was invalid. Auto-reset to 10.');
+    }
+    if (interval < 3) {
+        return warn(`World state update interval is ${interval}. Very low values will make frequent background LLM calls.`);
+    }
+    return pass(`Rolling world state: enabled (every ${interval} messages)`);
+}
+
+/** Check post-turn processor configuration. */
+function checkPostTurnConfig() {
+    const settings = getSettings();
+    if (!settings.postTurnEnabled) {
+        return pass('Post-turn processor: disabled');
+    }
+    const results = [];
+    const cooldown = Number(settings.postTurnCooldown);
+    if (!isFinite(cooldown) || cooldown < 1) {
+        settings.postTurnCooldown = 1;
+        results.push(warn('Post-turn cooldown was invalid. Auto-reset to 1.'));
+    }
+    if (settings.postTurnExtractFacts === false && settings.postTurnUpdateTrackers === false) {
+        results.push(warn('Post-turn processor is enabled but both fact extraction and tracker updates are disabled. Enable at least one for the processor to have effect.'));
+    }
+    results.push(pass(`Post-turn processor: enabled (every ${settings.postTurnCooldown} turn(s), facts: ${settings.postTurnExtractFacts !== false ? 'on' : 'off'}, trackers: ${settings.postTurnUpdateTrackers !== false ? 'on' : 'off'})`));
+    return results;
+}
+
+/** Check lifecycle manager configuration. */
+function checkLifecycleConfig() {
+    const settings = getSettings();
+    if (!settings.lifecycleEnabled) {
+        return pass('Memory lifecycle: disabled');
+    }
+    const interval = Number(settings.lifecycleInterval);
+    if (!isFinite(interval) || interval < 1) {
+        settings.lifecycleInterval = 30;
+        return warn('Lifecycle interval was invalid. Auto-reset to 30.');
+    }
+    if (settings.lifecycleConsolidate === false && settings.lifecycleCompress === false) {
+        return warn('Lifecycle manager is enabled but both consolidation and compression are disabled.');
+    }
+    return pass(`Memory lifecycle: enabled (every ${interval} messages, consolidate: ${settings.lifecycleConsolidate !== false ? 'on' : 'off'}, compress: ${settings.lifecycleCompress !== false ? 'on' : 'off'})`);
+}
+
+/** Check smart context configuration. */
+function checkSmartContextConfig() {
+    const settings = getSettings();
+    if (!settings.smartContextEnabled) {
+        return pass('Smart context pre-fetch: disabled');
+    }
+    const results = [];
+    if (settings.smartContextMaxChars > 8000) {
+        results.push(warn(`Smart context budget is ${settings.smartContextMaxChars} chars — this may consume a large portion of the context window.`));
+    }
+    results.push(pass(`Smart context: enabled (scan ${settings.smartContextLookback} msgs, max ${settings.smartContextMaxEntries} entries / ${settings.smartContextMaxChars} chars)`));
+    return results;
 }
 
 /** Check multi-book mode is a valid value. */

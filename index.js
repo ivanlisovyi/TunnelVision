@@ -16,6 +16,10 @@
  *   diagnostics.js  — Failure point checks and auto-fixes.
  *   commands.js     — !command syntax interceptor (summarize, remember, search, forget, ingest).
  *   auto-summary.js — Automatic summary injection every N messages.
+ *   world-state.js  — Rolling world state: living story snapshot, updated periodically.
+ *   post-turn-processor.js — Background agent: fact extraction + tracker updates after each turn.
+ *   smart-context.js — Proactive pre-fetch: auto-inject relevant entries at generation start.
+ *   memory-lifecycle.js — Periodic maintenance: consolidation, compression, duplicate detection.
  */
 
 import { eventSource, event_types, extension_prompt_types, extension_prompt_roles, setExtensionPrompt } from '../../../../script.js';
@@ -26,6 +30,10 @@ import { getSettings, isLorebookEnabled } from './tree-store.js';
 import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache } from './tool-registry.js';
 import { resetTurnEntryCount, invalidateWorldInfoCache } from './entry-manager.js';
 import { buildNotebookPrompt } from './tools/notebook.js';
+import { buildWorldStatePrompt, initWorldState } from './world-state.js';
+import { initPostTurnProcessor } from './post-turn-processor.js';
+import { buildSmartContextPrompt } from './smart-context.js';
+import { initMemoryLifecycle } from './memory-lifecycle.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
 import { initCommands } from './commands.js';
@@ -59,6 +67,15 @@ async function init() {
 
     // Wire up auto-summary interval tracking
     initAutoSummary();
+
+    // Wire up rolling world state
+    initWorldState();
+
+    // Wire up post-turn processor (background fact extraction + tracker updates)
+    initPostTurnProcessor();
+
+    // Wire up memory lifecycle manager (periodic consolidation + compression)
+    initMemoryLifecycle();
 
     // Clean up legacy auto-summary prompt key from the old injection-based system
     try {
@@ -161,6 +178,8 @@ function onWorldInfoEntriesLoaded(data) {
 
 const TV_PROMPT_KEY = 'tunnelvision_mandatory';
 const TV_NOTEBOOK_KEY = 'tunnelvision_notebook';
+const TV_WORLDSTATE_KEY = 'tunnelvision_worldstate';
+const TV_SMARTCTX_KEY = 'tunnelvision_smartcontext';
 
 /**
  * Map a position setting string to the ST extension_prompt_types enum.
@@ -289,12 +308,43 @@ async function onGenerationStarted(type, opts) {
         } else {
             setExtensionPrompt(TV_NOTEBOOK_KEY, '', notebookPosition, notebookDepth, false, notebookRole);
         }
+
+        // Inject rolling world state every turn (if enabled and exists)
+        const wsPosition = mapPositionSetting(settings.worldStatePosition);
+        const wsDepth = settings.worldStateDepth ?? 2;
+        const wsRole = mapRoleSetting(settings.worldStateRole);
+
+        if (settings.globalEnabled !== false && settings.worldStateEnabled) {
+            const worldStatePrompt = buildWorldStatePrompt();
+            setExtensionPrompt(TV_WORLDSTATE_KEY, worldStatePrompt, wsPosition, wsDepth, false, wsRole);
+        } else {
+            setExtensionPrompt(TV_WORLDSTATE_KEY, '', wsPosition, wsDepth, false, wsRole);
+        }
+
+        // Smart context pre-fetch (placeholder — populated async below)
+        const scPosition = mapPositionSetting(settings.smartContextPosition);
+        const scDepth = settings.smartContextDepth ?? 3;
+        const scRole = mapRoleSetting(settings.smartContextRole);
+        setExtensionPrompt(TV_SMARTCTX_KEY, '', scPosition, scDepth, false, scRole);
     } catch (e) {
         console.error('[TunnelVision] Error in onGenerationStarted synchronous section:', e);
         if (!settings) return;
     }
 
-    // ── Async section — background repair, safe to run after prompt is built ──
+    // ── Async section — background repair + smart context injection ──
+
+    // Smart context pre-fetch (async because it loads lorebook data)
+    if (settings.globalEnabled !== false && settings.smartContextEnabled) {
+        try {
+            const scPrompt = await buildSmartContextPrompt();
+            const scPosition = mapPositionSetting(settings.smartContextPosition);
+            const scDepth = settings.smartContextDepth ?? 3;
+            const scRole = mapRoleSetting(settings.smartContextRole);
+            setExtensionPrompt(TV_SMARTCTX_KEY, scPrompt, scPosition, scDepth, false, scRole);
+        } catch (e) {
+            console.warn('[TunnelVision] Smart context pre-fetch failed:', e);
+        }
+    }
 
     if (settings.globalEnabled !== false) {
         const runtimeState = await preflightToolRuntimeState({ repair: true, reason: 'generation', log: true });

@@ -595,7 +595,9 @@
                                 <code>/tv-merge [description]</code> — Merge two entries<br/>
                                 <code>/tv-split [name or UID]</code> — Split an entry<br/>
                                 <code>/tv-ingest [lorebook]</code> — Ingest chat into lorebook<br/>
-                                <code>/tv-counter [value]</code> — View or set auto-summary counter
+                                <code>/tv-counter [value]</code> — View or set auto-summary counter<br/>
+                                <code>/tv-worldstate [action]</code> — View, refresh, or clear rolling world state<br/>
+                                <code>/tv-maintain</code> — Run memory lifecycle maintenance now
                             </div>
                         </div>
 
@@ -631,6 +633,214 @@
                             </label>
                             <div class="tv-help-text" style="margin-top: 4px;">
                                 When enabled, messages covered by a summary are hidden from chat to save tokens. Hidden messages can be restored with /unhide.
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
+                        <!-- ═══ Rolling World State ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Rolling World State</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Maintains a living "World State" document — a continuously-updated snapshot of the current scene, recent events, active story threads, and character states. Injected into context every turn so the AI always knows where the story stands.
+                            </div>
+                            <label class="tv-toggle">
+                                <input id="tv_world_state_enabled" type="checkbox" />
+                                <span class="tv-toggle-slider"></span>
+                                <span class="tv-toggle-label">Enable rolling world state</span>
+                            </label>
+                            <div id="tv_world_state_options" style="display: none; margin-top: 8px;">
+                                <div class="tv-number-row">
+                                    <label class="tv-number-label" for="tv_world_state_interval">Update every:</label>
+                                    <input id="tv_world_state_interval" type="number" class="tv-number-input" min="3" max="100" step="1" value="10" />
+                                    <span class="tv-number-label">messages</span>
+                                </div>
+                                <div class="tv-help-text" style="margin-top: 4px;">
+                                    How often the world state is refreshed via a background LLM call. Lower values keep it more current but use more API calls.
+                                </div>
+
+                                <div style="margin-top: 8px;">
+                                    <label class="tv-number-label" style="font-weight: 500;">Prompt injection:</label>
+                                    <div class="tv-prompt-inject-controls" style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
+                                        <select id="tv_world_state_position" class="tv-select" style="width: auto;">
+                                            <option value="in_chat">In Chat</option>
+                                            <option value="in_prompt">In System Prompt</option>
+                                        </select>
+                                        <div class="tv-number-row" id="tv_world_state_depth_row" style="margin: 0;">
+                                            <label class="tv-number-label" for="tv_world_state_depth" style="margin: 0;">Depth:</label>
+                                            <input id="tv_world_state_depth" type="number" class="tv-number-input" min="0" max="50" step="1" value="2" style="width: 50px;" />
+                                        </div>
+                                        <select id="tv_world_state_role" class="tv-select" style="width: auto;">
+                                            <option value="system">System</option>
+                                            <option value="user">User</option>
+                                            <option value="assistant">Assistant</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div id="tv_world_state_status" class="tv-help-text" style="margin-top: 8px; display: flex; align-items: center; gap: 6px;">
+                                    <span id="tv_world_state_status_text">No world state yet</span>
+                                    <button id="tv_world_state_refresh" class="tv-btn tv-btn-secondary tv-btn-sm" title="Force a world state update now">Refresh Now</button>
+                                    <button id="tv_world_state_clear" class="tv-btn tv-btn-secondary tv-btn-sm" title="Clear the world state">Clear</button>
+                                </div>
+                                <div id="tv_world_state_preview" class="tv-help-text" style="margin-top: 6px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; font-size: 0.85em; opacity: 0.8; border: 1px solid var(--SmartThemeBorderColor); border-radius: 6px; padding: 8px; display: none;"></div>
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
+                        <!-- ═══ Post-Turn Processor ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Post-Turn Processor</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                An intelligent background agent that runs after each AI response. Analyzes what happened and automatically extracts new facts into the lorebook and updates tracker entries — so the AI doesn't have to manage its own memory while writing creatively.
+                            </div>
+                            <label class="tv-toggle">
+                                <input id="tv_post_turn_enabled" type="checkbox" />
+                                <span class="tv-toggle-slider"></span>
+                                <span class="tv-toggle-label">Enable post-turn processor</span>
+                            </label>
+                            <div id="tv_post_turn_options" style="display: none; margin-top: 8px;">
+                                <div class="tv-number-row">
+                                    <label class="tv-number-label" for="tv_post_turn_cooldown">Run every:</label>
+                                    <input id="tv_post_turn_cooldown" type="number" class="tv-number-input" min="1" max="20" step="1" value="1" />
+                                    <span class="tv-number-label">turn(s)</span>
+                                </div>
+                                <div class="tv-help-text" style="margin-top: 4px;">
+                                    How often the processor runs. "1" means every turn (most thorough), "3" means every 3rd message (lighter API usage).
+                                </div>
+
+                                <div style="margin-top: 10px;">
+                                    <label class="tv-toggle">
+                                        <input id="tv_post_turn_extract_facts" type="checkbox" checked />
+                                        <span class="tv-toggle-slider"></span>
+                                        <span class="tv-toggle-label">Extract new facts</span>
+                                    </label>
+                                    <div class="tv-help-text" style="margin-top: 2px;">
+                                        Automatically identify and save new facts (character traits, items, locations, relationship changes) from each exchange.
+                                    </div>
+                                </div>
+
+                                <div style="margin-top: 8px;">
+                                    <label class="tv-toggle">
+                                        <input id="tv_post_turn_update_trackers" type="checkbox" checked />
+                                        <span class="tv-toggle-slider"></span>
+                                        <span class="tv-toggle-label">Update tracker entries</span>
+                                    </label>
+                                    <div class="tv-help-text" style="margin-top: 2px;">
+                                        Automatically update tracker entries (mood, inventory, relationships, etc.) when their tracked state changes in conversation.
+                                    </div>
+                                </div>
+
+                                <div id="tv_post_turn_status" class="tv-help-text" style="margin-top: 10px;">
+                                    <span id="tv_post_turn_status_text">Not yet run</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
+                        <!-- ═══ Memory Lifecycle Manager ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Memory Lifecycle Manager</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Periodic background maintenance that keeps the lorebook clean and efficient over long conversations. Identifies duplicate entries for consolidation and compresses verbose entries to save context space.
+                            </div>
+                            <label class="tv-toggle">
+                                <input id="tv_lifecycle_enabled" type="checkbox" />
+                                <span class="tv-toggle-slider"></span>
+                                <span class="tv-toggle-label">Enable memory lifecycle manager</span>
+                            </label>
+                            <div id="tv_lifecycle_options" style="display: none; margin-top: 8px;">
+                                <div class="tv-number-row">
+                                    <label class="tv-number-label" for="tv_lifecycle_interval">Run every:</label>
+                                    <input id="tv_lifecycle_interval" type="number" class="tv-number-input" min="10" max="200" step="5" value="30" />
+                                    <span class="tv-number-label">messages</span>
+                                </div>
+                                <div class="tv-help-text" style="margin-top: 4px;">
+                                    How often the lifecycle manager runs. Recommended: 30-50 messages. Lower = more frequent maintenance but more API calls.
+                                </div>
+
+                                <div style="margin-top: 10px;">
+                                    <label class="tv-toggle">
+                                        <input id="tv_lifecycle_consolidate" type="checkbox" checked />
+                                        <span class="tv-toggle-slider"></span>
+                                        <span class="tv-toggle-label">Detect duplicate entries</span>
+                                    </label>
+                                    <div class="tv-help-text" style="margin-top: 2px;">
+                                        Identify near-duplicate entries about the same topic. Flagged in console for manual or future automatic merging.
+                                    </div>
+                                </div>
+
+                                <div style="margin-top: 8px;">
+                                    <label class="tv-toggle">
+                                        <input id="tv_lifecycle_compress" type="checkbox" checked />
+                                        <span class="tv-toggle-slider"></span>
+                                        <span class="tv-toggle-label">Compress verbose entries</span>
+                                    </label>
+                                    <div class="tv-help-text" style="margin-top: 2px;">
+                                        Automatically condense entries over 1500 characters while preserving key facts. Tracker and summary entries are never compressed.
+                                    </div>
+                                </div>
+
+                                <div id="tv_lifecycle_status" class="tv-help-text" style="margin-top: 10px;">
+                                    <span id="tv_lifecycle_status_text">Not yet run</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
+                        <!-- ═══ Smart Context (Proactive Pre-fetch) ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Smart Context (Proactive Pre-fetch)</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Automatically injects relevant lorebook entries into context before each generation — no Search tool call needed. Matches entity names and keywords from recent messages against entry titles and keys.
+                            </div>
+                            <label class="tv-toggle">
+                                <input id="tv_smart_context_enabled" type="checkbox" />
+                                <span class="tv-toggle-slider"></span>
+                                <span class="tv-toggle-label">Enable smart context pre-fetch</span>
+                            </label>
+                            <div id="tv_smart_context_options" style="display: none; margin-top: 8px;">
+                                <div class="tv-number-row">
+                                    <label class="tv-number-label" for="tv_smart_context_lookback">Scan last:</label>
+                                    <input id="tv_smart_context_lookback" type="number" class="tv-number-input" min="2" max="30" step="1" value="6" />
+                                    <span class="tv-number-label">messages</span>
+                                </div>
+
+                                <div class="tv-number-row" style="margin-top: 6px;">
+                                    <label class="tv-number-label" for="tv_smart_context_max_entries">Max entries:</label>
+                                    <input id="tv_smart_context_max_entries" type="number" class="tv-number-input" min="1" max="30" step="1" value="8" />
+                                </div>
+
+                                <div class="tv-number-row" style="margin-top: 6px;">
+                                    <label class="tv-number-label" for="tv_smart_context_max_chars">Max characters:</label>
+                                    <input id="tv_smart_context_max_chars" type="number" class="tv-number-input" min="500" max="20000" step="500" value="4000" />
+                                </div>
+
+                                <div class="tv-help-text" style="margin-top: 4px;">
+                                    Controls how much context is auto-injected. Higher values provide more information but consume more of the context window.
+                                </div>
+
+                                <div style="margin-top: 8px;">
+                                    <label class="tv-number-label" style="font-weight: 500;">Prompt injection:</label>
+                                    <div class="tv-prompt-inject-controls" style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
+                                        <select id="tv_smart_context_position" class="tv-select" style="width: auto;">
+                                            <option value="in_chat">In Chat</option>
+                                            <option value="in_prompt">In System Prompt</option>
+                                        </select>
+                                        <div class="tv-number-row" id="tv_smart_context_depth_row" style="margin: 0;">
+                                            <label class="tv-number-label" for="tv_smart_context_depth" style="margin: 0;">Depth:</label>
+                                            <input id="tv_smart_context_depth" type="number" class="tv-number-input" min="0" max="50" step="1" value="3" style="width: 50px;" />
+                                        </div>
+                                        <select id="tv_smart_context_role" class="tv-select" style="width: auto;">
+                                            <option value="system">System</option>
+                                            <option value="user">User</option>
+                                            <option value="assistant">Assistant</option>
+                                        </select>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
