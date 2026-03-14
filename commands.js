@@ -629,7 +629,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         'For the summary: write in past tense, third person. Capture key actions, outcomes, and emotional beats. Be concise — this replaces re-reading the scene.',
         'For "when": estimate the in-world date/time from story context (e.g. "Late evening, Day 3", "Morning after the festival"). Use whatever granularity the story supports. If no time cues exist, write "unspecified".',
         'For significance: "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
-        'For facts: extract only NEW information that was not previously established. Each fact should be a standalone piece of knowledge (a character trait revealed, an item acquired, a location discovered, a relationship change, etc.). Skip facts that are just restatements of the summary.',
+        'For facts: extract ONLY facts significant enough to matter for long-term story continuity. Facts are persistent state changes — relationship shifts, relocations, status changes, revelations, consequential decisions, world-state changes, new character traits. Skip mundane actions ("asked about X", "poured tea"), fleeting emotions, and anything the summary already covers narratively. Fewer high-quality facts are better than many trivial ones.',
         '',
         'For arc: if the events belong to an ongoing storyline or narrative thread, provide a short arc name (e.g. "The Curse Investigation", "Elena & Ren\'s Romance"). If this is a standalone scene with no clear thread, omit the field or set it to null.',
         '',

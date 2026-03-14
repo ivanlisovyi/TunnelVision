@@ -134,6 +134,12 @@ function buildUpdatePrompt(previousState, recentExcerpt) {
         'Present: [characters currently in the scene]',
         'Situation: [1-2 sentences of what is actively happening right now]',
         '',
+        '## Off-Screen',
+        '[Characters not in the current scene but still active in the story. Track where they are and what they\'re doing. Format: "- **Name**: location / activity (since when)". Remove characters who return to the scene. Only include characters who have been established — do not invent new ones.]',
+        '',
+        '## Pending',
+        '[Near-term events, promises, appointments, and deadlines the story has established. Format: "- event/obligation (when)". Remove items once they happen or become irrelevant. Only include things explicitly stated or strongly implied in the story — do not invent events.]',
+        '',
         '## Recent Events',
         '[3-5 bullet points of the most recent significant events, newest first. One line each.]',
         '',
@@ -143,7 +149,7 @@ function buildUpdatePrompt(previousState, recentExcerpt) {
         '## Key Character States',
         '[For each active character: "- **Name**: mood, current goal, notable status". Only characters active in recent scenes.]',
         '',
-        'Be concise — the entire document should be under 500 words. This replaces the previous version entirely.',
+        'Be concise — the entire document should be under 600 words. This replaces the previous version entirely.',
         'Respond with ONLY the world state content. No JSON, no code fences, no commentary.',
     );
 

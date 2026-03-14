@@ -909,9 +909,9 @@ async function _ingestChatMessages(lorebookName, { from, to, progress, detail })
 }
 
 function buildIngestPrompt(lorebookName, chatText) {
-    return `Extract important facts from this roleplay chat log for the lorebook "${lorebookName}".
+    return `Extract facts from this roleplay chat log for the lorebook "${lorebookName}".
 
-For each distinct fact, character detail, relationship, event, or world detail, create an entry.
+Only extract facts significant enough for long-term story continuity — things that, if forgotten, would create a continuity error or miss something meaningful. Facts are persistent state changes, NOT a log of everything that happened.
 
 Chat log:
 ${chatText}
@@ -925,13 +925,27 @@ Respond with ONLY a JSON array:
   }
 ]
 
+WORTH EXTRACTING (lasting state changes):
+- Relationship shifts, alliances, betrayals
+- Living situations, relocations
+- Status/ability changes, injuries, promotions
+- Revelations (secrets, true identities, hidden properties)
+- Consequential decisions with lasting impact
+- World-state changes (places destroyed, wars declared, rules established)
+- New character traits or backstory revealed for the first time
+
+NOT WORTH EXTRACTING (skip these):
+- Mundane conversational beats and transient actions
+- Fleeting emotional reactions that don't shift relationships
+- Dialogue content without lasting consequences
+- Generic or already-obvious information
+
 Rules:
-- Extract ONLY concrete facts, not dialogue or opinions
 - Write content in third person, factual style
 - Each entry should be a single, distinct piece of information
 - Include character names in keys for cross-referencing
-- Skip trivial or generic information
-- Merge related facts into single entries when they belong together`;
+- Merge related facts into single entries when they belong together
+- Fewer high-quality entries are better than many trivial ones`;
 }
 
 /**

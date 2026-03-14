@@ -181,7 +181,7 @@ When you notice related events forming a pattern or storyline, group them into "
                         },
                         required: ['title', 'content'],
                     },
-                    description: 'Discrete new facts that emerged during this scene. Each fact becomes a separate lorebook entry (independently searchable). Include: character traits revealed, items acquired, locations discovered, relationship changes, status updates. Do NOT duplicate what is already in the summary narrative.',
+                    description: 'Only facts significant enough for long-term continuity — persistent state changes that would cause errors if forgotten. Include: relationship shifts, relocations, status/ability changes, revelations, consequential decisions, world-state changes, new character traits. Skip mundane actions, fleeting emotions, and anything the summary already covers. Fewer high-quality facts beat many trivial ones; an empty array is fine.',
                 },
             },
             required: ['lorebook', 'title', 'summary'],
