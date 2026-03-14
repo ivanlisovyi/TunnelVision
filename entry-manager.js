@@ -158,7 +158,10 @@ export function parseJsonFromLLM(text, { type = 'object' } = {}) {
     if (!text) return empty;
 
     let cleaned = text.trim();
+    // Strip common model wrapper tags
     cleaned = cleaned.replace(/<think[\s\S]*?<\/think>/gi, '').trim();
+    cleaned = cleaned.replace(/<\/?(?:output|response|result|json|answer)>/gi, '').trim();
+    // Strip markdown code fences
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
 
     try { return JSON.parse(cleaned); } catch { /* fall through */ }
@@ -168,6 +171,7 @@ export function parseJsonFromLLM(text, { type = 'object' } = {}) {
     const startIdx = cleaned.indexOf(opener);
     if (startIdx < 0) return empty;
 
+    // Balanced bracket extraction
     let depth = 0;
     let inString = false;
     let escape = false;
@@ -182,7 +186,12 @@ export function parseJsonFromLLM(text, { type = 'object' } = {}) {
         if (c === closer) {
             depth--;
             if (depth === 0) {
-                try { return JSON.parse(cleaned.substring(startIdx, i + 1)); } catch { break; }
+                const candidate = cleaned.substring(startIdx, i + 1);
+                try { return JSON.parse(candidate); } catch { /* try fixing trailing commas */ }
+                try {
+                    const fixed = candidate.replace(/,\s*([}\]])/g, '$1');
+                    return JSON.parse(fixed);
+                } catch { break; }
             }
         }
     }
@@ -191,6 +200,10 @@ export function parseJsonFromLLM(text, { type = 'object' } = {}) {
     const match = cleaned.match(pattern);
     if (match) {
         try { return JSON.parse(match[0]); } catch { /* fall through */ }
+        try {
+            const fixed = match[0].replace(/,\s*([}\]])/g, '$1');
+            return JSON.parse(fixed);
+        } catch { /* fall through */ }
     }
 
     return empty;

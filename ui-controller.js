@@ -42,6 +42,7 @@ import { runDiagnostics } from './diagnostics.js';
 import { applyRecurseLimit } from './index.js';
 import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
+import { escapeHtml } from './entry-manager.js';
 
 
 let currentLorebook = null;
@@ -249,7 +250,7 @@ export function refreshUI() {
     $('#tv_recurse_warn').toggle(recurseLimit > 10);
 
     // Sync LLM detail level
-    $('#tv_llm_detail').val(settings.llmBuildDetail || 'full');
+    $('#tv_llm_detail').val(settings.llmBuildDetail || 'lite');
 
     // Sync tree granularity
     $('#tv_tree_granularity').val(settings.treeGranularity ?? 0);
@@ -296,7 +297,7 @@ export function refreshUI() {
     const autoEnabled = settings.autoSummaryEnabled === true;
     $('#tv_auto_summary_enabled').prop('checked', autoEnabled);
     $('#tv_auto_summary_options').toggle(autoEnabled);
-    $('#tv_auto_summary_interval').val(settings.autoSummaryInterval ?? 20);
+    $('#tv_auto_summary_interval').val(settings.autoSummaryInterval ?? 50);
     $('#tv_auto_summary_count').val(getAutoSummaryCount());
     $('#tv_auto_hide_summarized').prop('checked', settings.autoHideSummarized !== false);
 
@@ -923,7 +924,7 @@ function onAutoSummaryToggle() {
 
 function onAutoSummaryIntervalChange() {
     const raw = Number($('#tv_auto_summary_interval').val());
-    const clamped = Math.min(Math.max(Math.round(raw) || 20, 5), 200);
+    const clamped = Math.min(Math.max(Math.round(raw) || 50, 5), 200);
     $('#tv_auto_summary_interval').val(clamped);
     const settings = getSettings();
     settings.autoSummaryInterval = clamped;
@@ -1963,9 +1964,4 @@ function buildEntryLookup(bookData) {
         lookup[entry.uid] = entry;
     }
     return lookup;
-}
-
-function escapeHtml(str) {
-    if (!str) return '';
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

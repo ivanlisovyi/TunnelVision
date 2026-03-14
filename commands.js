@@ -213,7 +213,7 @@ async function handleSummarizeCommand(_namedArgs, unnamedArgs) {
 
     const title = String(unnamedArgs || '').trim();
     const settings = getSettings();
-    const messageCount = Math.min(chat.length, settings.autoSummaryInterval || 20);
+    const messageCount = Math.min(chat.length, settings.autoSummaryInterval || 50);
 
     toastr.info('Summarizing in background...', 'TunnelVision');
 
@@ -648,11 +648,24 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         `\nConversation to summarize:\n${recentContext}`,
     ].join('\n');
 
-    const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
-    const parsed = parseJsonFromLLM(response);
+    let response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+    let parsed = parseJsonFromLLM(response);
 
     if (!parsed.title || !parsed.summary) {
-        throw new Error('Model returned invalid summary format.');
+        // Retry once with a shorter, more direct prompt
+        console.warn('[TunnelVision] Summary parse failed, retrying with simplified prompt. Raw response:', response?.substring?.(0, 300));
+        const retryPrompt = [
+            'Summarize this roleplay excerpt as JSON. Respond with ONLY valid JSON, no other text.',
+            '{"title": "short title", "summary": "what happened", "participants": ["name1"], "significance": "moderate", "facts": []}',
+            `\n${recentContext}`,
+        ].join('\n');
+        response = await generateQuietPrompt({ quietPrompt: retryPrompt, skipWIAN: true });
+        parsed = parseJsonFromLLM(response);
+
+        if (!parsed.title || !parsed.summary) {
+            console.error('[TunnelVision] Summary retry also failed. Raw response:', response?.substring?.(0, 500));
+            throw new Error('Model returned invalid summary format after retry.');
+        }
     }
 
     const summariesNodeId = ensureSummariesNode(lorebook);
@@ -788,12 +801,16 @@ function resolveIngestLorebook(activeBooks, requested) {
  * @param {number} count
  * @returns {string}
  */
-function formatChatExcerpt(chat, count) {
-    return chat.slice(-count).map(m => {
+function formatChatExcerpt(chat, count, maxChars = 15000) {
+    const formatted = chat.slice(-count).map(m => {
         const name = m.is_user ? 'User' : m.name || 'Assistant';
         const ts = m.send_date ? `[${formatTimestamp(m.send_date)}] ` : '';
         return `${ts}${name}: ${m.mes}`;
     }).join('\n');
+    if (formatted.length > maxChars) {
+        return formatted.substring(formatted.length - maxChars);
+    }
+    return formatted;
 }
 
 /**

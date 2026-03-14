@@ -20,6 +20,7 @@ import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfoSync } from './entry-manager.js';
+import { getEntryTitle } from './agent-utils.js';
 
 // ── Entity Extraction ────────────────────────────────────────────
 
@@ -164,7 +165,6 @@ export function buildSmartContextPrompt() {
 // ── Formatting ───────────────────────────────────────────────────
 
 function formatEntryForInjection(entry, bookName, isTracker) {
-    const title = entry.comment || entry.key?.[0] || `#${entry.uid}`;
     const tag = isTracker ? ' [Tracker]' : '';
-    return `[${title}${tag} — ${bookName}, UID ${entry.uid}]\n${(entry.content || '').trim()}`;
+    return `[${getEntryTitle(entry)}${tag} — ${bookName}, UID ${entry.uid}]\n${(entry.content || '').trim()}`;
 }

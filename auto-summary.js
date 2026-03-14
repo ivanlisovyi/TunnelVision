@@ -10,6 +10,8 @@ import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { isProcessorRunning, hasRecentArchive } from './post-turn-processor.js';
+import { getChatId, shouldSkipAiMessage } from './agent-utils.js';
+import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
 
 const TV_COUNTER_META_KEY = 'tunnelvision_autosummary_count';
 
@@ -18,13 +20,7 @@ const counters = new Map();
 
 let _autoSummaryInitialized = false;
 let _backgroundSummaryRunning = false;
-
-/**
- * Chat length at the time of the last successful counter increment.
- * Used to detect regeneration/swipe — if chat.length hasn't grown since
- * we last counted, the message replaced an existing one rather than adding new.
- */
-let _lastCountedChatLength = 0;
+const _chatRef = { lastChatLength: 0 };
 
 export function initAutoSummary() {
     if (_autoSummaryInitialized) return;
@@ -42,16 +38,8 @@ export function initAutoSummary() {
 }
 
 // ---------------------------------------------------------------------------
-// Chat ID and persistence
+// Persistence
 // ---------------------------------------------------------------------------
-
-function getChatId() {
-    try {
-        return getContext().chatId || null;
-    } catch {
-        return null;
-    }
-}
 
 function loadPersistedCount() {
     try {
@@ -115,7 +103,7 @@ function onAiMessageReceived() {
     if (!chatId) return;
 
     const settings = getSettings();
-    const interval = settings.autoSummaryInterval || 20;
+    const interval = settings.autoSummaryInterval || 50;
     const count = getCount(chatId);
 
     if (count >= interval) {
@@ -140,21 +128,7 @@ function incrementCounter() {
 
     const chatId = getChatId();
     if (!chatId) return false;
-
-    // Skip counting during tool-recursion passes
-    try {
-        const context = getContext();
-        const lastMsg = context.chat?.[context.chat.length - 1];
-        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return false;
-    } catch { /* proceed */ }
-
-    // Skip if chat hasn't grown — the message is a regeneration or swipe,
-    // not a genuinely new message that advances the conversation.
-    try {
-        const chatLength = getContext().chat?.length || 0;
-        if (chatLength > 0 && chatLength <= _lastCountedChatLength) return false;
-        _lastCountedChatLength = chatLength;
-    } catch { /* proceed */ }
+    if (shouldSkipAiMessage(_chatRef)) return false;
 
     const count = getCount(chatId) + 1;
     counters.set(chatId, count);
@@ -164,9 +138,9 @@ function incrementCounter() {
 
 function onChatChanged() {
     try {
-        _lastCountedChatLength = getContext().chat?.length || 0;
+        _chatRef.lastChatLength = getContext().chat?.length || 0;
     } catch {
-        _lastCountedChatLength = 0;
+        _chatRef.lastChatLength = 0;
     }
 
     const chatId = getChatId();
@@ -210,10 +184,10 @@ async function runBackgroundSummary(chatId, count) {
     if (!chat || chat.length < 5) return;
 
     _backgroundSummaryRunning = true;
+    const endActivity = markBackgroundStart();
     console.log(`[TunnelVision] Auto-summary triggered after ${count} messages`);
 
     try {
-        // Abort if user switched chats during async work
         if (getChatId() !== chatId) {
             console.log('[TunnelVision] Auto-summary aborted: chat changed during execution');
             return;
@@ -230,11 +204,24 @@ async function runBackgroundSummary(chatId, count) {
         const result = await runQuietSummarize(lorebook, chat, messageCount, '', { background: true });
         const factsMsg = result.factsCreated > 0 ? ` + ${result.factsCreated} fact(s)` : '';
         toastr.success(`Auto-summary saved: "${result.title}"${factsMsg}`, 'TunnelVision');
+        addBackgroundEvent({
+            icon: 'fa-scroll',
+            verb: 'Auto-summary',
+            color: '#fdcb6e',
+            summary: `"${result.title}"${factsMsg}`,
+        });
     } catch (e) {
         console.error('[TunnelVision] Auto-summary failed:', e);
         toastr.error(`Auto-summary failed: ${e.message}`, 'TunnelVision');
+        addBackgroundEvent({
+            icon: 'fa-triangle-exclamation',
+            verb: 'Auto-summary failed',
+            color: '#d63031',
+            summary: e.message || 'Unknown error',
+        });
     } finally {
         _backgroundSummaryRunning = false;
+        endActivity();
     }
 }
 

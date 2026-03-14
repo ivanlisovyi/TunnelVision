@@ -1052,10 +1052,40 @@
     box-shadow: 0 1px 4px rgba(232, 67, 147, 0.4);
 }
 
-/* Pulse animation */
+/* Pulse animation (single event) */
 .tv-float-pulse {
     border-color: rgba(232, 67, 147, 0.6) !important;
     box-shadow: 0 0 12px rgba(232, 67, 147, 0.3) !important;
+}
+
+/* Background activity indicator (continuous while agent is working) */
+.tv-float-trigger.tv-bg-active {
+    border-color: rgba(108, 92, 231, 0.7) !important;
+    animation: tv-bg-spin 2s linear infinite;
+}
+.tv-float-trigger.tv-bg-active::before {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: rgba(108, 92, 231, 0.8);
+    animation: tv-bg-ring 1s linear infinite;
+    pointer-events: none;
+}
+@keyframes tv-bg-ring {
+    to { transform: rotate(360deg); }
+}
+@keyframes tv-bg-spin {
+    0%, 100% { box-shadow: 0 0 8px rgba(108, 92, 231, 0.3); }
+    50% { box-shadow: 0 0 16px rgba(108, 92, 231, 0.5); }
+}
+
+/* Background feed item detail tags */
+.tv-float-bg-detail {
+    background: rgba(108, 92, 231, 0.15) !important;
+    color: rgba(108, 92, 231, 0.9) !important;
+    border-color: rgba(108, 92, 231, 0.3) !important;
 }
 
 /* Panel */

@@ -17,11 +17,13 @@ import { eventSource, event_types, generateQuietPrompt } from '../../../../scrip
 import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
+import { getChatId, formatChatExcerpt, shouldSkipAiMessage } from './agent-utils.js';
+import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
 
 let _updateRunning = false;
-let _lastCountedChatLength = 0;
+const _chatRef = { lastChatLength: 0 };
 
 // ── Persistence ──────────────────────────────────────────────────
 
@@ -90,20 +92,7 @@ function shouldUpdate() {
     return (chatLength - 1 - lastIdx) >= interval;
 }
 
-// ── Chat Excerpt ─────────────────────────────────────────────────
-
-function formatChatExcerpt(chat, count) {
-    const start = Math.max(0, chat.length - count);
-    const lines = [];
-    for (let i = start; i < chat.length; i++) {
-        const msg = chat[i];
-        if (msg.is_system) continue;
-        const role = msg.is_user ? 'User' : (msg.name || 'Character');
-        const text = (msg.mes || '').trim();
-        if (text) lines.push(`[${role}]: ${text}`);
-    }
-    return lines.join('\n\n');
-}
+// (formatChatExcerpt imported from agent-utils.js)
 
 // ── LLM Prompt ───────────────────────────────────────────────────
 
@@ -189,6 +178,7 @@ export async function updateWorldState(forceUpdate = false) {
     if (!recentExcerpt.trim()) return null;
 
     _updateRunning = true;
+    const endActivity = markBackgroundStart();
     console.log(`[TunnelVision] World state update triggered (${messagesSinceUpdate} new messages)`);
 
     try {
@@ -223,44 +213,34 @@ export async function updateWorldState(forceUpdate = false) {
 
         setWorldState(newState);
         console.log(`[TunnelVision] World state updated (${cleaned.length} chars)`);
+        addBackgroundEvent({
+            icon: 'fa-globe',
+            verb: 'World state updated',
+            color: '#00b894',
+            summary: `${cleaned.length} chars`,
+        });
         return newState;
     } catch (e) {
         console.error('[TunnelVision] World state update failed:', e);
+        addBackgroundEvent({
+            icon: 'fa-triangle-exclamation',
+            verb: 'World state failed',
+            color: '#d63031',
+            summary: e.message || 'Unknown error',
+        });
         return null;
     } finally {
         _updateRunning = false;
+        endActivity();
     }
 }
 
 // ── Event Handlers ───────────────────────────────────────────────
 
-function getChatId() {
-    try {
-        return getContext().chatId || null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Called after each AI message. Checks if enough messages have accumulated
- * to warrant a world state update, and triggers one in the background.
- */
 function onAiMessageReceived() {
     const settings = getSettings();
     if (!settings.worldStateEnabled || settings.globalEnabled === false) return;
-
-    try {
-        const context = getContext();
-        const lastMsg = context.chat?.[context.chat.length - 1];
-        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
-    } catch { /* proceed */ }
-
-    try {
-        const chatLength = getContext().chat?.length || 0;
-        if (chatLength > 0 && chatLength <= _lastCountedChatLength) return;
-        _lastCountedChatLength = chatLength;
-    } catch { /* proceed */ }
+    if (shouldSkipAiMessage(_chatRef)) return;
 
     if (shouldUpdate()) {
         updateWorldState().catch(e => {
@@ -271,9 +251,9 @@ function onAiMessageReceived() {
 
 function onChatChanged() {
     try {
-        _lastCountedChatLength = getContext().chat?.length || 0;
+        _chatRef.lastChatLength = getContext().chat?.length || 0;
     } catch {
-        _lastCountedChatLength = 0;
+        _chatRef.lastChatLength = 0;
     }
 }
 

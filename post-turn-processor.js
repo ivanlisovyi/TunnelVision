@@ -26,12 +26,14 @@ import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.j
 import { createEntry, updateEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark } from './tools/summarize.js';
+import { getChatId, formatChatExcerpt as formatRecentExchange, shouldSkipAiMessage } from './agent-utils.js';
+import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
 let _initialized = false;
 let _processorRunning = false;
-let _lastCountedChatLength = 0;
+const _chatRef = { lastChatLength: 0 };
 let _lastArchivedAt = 0;
 
 // ── Persistence ──────────────────────────────────────────────────
@@ -53,30 +55,9 @@ function setProcessorState(state) {
     } catch { /* metadata not available */ }
 }
 
-// ── Chat Excerpt ─────────────────────────────────────────────────
-
-function formatRecentExchange(chat, count) {
-    const start = Math.max(0, chat.length - count);
-    const lines = [];
-    for (let i = start; i < chat.length; i++) {
-        const msg = chat[i];
-        if (msg.is_system) continue;
-        const role = msg.is_user ? 'User' : (msg.name || 'Character');
-        const text = (msg.mes || '').trim();
-        if (text) lines.push(`[${role}]: ${text}`);
-    }
-    return lines.join('\n\n');
-}
+// (formatRecentExchange and getChatId imported from agent-utils.js)
 
 // ── Decision Logic ───────────────────────────────────────────────
-
-function getChatId() {
-    try {
-        return getContext().chatId || null;
-    } catch {
-        return null;
-    }
-}
 
 function shouldProcess() {
     const settings = getSettings();
@@ -155,6 +136,7 @@ export async function runPostTurnProcessor(force = false) {
     if (error || !targetBook) return null;
 
     _processorRunning = true;
+    const endActivity = markBackgroundStart();
 
     const state = getProcessorState();
     const lastIdx = state?.lastProcessedMsgIdx ?? -1;
@@ -164,6 +146,7 @@ export async function runPostTurnProcessor(force = false) {
 
     if (!recentExcerpt.trim()) {
         _processorRunning = false;
+        endActivity();
         return null;
     }
 
@@ -220,12 +203,19 @@ export async function runPostTurnProcessor(force = false) {
             lastResult: result,
         });
 
-        const parts = [];
-        if (result.factsCreated > 0) parts.push(`${result.factsCreated} fact(s) saved`);
-        if (result.sceneArchived) parts.push('scene archived');
-        if (result.trackersUpdated > 0) parts.push(`${result.trackersUpdated} tracker(s) updated`);
-        if (parts.length > 0) {
-            console.log(`[TunnelVision] Post-turn complete: ${parts.join(', ')}`);
+        const details = [];
+        if (result.factsCreated > 0) details.push(`${result.factsCreated} fact(s)`);
+        if (result.sceneArchived) details.push('scene archived');
+        if (result.trackersUpdated > 0) details.push(`${result.trackersUpdated} tracker(s)`);
+        if (details.length > 0) {
+            console.log(`[TunnelVision] Post-turn complete: ${details.join(', ')}`);
+            addBackgroundEvent({
+                icon: 'fa-brain',
+                verb: 'Post-turn',
+                color: '#6c5ce7',
+                summary: details.join(', '),
+                details,
+            });
         } else {
             console.log('[TunnelVision] Post-turn complete: no changes needed');
         }
@@ -233,9 +223,16 @@ export async function runPostTurnProcessor(force = false) {
         return result;
     } catch (e) {
         console.error('[TunnelVision] Post-turn processor failed:', e);
+        addBackgroundEvent({
+            icon: 'fa-triangle-exclamation',
+            verb: 'Post-turn failed',
+            color: '#d63031',
+            summary: e.message || 'Unknown error',
+        });
         return null;
     } finally {
         _processorRunning = false;
+        endActivity();
     }
 }
 
@@ -439,20 +436,7 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
 function onAiMessageReceived() {
     const settings = getSettings();
     if (!settings.postTurnEnabled || settings.globalEnabled === false) return;
-
-    // Skip tool recursion passes
-    try {
-        const context = getContext();
-        const lastMsg = context.chat?.[context.chat.length - 1];
-        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
-    } catch { /* proceed */ }
-
-    // Skip regenerations
-    try {
-        const chatLength = getContext().chat?.length || 0;
-        if (chatLength > 0 && chatLength <= _lastCountedChatLength) return;
-        _lastCountedChatLength = chatLength;
-    } catch { /* proceed */ }
+    if (shouldSkipAiMessage(_chatRef)) return;
 
     if (shouldProcess()) {
         runPostTurnProcessor().catch(e => {
@@ -463,9 +447,9 @@ function onAiMessageReceived() {
 
 function onChatChanged() {
     try {
-        _lastCountedChatLength = getContext().chat?.length || 0;
+        _chatRef.lastChatLength = getContext().chat?.length || 0;
     } catch {
-        _lastCountedChatLength = 0;
+        _chatRef.lastChatLength = 0;
     }
 }
 

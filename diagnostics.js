@@ -1092,8 +1092,8 @@ function checkAutoSummaryConfig() {
     }
     const interval = Number(settings.autoSummaryInterval);
     if (!isFinite(interval) || interval < 1) {
-        settings.autoSummaryInterval = 20;
-        return warn('Auto-summary interval was invalid. Auto-reset to 20.');
+        settings.autoSummaryInterval = 50;
+        return warn('Auto-summary interval was invalid. Auto-reset to 50.');
     }
     if (interval < 5) {
         return warn(`Auto-summary interval is ${interval}. Very low values will create excessive summaries.`);

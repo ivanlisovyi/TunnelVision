@@ -22,6 +22,8 @@ import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
+import { getChatId, shouldSkipAiMessage } from './agent-utils.js';
+import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_lifecycle';
 
@@ -47,13 +49,7 @@ function setLifecycleState(state) {
     } catch { /* metadata not available */ }
 }
 
-function getChatId() {
-    try {
-        return getContext().chatId || null;
-    } catch {
-        return null;
-    }
-}
+// (getChatId imported from agent-utils.js)
 
 // ── Decision Logic ───────────────────────────────────────────────
 
@@ -92,6 +88,7 @@ export async function runLifecycleMaintenance(force = false) {
 
     const chatId = getChatId();
     _lifecycleRunning = true;
+    const endActivity = markBackgroundStart();
 
     const result = {
         entriesCompressed: 0,
@@ -131,17 +128,34 @@ export async function runLifecycleMaintenance(force = false) {
             lastResult: result,
         });
 
-        const parts = [];
-        if (result.entriesCompressed > 0) parts.push(`${result.entriesCompressed} compressed`);
-        if (result.duplicatesFound > 0) parts.push(`${result.duplicatesFound} duplicate pairs flagged`);
-        console.log(`[TunnelVision] Lifecycle maintenance complete: ${parts.length > 0 ? parts.join(', ') : 'no changes needed'}`);
+        const details = [];
+        if (result.entriesCompressed > 0) details.push(`${result.entriesCompressed} compressed`);
+        if (result.duplicatesFound > 0) details.push(`${result.duplicatesFound} duplicate pairs`);
+        console.log(`[TunnelVision] Lifecycle maintenance complete: ${details.length > 0 ? details.join(', ') : 'no changes needed'}`);
+
+        if (details.length > 0) {
+            addBackgroundEvent({
+                icon: 'fa-recycle',
+                verb: 'Lifecycle',
+                color: '#00cec9',
+                summary: details.join(', '),
+                details,
+            });
+        }
 
         return result;
     } catch (e) {
         console.error('[TunnelVision] Lifecycle maintenance failed:', e);
+        addBackgroundEvent({
+            icon: 'fa-triangle-exclamation',
+            verb: 'Lifecycle failed',
+            color: '#d63031',
+            summary: e.message || 'Unknown error',
+        });
         return null;
     } finally {
         _lifecycleRunning = false;
+        endActivity();
     }
 }
 
@@ -283,25 +297,12 @@ async function compressVerboseEntries(bookName, bookData, chatId) {
 
 // ── Event Handlers ───────────────────────────────────────────────
 
-let _lastCountedChatLength = 0;
+const _chatRef = { lastChatLength: 0 };
 
 function onAiMessageReceived() {
     const settings = getSettings();
     if (!settings.lifecycleEnabled || settings.globalEnabled === false) return;
-
-    // Skip tool recursion
-    try {
-        const context = getContext();
-        const lastMsg = context.chat?.[context.chat.length - 1];
-        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
-    } catch { /* proceed */ }
-
-    // Skip regenerations
-    try {
-        const chatLength = getContext().chat?.length || 0;
-        if (chatLength > 0 && chatLength <= _lastCountedChatLength) return;
-        _lastCountedChatLength = chatLength;
-    } catch { /* proceed */ }
+    if (shouldSkipAiMessage(_chatRef)) return;
 
     if (shouldRunLifecycle()) {
         runLifecycleMaintenance().catch(e => {
@@ -312,9 +313,9 @@ function onAiMessageReceived() {
 
 function onChatChanged() {
     try {
-        _lastCountedChatLength = getContext().chat?.length || 0;
+        _chatRef.lastChatLength = getContext().chat?.length || 0;
     } catch {
-        _lastCountedChatLength = 0;
+        _chatRef.lastChatLength = 0;
     }
 }
 
@@ -344,6 +345,7 @@ export function getLastLifecycleRunIndex() {
     return getLifecycleState()?.lastRunMsgIdx ?? -1;
 }
 
-export function isLifecycleRunning() {
+/** @internal — not currently used externally but kept for future coordination */
+function isLifecycleRunning() {
     return _lifecycleRunning;
 }

@@ -34,7 +34,7 @@ let turnToolCalls = [];
 /**
  * @typedef {Object} FeedItem
  * @property {number} id
- * @property {'entry'|'tool'} type
+ * @property {'entry'|'tool'|'background'} type
  * @property {string} icon
  * @property {string} verb
  * @property {string} color
@@ -46,6 +46,7 @@ let turnToolCalls = [];
  * @property {string} [title]
  * @property {string[]} [keys]
  * @property {RetrievedEntry[]} [retrievedEntries]
+ * @property {string[]} [details] - Extra detail lines for background items
  */
 
 /** @type {FeedItem[]} */
@@ -329,7 +330,7 @@ function createPanel() {
 
     // Tabs
     panelTabs = el('div', 'tv-float-panel-tabs');
-    for (const [key, label] of [['all', 'All'], ['wi', 'Entries'], ['tools', 'Tools']]) {
+    for (const [key, label] of [['all', 'All'], ['wi', 'Entries'], ['tools', 'Tools'], ['bg', 'Agent']]) {
         const tab = el('button', `tv-float-tab${key === 'all' ? ' active' : ''}`, label);
         tab.dataset.tab = key;
         tab.addEventListener('click', () => {
@@ -532,6 +533,7 @@ function renderAllItems() {
         if (tab === 'all') return true;
         if (tab === 'wi') return item.type === 'entry' || item.type === 'wi';
         if (tab === 'tools') return item.type === 'tool';
+        if (tab === 'bg') return item.type === 'background';
         return true;
     });
 
@@ -588,6 +590,15 @@ function buildItemElement(item) {
             keysRow.appendChild(el('span', 'tv-float-key-more', `+${item.keys.length - 4}`));
         }
         body.appendChild(keysRow);
+    }
+
+    // Detail lines (for background agent items)
+    if (item.type === 'background' && item.details?.length) {
+        const detailsRow = el('div', 'tv-float-item-keys');
+        for (const detail of item.details) {
+            detailsRow.appendChild(el('span', 'tv-float-key-tag tv-float-bg-detail', detail));
+        }
+        body.appendChild(detailsRow);
     }
 
     // Retrieved entries (for tool items from search)
@@ -648,6 +659,60 @@ function addFeedItems(items) {
     updateBadge(items.length);
     if (panelEl?.classList.contains('open')) renderAllItems();
     pulseTrigger();
+}
+
+// ── Background Activity Indicator ────────────────────────────────
+
+let _activeBackgroundCount = 0;
+
+function setBackgroundActive(active) {
+    _activeBackgroundCount += active ? 1 : -1;
+    if (_activeBackgroundCount < 0) _activeBackgroundCount = 0;
+    if (!triggerEl) return;
+    if (_activeBackgroundCount > 0) {
+        triggerEl.classList.add('tv-bg-active');
+    } else {
+        triggerEl.classList.remove('tv-bg-active');
+    }
+}
+
+/**
+ * Log a background agent event to the activity feed.
+ * Call this from post-turn processor, world-state, auto-summary, lifecycle, etc.
+ * @param {Object} opts
+ * @param {string} opts.icon - FontAwesome icon class (e.g. 'fa-brain')
+ * @param {string} opts.verb - Action label (e.g. 'Scene archived')
+ * @param {string} opts.color - CSS color for the label
+ * @param {string} [opts.summary] - Short description text
+ * @param {string[]} [opts.details] - Extra detail tags
+ */
+export function addBackgroundEvent({ icon, verb, color, summary = '', details = [] }) {
+    const item = {
+        id: nextId++,
+        type: 'background',
+        icon,
+        verb,
+        color,
+        summary,
+        timestamp: Date.now(),
+        details: details.filter(Boolean),
+    };
+    addFeedItems([item]);
+}
+
+/**
+ * Mark the start of a background operation (shows spinner on trigger button).
+ * Returns a function to call when the operation completes.
+ * @returns {() => void} Call this when the background operation finishes
+ */
+export function markBackgroundStart() {
+    setBackgroundActive(true);
+    let ended = false;
+    return () => {
+        if (ended) return;
+        ended = true;
+        setBackgroundActive(false);
+    };
 }
 
 // ── Hidden Tool Call (Visual Hiding) ──

@@ -77,7 +77,7 @@ function getRegisteredTunnelVisionTools() {
 }
 
 /** Get cached tracker list string. Updated during registerTools(). */
-export function getTrackerListString() {
+function getTrackerListString() {
     return _trackerListCache;
 }
 
@@ -174,7 +174,7 @@ export function getActiveTunnelVisionBooks() {
     return active;
 }
 
-export async function inspectToolRuntimeState() {
+async function inspectToolRuntimeState() {
     const settings = getSettings();
     const disabled = settings.disabledTools || {};
     const activeBooks = getActiveTunnelVisionBooks();
