@@ -612,7 +612,7 @@ async function handleMaintainCommand() {
  * @param {string} [titleHint] - Optional title hint
  * @returns {Promise<{title: string, uid: number}>}
  */
-export async function runQuietSummarize(lorebook, chat, messageCount, titleHint = '', { background = false } = {}) {
+export async function runQuietSummarize(lorebook, chat, messageCount, titleHint = '', { background = false, skipAutoHide = false } = {}) {
     const recentContext = formatChatExcerpt(chat, messageCount);
 
     const titleInstruction = titleHint
@@ -735,19 +735,21 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
 
     markAutoSummaryComplete();
 
-    // Always advance the watermark so the scene archiver knows what's been covered,
-    // regardless of whether messages are visually hidden.
-    try {
-        const currentMsgId = (chat?.length || 1) - 1;
-        const coveredEnd = Math.max(0, currentMsgId - 1);
-        setWatermark(coveredEnd);
-    } catch { /* metadata not available */ }
+    if (!skipAutoHide) {
+        // Always advance the watermark so the scene archiver knows what's been covered,
+        // regardless of whether messages are visually hidden.
+        try {
+            const currentMsgId = (chat?.length || 1) - 1;
+            const coveredEnd = Math.max(0, currentMsgId - 1);
+            setWatermark(coveredEnd);
+        } catch { /* metadata not available */ }
 
-    // Hide summarized messages if the setting is enabled
-    try {
-        await hideSummarizedMessages(messageCount);
-    } catch (e) {
-        console.warn('[TunnelVision] Failed to hide summarized messages:', e);
+        // Hide summarized messages if the setting is enabled
+        try {
+            await hideSummarizedMessages(messageCount);
+        } catch (e) {
+            console.warn('[TunnelVision] Failed to hide summarized messages:', e);
+        }
     }
 
     const factsMsg = factsCreated.length > 0 ? ` + ${factsCreated.length} fact(s)` : '';

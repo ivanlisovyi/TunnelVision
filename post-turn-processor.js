@@ -25,7 +25,7 @@ import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { createEntry, updateEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
-import { getWatermark } from './tools/summarize.js';
+import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, shouldSkipAiMessage } from './agent-utils.js';
 import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
 
@@ -156,6 +156,7 @@ export async function runPostTurnProcessor(force = false) {
         factsCreated: 0,
         trackersUpdated: 0,
         sceneArchived: false,
+        sceneTitle: null,
         errors: 0,
     };
 
@@ -180,6 +181,7 @@ export async function runPostTurnProcessor(force = false) {
         if (sceneChange?.detected && settings.postTurnSceneArchive !== false) {
             const archiveResult = await archiveScene(targetBook, chat, sceneChange, chatId);
             result.sceneArchived = archiveResult.archived;
+            result.sceneTitle = archiveResult.title;
             result.errors += archiveResult.errors;
             if (archiveResult.archived) _lastArchivedAt = Date.now();
         }
@@ -205,7 +207,12 @@ export async function runPostTurnProcessor(force = false) {
 
         const details = [];
         if (result.factsCreated > 0) details.push(`${result.factsCreated} fact(s)`);
-        if (result.sceneArchived) details.push('scene archived');
+        if (result.sceneArchived) {
+            const archiveLabel = result.sceneTitle
+                ? `scene archived: "${result.sceneTitle}"`
+                : 'scene archived';
+            details.push(archiveLabel);
+        }
         if (result.trackersUpdated > 0) details.push(`${result.trackersUpdated} tracker(s)`);
         if (details.length > 0) {
             console.log(`[TunnelVision] Post-turn complete: ${details.join(', ')}`);
@@ -331,18 +338,22 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
  * for the scene that just ended. Uses the existing runQuietSummarize pipeline.
  */
 async function archiveScene(targetBook, chat, sceneChange, chatId) {
-    const result = { archived: false, errors: 0 };
+    const result = { archived: false, errors: 0, title: null };
 
-    // Use the summary watermark to determine what hasn't been archived yet.
-    // The watermark tracks the last message index covered by any summary/archive.
     const watermark = getWatermark();
-    const unsummarizedStart = watermark + 1;
-    const messagesSinceLastArchive = Math.max(chat.length - 1 - watermark, 0);
 
-    // Need enough unsummarized messages to make a meaningful summary
-    if (messagesSinceLastArchive < 4) return result;
+    // The scene change was detected in the LATEST message, meaning that message
+    // is the start of the NEW scene. The OLD scene ends at chat.length - 3.
+    // We only want to archive the old scene, so exclude the last 2 messages
+    // (the user prompt that elicited the scene change + the AI's new-scene response).
+    const sceneEndIdx = chat.length - 3;
+    const oldSceneMessages = Math.max(sceneEndIdx - watermark, 0);
 
-    const archiveCount = Math.min(messagesSinceLastArchive, chat.length, 50);
+    if (oldSceneMessages < 4) return result;
+
+    // Slice the chat to only include the old scene (exclude new scene messages)
+    const oldSceneChat = chat.slice(0, sceneEndIdx + 1);
+    const archiveCount = Math.min(oldSceneMessages, oldSceneChat.length, 50);
 
     try {
         const { runQuietSummarize } = await import('./commands.js');
@@ -350,11 +361,28 @@ async function archiveScene(targetBook, chat, sceneChange, chatId) {
         if (getChatId() !== chatId) return result;
 
         const titleHint = sceneChange.description || '';
-        const summaryResult = await runQuietSummarize(targetBook, chat, archiveCount, titleHint, { background: true });
+        // skipAutoHide: we handle hiding ourselves with the correct range,
+        // because runQuietSummarize's hideSummarizedMessages reads the full
+        // chat from getContext() and would hide new-scene messages instead.
+        const summaryResult = await runQuietSummarize(targetBook, oldSceneChat, archiveCount, titleHint, {
+            background: true,
+            skipAutoHide: true,
+        });
 
         if (summaryResult?.title) {
             result.archived = true;
-            console.log(`[TunnelVision] Scene archived: "${summaryResult.title}" (${sceneChange.type})`);
+            result.title = summaryResult.title;
+
+            // Hide old-scene messages and advance watermark with the correct
+            // range (watermark+1 → sceneEndIdx), not the full-chat tail.
+            try {
+                await hideSummarizedMessages(undefined, { endIndex: sceneEndIdx });
+            } catch (e) {
+                console.warn('[TunnelVision] Scene archive hide failed:', e);
+            }
+            setWatermark(sceneEndIdx);
+
+            console.log(`[TunnelVision] Scene archived: "${summaryResult.title}" (${sceneChange.type}), messages up to #${sceneEndIdx}`);
         }
     } catch (e) {
         console.warn('[TunnelVision] Scene archiving failed:', e);

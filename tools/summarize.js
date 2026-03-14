@@ -48,9 +48,13 @@ export function setWatermark(messageId) {
  * Hide messages covered by a summary, using either messages_back or the watermark.
  * Exported so auto-summary and scene archiver can also call it.
  * @param {number|undefined} messagesBack - How many messages back the summary covers.
+ * @param {Object} [opts]
+ * @param {number} [opts.endIndex] - Explicit end index for the hide range (overrides
+ *   the default of currentMsgId - 1). Used by the scene archiver to hide only the old
+ *   scene, not the new-scene messages that exist at the tail of the full chat.
  * @returns {Promise<string|null>} Status message or null if nothing was hidden.
  */
-export async function hideSummarizedMessages(messagesBack) {
+export async function hideSummarizedMessages(messagesBack, { endIndex } = {}) {
     const settings = getSettings();
     if (!settings.autoHideSummarized) return null;
 
@@ -61,7 +65,11 @@ export async function hideSummarizedMessages(messagesBack) {
     const currentMsgId = chat.length - 1;
     let hideStart, hideEnd;
 
-    if (typeof messagesBack === 'number' && messagesBack > 0) {
+    if (typeof endIndex === 'number' && endIndex >= 0) {
+        const watermark = getWatermark();
+        hideStart = watermark + 1;
+        hideEnd = endIndex;
+    } else if (typeof messagesBack === 'number' && messagesBack > 0) {
         hideEnd = currentMsgId - 1;
         hideStart = Math.max(0, currentMsgId - messagesBack);
     } else {
