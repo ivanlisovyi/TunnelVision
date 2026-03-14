@@ -231,6 +231,7 @@ export async function updateWorldState(forceUpdate = false) {
         return newState;
     } catch (e) {
         console.error('[TunnelVision] World state update failed:', e);
+        toastr.error(`World state update failed: ${e.message || 'Unknown error'}`, 'TunnelVision');
         addBackgroundEvent({
             icon: 'fa-triangle-exclamation',
             verb: 'World state failed',

@@ -38,6 +38,7 @@ let _currentTask = null;
 let _swipePending = false;
 const _chatRef = { lastChatLength: 0 };
 let _lastArchivedAt = 0;
+let _liveRollback = null;
 
 // ── Persistence ──────────────────────────────────────────────────
 
@@ -56,6 +57,16 @@ function setProcessorState(state) {
         context.chatMetadata[METADATA_KEY] = state;
         context.saveMetadataDebounced?.();
     } catch { /* metadata not available */ }
+}
+
+function persistLiveRollback() {
+    if (!_liveRollback) return;
+    try {
+        const state = getProcessorState() || {};
+        setProcessorState({ ...state, rollback: { ..._liveRollback } });
+    } catch (e) {
+        console.warn('[TunnelVision] Failed to persist live rollback:', e);
+    }
 }
 
 // (formatRecentExchange and getChatId imported from agent-utils.js)
@@ -142,6 +153,11 @@ export async function runPostTurnProcessor(force = false) {
     const task = registerBackgroundTask({ label: 'Post-turn', icon: 'fa-brain', color: '#6c5ce7' });
     _currentTask = task;
 
+    // Initialize live rollback immediately so cancellation at any point
+    // can undo whatever was created so far
+    _liveRollback = { createdUids: [], trackerReverts: [], book: targetBook };
+    persistLiveRollback();
+
     const state = getProcessorState();
     const lastIdx = state?.lastProcessedMsgIdx ?? -1;
     const msgsSinceLastProcess = Math.max(chat.length - 1 - lastIdx, 0);
@@ -149,6 +165,7 @@ export async function runPostTurnProcessor(force = false) {
     const recentExcerpt = formatRecentExchange(chat, excerptCount);
 
     if (!recentExcerpt.trim()) {
+        _liveRollback = null;
         _processorRunning = false;
         _currentTask = null;
         task.end();
@@ -169,9 +186,6 @@ export async function runPostTurnProcessor(force = false) {
         // Abort if chat changed or user cancelled
         if (getChatId() !== chatId || task.cancelled) return null;
 
-        // Rollback data — collected so swipe/regeneration can undo this run
-        const rollback = { createdUids: [], trackerReverts: [], book: targetBook };
-
         // ── Steps 1 + 3 in parallel: Fact Extraction and Tracker Updates ──
         // These are independent LLM calls that don't depend on each other.
         // Scene archiving (Step 2) waits for fact extraction since it needs scene detection.
@@ -190,13 +204,11 @@ export async function runPostTurnProcessor(force = false) {
         if (analysisResult) {
             result.factsCreated = analysisResult.factsCreated;
             result.errors += analysisResult.errors;
-            rollback.createdUids.push(...analysisResult.createdUids);
         }
 
         if (trackerResult) {
             result.trackersUpdated = trackerResult.updated;
             result.errors += trackerResult.errors;
-            rollback.trackerReverts.push(...trackerResult.reverts);
         }
 
         if (getChatId() !== chatId || task.cancelled) return null;
@@ -234,7 +246,7 @@ export async function runPostTurnProcessor(force = false) {
             lastProcessedMsgIdx: chat.length - 1,
             lastProcessedAt: Date.now(),
             lastResult: result,
-            rollback,
+            rollback: _liveRollback ? { ..._liveRollback } : null,
         });
 
         const details = [];
@@ -262,6 +274,7 @@ export async function runPostTurnProcessor(force = false) {
         return result;
     } catch (e) {
         console.error('[TunnelVision] Post-turn processor failed:', e);
+        toastr.error(`Post-turn memory processing failed: ${e.message || 'Unknown error'}`, 'TunnelVision');
         addBackgroundEvent({
             icon: 'fa-triangle-exclamation',
             verb: 'Post-turn failed',
@@ -270,6 +283,7 @@ export async function runPostTurnProcessor(force = false) {
         });
         return null;
     } finally {
+        _liveRollback = null;
         _processorRunning = false;
         _currentTask = null;
         task.end();
@@ -425,6 +439,10 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
                 });
                 result.factsCreated++;
                 result.createdUids.push(entryResult.uid);
+                if (_liveRollback) {
+                    _liveRollback.createdUids.push(entryResult.uid);
+                    persistLiveRollback();
+                }
             } catch (e) {
                 console.warn(`[TunnelVision] Post-turn fact creation failed for "${fact.title}":`, e);
                 result.errors++;
@@ -576,6 +594,10 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
                 });
                 result.updated++;
                 result.reverts.push({ uid: tracker.uid, book: tracker.book, previousContent });
+                if (_liveRollback) {
+                    _liveRollback.trackerReverts.push({ uid: tracker.uid, book: tracker.book, previousContent });
+                    persistLiveRollback();
+                }
                 console.log(`[TunnelVision] Post-turn updated tracker "${tracker.title}" (UID ${tracker.uid})`);
             } catch (e) {
                 console.warn(`[TunnelVision] Post-turn tracker update failed for UID ${update.uid}:`, e);
@@ -593,10 +615,11 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
 // ── Swipe / Regeneration Rollback ────────────────────────────────
 
 async function rollbackLastPostTurn() {
-    const state = getProcessorState();
-    const rb = state?.rollback;
+    // Prefer live rollback (accurate during mid-run cancellation) over persisted state
+    const rb = _liveRollback || getProcessorState()?.rollback;
     if (!rb) return;
 
+    const state = getProcessorState();
     let rolledBack = 0;
 
     // Delete fact entries created by the previous run
@@ -605,7 +628,9 @@ async function rollbackLastPostTurn() {
             try {
                 await forgetEntry(rb.book, uid, true);
                 rolledBack++;
-            } catch { /* entry may have been manually removed */ }
+            } catch (e) {
+                console.warn(`[TunnelVision] Rollback: failed to delete fact UID ${uid}:`, e);
+            }
         }
     }
 
@@ -615,13 +640,17 @@ async function rollbackLastPostTurn() {
             try {
                 await updateEntry(book, uid, { content: previousContent });
                 rolledBack++;
-            } catch { /* tracker may have been manually changed */ }
+            } catch (e) {
+                console.warn(`[TunnelVision] Rollback: failed to revert tracker UID ${uid}:`, e);
+            }
         }
     }
 
+    _liveRollback = null;
+
     // Reset processor state so the next run is allowed
     setProcessorState({
-        lastProcessedMsgIdx: Math.max((state.lastProcessedMsgIdx ?? 0) - 1, -1),
+        lastProcessedMsgIdx: Math.max((state?.lastProcessedMsgIdx ?? 0) - 1, -1),
         lastProcessedAt: 0,
         lastResult: null,
         rollback: null,

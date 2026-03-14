@@ -97,15 +97,30 @@ function onUserMessageSent() {
  * with the current generation.
  */
 function onAiMessageReceived() {
-    if (!incrementCounter()) return;
+    const settings = getSettings();
+    if (!settings.autoSummaryEnabled || settings.globalEnabled === false) return;
+
+    // Skip tool-call recursion
+    try {
+        const context = getContext();
+        const lastMsg = context.chat?.[context.chat.length - 1];
+        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
+    } catch { /* proceed */ }
+
+    // Detect swipe: chat length hasn't grown → regenerated response, skip counter
+    const chatLength = getContext().chat?.length || 0;
+    const isSwipe = chatLength > 0 && chatLength <= _chatRef.lastChatLength;
+    _chatRef.lastChatLength = chatLength;
+    if (isSwipe) return;
 
     const chatId = getChatId();
     if (!chatId) return;
 
-    const settings = getSettings();
-    const interval = settings.autoSummaryInterval || 50;
-    const count = getCount(chatId);
+    const count = getCount(chatId) + 1;
+    counters.set(chatId, count);
+    persistCount(count);
 
+    const interval = settings.autoSummaryInterval || 50;
     if (count >= interval) {
         // Skip if the post-turn processor is currently running or just archived a scene,
         // to avoid producing a duplicate summary for the same range of messages.

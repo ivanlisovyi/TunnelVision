@@ -151,6 +151,7 @@ export async function runLifecycleMaintenance(force = false) {
         return result;
     } catch (e) {
         console.error('[TunnelVision] Lifecycle maintenance failed:', e);
+        toastr.error(`Memory lifecycle maintenance failed: ${e.message || 'Unknown error'}`, 'TunnelVision');
         addBackgroundEvent({
             icon: 'fa-triangle-exclamation',
             verb: 'Lifecycle failed',
