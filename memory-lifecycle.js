@@ -6,7 +6,7 @@
  *
  *   1. Consolidation — Find entries about the same entity and merge them
  *   2. Compression — Condense verbose entries while preserving key facts
- *   3. Staleness flagging — Entries not accessed in many turns get reviewed
+ *   3. Reorganization — Categorize orphaned entries into the tree index
  *
  * Unlike the Post-Turn Processor (which runs after every exchange), the Lifecycle
  * Manager runs less frequently and makes bigger structural changes. Think of it
@@ -18,9 +18,9 @@
 
 import { eventSource, event_types, generateQuietPrompt } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
-import { getSettings } from './tree-store.js';
+import { getSettings, getTree, saveTree, createTreeNode, addEntryToNode, removeEntryFromTree, getAllEntryUids, isSummaryTitle, isTrackerTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries } from './entry-manager.js';
+import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getChatId, shouldSkipAiMessage, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
@@ -94,6 +94,7 @@ export async function runLifecycleMaintenance(force = false) {
         entriesCompressed: 0,
         duplicatesFound: 0,
         duplicatesMerged: 0,
+        entriesReorganized: 0,
         errors: 0,
     };
 
@@ -122,6 +123,15 @@ export async function runLifecycleMaintenance(force = false) {
                 result.entriesCompressed += compressResult.compressed;
                 result.errors += compressResult.errors;
             }
+
+            if (getChatId() !== chatId || task.cancelled) break;
+
+            // ── Step 3: Reorganize orphaned entries into tree categories ──
+            if (settings.lifecycleReorganize !== false) {
+                const reorgResult = await reorganizeTree(bookName, bookData, chatId);
+                result.entriesReorganized += reorgResult.reorganized;
+                result.errors += reorgResult.errors;
+            }
         }
 
         if (!task.cancelled) {
@@ -136,6 +146,7 @@ export async function runLifecycleMaintenance(force = false) {
         if (result.entriesCompressed > 0) details.push(`${result.entriesCompressed} compressed`);
         if (result.duplicatesMerged > 0) details.push(`${result.duplicatesMerged} merged`);
         else if (result.duplicatesFound > 0) details.push(`${result.duplicatesFound} duplicate pairs`);
+        if (result.entriesReorganized > 0) details.push(`${result.entriesReorganized} reorganized`);
         console.log(`[TunnelVision] Lifecycle maintenance complete: ${details.length > 0 ? details.join(', ') : 'no changes needed'}`);
 
         if (details.length > 0) {
@@ -319,6 +330,139 @@ async function compressVerboseEntries(bookName, bookData, chatId) {
             console.warn(`[TunnelVision] Lifecycle: compression failed for "${entry.title}":`, e);
             result.errors++;
         }
+    }
+
+    return result;
+}
+
+// ── Step 3: Tree Reorganization ──────────────────────────────────
+
+const REORGANIZE_BATCH_LIMIT = 30;
+
+/**
+ * Find entries that are orphaned (on root node or missing from the tree entirely)
+ * and use an LLM call to assign them to existing tree categories.
+ */
+async function reorganizeTree(bookName, bookData, chatId) {
+    const result = { reorganized: 0, errors: 0 };
+
+    const tree = getTree(bookName);
+    if (!tree?.root || tree.root.children.length === 0) return result;
+
+    const assignedUids = new Set(getAllEntryUids(tree.root));
+    const rootUidSet = new Set(tree.root.entryUids || []);
+
+    // Collect orphaned entries: on root or not in tree at all
+    const orphaned = [];
+    for (const key of Object.keys(bookData.entries)) {
+        const entry = bookData.entries[key];
+        if (!entry || entry.disable) continue;
+        if (isSummaryTitle(entry.comment) || isTrackerTitle(entry.comment)) continue;
+
+        const onRoot = rootUidSet.has(entry.uid);
+        const missing = !assignedUids.has(entry.uid);
+        if (onRoot || missing) {
+            orphaned.push(entry);
+        }
+    }
+
+    if (orphaned.length === 0) return result;
+
+    const batch = orphaned.slice(0, REORGANIZE_BATCH_LIMIT);
+
+    // Collect existing category paths (excluding Summaries)
+    const categories = [];
+    function collectCategories(node, prefix) {
+        for (const child of (node.children || [])) {
+            if (child.label === 'Summaries') continue;
+            const path = prefix ? `${prefix} > ${child.label}` : child.label;
+            const desc = child.summary ? ` — ${child.summary}` : '';
+            categories.push({ path, label: child.label, id: child.id, desc });
+            collectCategories(child, path);
+        }
+    }
+    collectCategories(tree.root, '');
+
+    if (categories.length === 0) return result;
+
+    const entryList = batch.map(e => {
+        const label = e.comment || e.key?.[0] || `Entry #${e.uid}`;
+        const preview = (e.content || '').substring(0, 150).replace(/\n/g, ' ');
+        return `  UID ${e.uid}: "${label}" — ${preview}`;
+    }).join('\n');
+
+    const catList = categories.map(c => `  - "${c.path}"${c.desc}`).join('\n');
+
+    const quietPrompt = [
+        'You are a lorebook organization assistant. Assign each entry to the most appropriate existing category.',
+        '',
+        '[Existing Categories]',
+        catList,
+        '',
+        '[Entries to Categorize]',
+        entryList,
+        '',
+        'Assign each entry UID to the best matching category. Use the category name (last segment, not the full path).',
+        'If an entry genuinely doesn\'t fit any category, use "new: Suggested Name" as the category.',
+        'Respond with ONLY a JSON array: [{"uid": 123, "category": "Category Name"}]',
+        'No commentary, no code fences.',
+    ].join('\n');
+
+    try {
+        const response = await callWithRetry(
+            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            { label: 'Lifecycle reorganize', maxRetries: 1 },
+        );
+        if (getChatId() !== chatId) return result;
+
+        const assignments = parseJsonFromLLM(response, { type: 'array' });
+        if (!Array.isArray(assignments) || assignments.length === 0) return result;
+
+        // Build a label→node map (case-insensitive) for fast lookup
+        const labelMap = new Map();
+        function indexNodes(node) {
+            labelMap.set(node.label.toLowerCase(), node);
+            for (const child of (node.children || [])) indexNodes(child);
+        }
+        for (const child of tree.root.children) indexNodes(child);
+
+        const batchUids = new Set(batch.map(e => e.uid));
+
+        for (const assignment of assignments) {
+            if (!assignment?.uid || !assignment?.category) continue;
+            const uid = Number(assignment.uid);
+            if (!batchUids.has(uid)) continue;
+
+            let targetNode = null;
+            const catStr = String(assignment.category).trim();
+
+            if (catStr.toLowerCase().startsWith('new:')) {
+                const newLabel = catStr.substring(4).trim();
+                if (newLabel) {
+                    targetNode = createTreeNode(newLabel, '');
+                    tree.root.children.push(targetNode);
+                    labelMap.set(newLabel.toLowerCase(), targetNode);
+                }
+            } else {
+                const segments = catStr.split('>').map(s => s.trim());
+                const lastSegment = segments[segments.length - 1].toLowerCase();
+                targetNode = labelMap.get(lastSegment) || labelMap.get(catStr.toLowerCase());
+            }
+
+            if (targetNode) {
+                removeEntryFromTree(tree.root, uid);
+                addEntryToNode(targetNode, uid);
+                result.reorganized++;
+            }
+        }
+
+        if (result.reorganized > 0) {
+            saveTree(bookName, tree);
+            console.log(`[TunnelVision] Lifecycle: reorganized ${result.reorganized} entries into tree categories in "${bookName}"`);
+        }
+    } catch (e) {
+        console.warn('[TunnelVision] Lifecycle tree reorganization failed:', e);
+        result.errors++;
     }
 
     return result;

@@ -10,6 +10,7 @@ import { loadWorldInfo } from '../../../world-info.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const TRACKER_TITLE_PREFIX = /^\[tracker[^\]]*\]/i;
+const SUMMARY_TITLE_PREFIX = /^\[(?:scene\s+)?summary/i;
 
 /**
  * @typedef {Object} TreeNode
@@ -344,6 +345,7 @@ Write naturally. Use tools when they help you stay consistent with established d
     lifecycleInterval: 30,
     lifecycleConsolidate: true,
     lifecycleCompress: true,
+    lifecycleReorganize: true,
     smartContextEnabled: false,
     smartContextLookback: 6,
     smartContextMaxEntries: 8,
@@ -598,6 +600,10 @@ export function listConnectionProfiles() {
 
 export function isTrackerTitle(title) {
     return TRACKER_TITLE_PREFIX.test(String(title || '').trim());
+}
+
+export function isSummaryTitle(title) {
+    return SUMMARY_TITLE_PREFIX.test(String(title || '').trim());
 }
 
 export function getTrackerUids(bookName) {

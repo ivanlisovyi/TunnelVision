@@ -18,9 +18,11 @@ import {
     createEmptyTree,
     createTreeNode,
     addEntryToNode,
+    removeEntryFromTree,
     saveTree,
     getAllEntryUids,
     getSettings,
+    isSummaryTitle,
 } from './tree-store.js';
 
 /**
@@ -156,10 +158,15 @@ export async function buildTreeFromMetadata(lorebookName, options = {}) {
     const entries = bookData.entries;
     const groupMap = new Map();
     const ungrouped = [];
+    const summaryEntries = [];
 
     for (const key of Object.keys(entries)) {
         const entry = entries[key];
         if (entry.disable) continue;
+        if (isSummaryTitle(entry.comment)) {
+            summaryEntries.push(entry);
+            continue;
+        }
         const groupName = entry.group?.trim();
         if (groupName) {
             for (const g of groupName.split(',').map(s => s.trim()).filter(Boolean)) {
@@ -199,6 +206,18 @@ export async function buildTreeFromMetadata(lorebookName, options = {}) {
 
     if (options.generateSummaries) {
         await generateSummariesForTree(tree.root, lorebookName);
+    }
+
+    // Pin summary entries to the Summaries node
+    if (summaryEntries.length > 0) {
+        let summariesNode = tree.root.children.find(c => c.label === 'Summaries');
+        if (!summariesNode) {
+            summariesNode = createTreeNode('Summaries', 'Temporal scene summaries and event records created by the AI.');
+            tree.root.children.push(summariesNode);
+        }
+        for (const entry of summaryEntries) {
+            addEntryToNode(summariesNode, entry.uid);
+        }
     }
 
     tree.lastBuilt = Date.now();
@@ -261,13 +280,18 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
     }
 
     const activeEntries = [];
+    const summaryEntries = [];
     for (const key of Object.keys(bookData.entries)) {
         const entry = bookData.entries[key];
         if (entry.disable) continue;
-        activeEntries.push(entry);
+        if (isSummaryTitle(entry.comment)) {
+            summaryEntries.push(entry);
+        } else {
+            activeEntries.push(entry);
+        }
     }
 
-    if (activeEntries.length === 0) {
+    if (activeEntries.length === 0 && summaryEntries.length === 0) {
         throw new Error(`Lorebook "${lorebookName}" has no active entries to index.`);
     }
 
@@ -278,7 +302,7 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
     // Format all entries and split into chunks with overfill
     const chunks = chunkEntries(activeEntries, detail, chunkLimit);
     const gran = getEffectiveGranularity(activeEntries.length);
-    console.log(`[TunnelVision] Categorizing ${activeEntries.length} entries in ${chunks.length} chunk(s) (limit: ${chunkLimit} chars)`);
+    console.log(`[TunnelVision] Categorizing ${activeEntries.length} entries in ${chunks.length} chunk(s) (limit: ${chunkLimit} chars)${summaryEntries.length > 0 ? ` (${summaryEntries.length} summaries pinned)` : ''}`);
     console.log(`[TunnelVision] Using granularity level ${gran.level} (${gran.label}): ${gran.targetCategories} top-level categories, max ${gran.maxEntries} entries/node`);
 
     // First chunk: fresh categorization (must run alone to establish categories)
@@ -344,6 +368,19 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
     progress('Generating summaries…', 80);
     detail_('LLM writing descriptions for each category');
     await _generateSummariesForTree(tree.root, lorebookName, true, bookData);
+
+    // Pin summary entries to the Summaries node (never LLM-categorized)
+    if (summaryEntries.length > 0) {
+        let summariesNode = tree.root.children.find(c => c.label === 'Summaries');
+        if (!summariesNode) {
+            summariesNode = createTreeNode('Summaries', 'Temporal scene summaries and event records created by the AI.');
+            tree.root.children.push(summariesNode);
+        }
+        for (const entry of summaryEntries) {
+            removeEntryFromTree(tree.root, entry.uid);
+            addEntryToNode(summariesNode, entry.uid);
+        }
+    }
 
     saveTree(lorebookName, tree);
     return tree;
@@ -667,6 +704,7 @@ async function generateBookSummary(rootNode, lorebookName) {
  */
 async function subdivideLargeNodes(node, bookData, totalEntryCount = 0) {
     if (!bookData || !bookData.entries) return;
+    if (node.label === 'Summaries') return;
 
     const maxPerNode = getEffectiveGranularity(totalEntryCount).maxEntries;
     if (node.entryUids.length > maxPerNode && node.children.length === 0) {
