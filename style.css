@@ -1088,6 +1088,33 @@
     border-color: rgba(108, 92, 231, 0.3) !important;
 }
 
+/* Active background task items (live, cancellable) */
+.tv-active-task {
+    background: rgba(108, 92, 231, 0.08);
+    border-bottom: 1px solid rgba(108, 92, 231, 0.2);
+    position: relative;
+}
+.tv-active-task-cancel {
+    all: unset;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    color: rgba(255, 255, 255, 0.4);
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+}
+.tv-active-task-cancel:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.12);
+}
+.tv-active-task-fading {
+    opacity: 0.4;
+}
+
 /* Panel */
 .tv-float-panel {
     position: fixed;

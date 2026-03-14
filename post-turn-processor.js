@@ -27,7 +27,7 @@ import { createEntry, updateEntry, getCachedWorldInfo, buildUidMap, parseJsonFro
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, shouldSkipAiMessage } from './agent-utils.js';
-import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -136,7 +136,7 @@ export async function runPostTurnProcessor(force = false) {
     if (error || !targetBook) return null;
 
     _processorRunning = true;
-    const endActivity = markBackgroundStart();
+    const task = registerBackgroundTask({ label: 'Post-turn', icon: 'fa-brain', color: '#6c5ce7' });
 
     const state = getProcessorState();
     const lastIdx = state?.lastProcessedMsgIdx ?? -1;
@@ -146,7 +146,7 @@ export async function runPostTurnProcessor(force = false) {
 
     if (!recentExcerpt.trim()) {
         _processorRunning = false;
-        endActivity();
+        task.end();
         return null;
     }
 
@@ -161,11 +161,10 @@ export async function runPostTurnProcessor(force = false) {
     };
 
     try {
-        // Abort if chat changed
-        if (getChatId() !== chatId) return null;
+        // Abort if chat changed or user cancelled
+        if (getChatId() !== chatId || task.cancelled) return null;
 
         // ── Step 1: Fact Extraction + Scene Detection ────────────
-        // Single LLM call handles both to minimize API usage
         let sceneChange = null;
         if (settings.postTurnExtractFacts !== false) {
             const analysisResult = await analyzeExchange(targetBook, recentExcerpt, chatId);
@@ -174,10 +173,9 @@ export async function runPostTurnProcessor(force = false) {
             sceneChange = analysisResult.sceneChange;
         }
 
-        if (getChatId() !== chatId) return null;
+        if (getChatId() !== chatId || task.cancelled) return null;
 
         // ── Step 2: Scene Archiving ──────────────────────────────
-        // When a scene change is detected, create a historical summary
         if (sceneChange?.detected && settings.postTurnSceneArchive !== false) {
             const archiveResult = await archiveScene(targetBook, chat, sceneChange, chatId);
             result.sceneArchived = archiveResult.archived;
@@ -186,7 +184,7 @@ export async function runPostTurnProcessor(force = false) {
             if (archiveResult.archived) _lastArchivedAt = Date.now();
         }
 
-        if (getChatId() !== chatId) return null;
+        if (getChatId() !== chatId || task.cancelled) return null;
 
         // ── Step 3: Tracker Updates ──────────────────────────────
         if (settings.postTurnUpdateTrackers !== false) {
@@ -197,6 +195,8 @@ export async function runPostTurnProcessor(force = false) {
                 result.errors += trackerResult.errors;
             }
         }
+
+        if (task.cancelled) return null;
 
         // Record completion
         setProcessorState({
@@ -239,7 +239,7 @@ export async function runPostTurnProcessor(force = false) {
         return null;
     } finally {
         _processorRunning = false;
-        endActivity();
+        task.end();
     }
 }
 

@@ -18,7 +18,7 @@ import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getChatId, formatChatExcerpt, shouldSkipAiMessage } from './agent-utils.js';
-import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
 
@@ -184,12 +184,12 @@ export async function updateWorldState(forceUpdate = false) {
     if (!recentExcerpt.trim()) return null;
 
     _updateRunning = true;
-    const endActivity = markBackgroundStart();
+    const task = registerBackgroundTask({ label: 'World state', icon: 'fa-globe', color: '#00b894' });
     console.log(`[TunnelVision] World state update triggered (${messagesSinceUpdate} new messages)`);
 
     try {
-        if (getChatId() !== chatId) {
-            console.log('[TunnelVision] World state update aborted: chat changed');
+        if (getChatId() !== chatId || task.cancelled) {
+            console.log('[TunnelVision] World state update aborted');
             return null;
         }
 
@@ -198,8 +198,8 @@ export async function updateWorldState(forceUpdate = false) {
 
         const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
 
-        if (getChatId() !== chatId) {
-            console.log('[TunnelVision] World state update aborted: chat changed during generation');
+        if (getChatId() !== chatId || task.cancelled) {
+            console.log('[TunnelVision] World state update aborted after generation');
             return null;
         }
 
@@ -237,7 +237,7 @@ export async function updateWorldState(forceUpdate = false) {
         return null;
     } finally {
         _updateRunning = false;
-        endActivity();
+        task.end();
     }
 }
 

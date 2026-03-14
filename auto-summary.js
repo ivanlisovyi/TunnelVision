@@ -11,7 +11,7 @@ import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { isProcessorRunning, hasRecentArchive } from './post-turn-processor.js';
 import { getChatId, shouldSkipAiMessage } from './agent-utils.js';
-import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const TV_COUNTER_META_KEY = 'tunnelvision_autosummary_count';
 
@@ -184,24 +184,27 @@ async function runBackgroundSummary(chatId, count) {
     if (!chat || chat.length < 5) return;
 
     _backgroundSummaryRunning = true;
-    const endActivity = markBackgroundStart();
+    const task = registerBackgroundTask({ label: 'Auto-summary', icon: 'fa-scroll', color: '#fdcb6e' });
     console.log(`[TunnelVision] Auto-summary triggered after ${count} messages`);
 
     try {
-        if (getChatId() !== chatId) {
-            console.log('[TunnelVision] Auto-summary aborted: chat changed during execution');
+        if (getChatId() !== chatId || task.cancelled) {
+            console.log('[TunnelVision] Auto-summary aborted');
             return;
         }
 
         const { runQuietSummarize } = await import('./commands.js');
 
-        if (getChatId() !== chatId) {
-            console.log('[TunnelVision] Auto-summary aborted: chat changed during import');
+        if (getChatId() !== chatId || task.cancelled) {
+            console.log('[TunnelVision] Auto-summary aborted');
             return;
         }
 
         const messageCount = Math.min(chat.length, count);
         const result = await runQuietSummarize(lorebook, chat, messageCount, '', { background: true });
+
+        if (task.cancelled) return;
+
         const factsMsg = result.factsCreated > 0 ? ` + ${result.factsCreated} fact(s)` : '';
         toastr.success(`Auto-summary saved: "${result.title}"${factsMsg}`, 'TunnelVision');
         addBackgroundEvent({
@@ -221,7 +224,7 @@ async function runBackgroundSummary(chatId, count) {
         });
     } finally {
         _backgroundSummaryRunning = false;
-        endActivity();
+        task.end();
     }
 }
 

@@ -23,7 +23,7 @@ import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getChatId, shouldSkipAiMessage } from './agent-utils.js';
-import { addBackgroundEvent, markBackgroundStart } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_lifecycle';
 
@@ -88,7 +88,7 @@ export async function runLifecycleMaintenance(force = false) {
 
     const chatId = getChatId();
     _lifecycleRunning = true;
-    const endActivity = markBackgroundStart();
+    const task = registerBackgroundTask({ label: 'Lifecycle', icon: 'fa-recycle', color: '#00cec9' });
 
     const result = {
         entriesCompressed: 0,
@@ -100,7 +100,7 @@ export async function runLifecycleMaintenance(force = false) {
 
     try {
         for (const bookName of activeBooks) {
-            if (getChatId() !== chatId) break;
+            if (getChatId() !== chatId || task.cancelled) break;
 
             const bookData = await getCachedWorldInfo(bookName);
             if (!bookData?.entries) continue;
@@ -112,7 +112,7 @@ export async function runLifecycleMaintenance(force = false) {
                 result.errors += dupeResult.errors;
             }
 
-            if (getChatId() !== chatId) break;
+            if (getChatId() !== chatId || task.cancelled) break;
 
             // ── Step 2: Compress verbose entries ──
             if (settings.lifecycleCompress !== false) {
@@ -122,11 +122,13 @@ export async function runLifecycleMaintenance(force = false) {
             }
         }
 
-        setLifecycleState({
-            lastRunMsgIdx: (getContext().chat?.length || 1) - 1,
-            lastRunAt: Date.now(),
-            lastResult: result,
-        });
+        if (!task.cancelled) {
+            setLifecycleState({
+                lastRunMsgIdx: (getContext().chat?.length || 1) - 1,
+                lastRunAt: Date.now(),
+                lastResult: result,
+            });
+        }
 
         const details = [];
         if (result.entriesCompressed > 0) details.push(`${result.entriesCompressed} compressed`);
@@ -155,7 +157,7 @@ export async function runLifecycleMaintenance(force = false) {
         return null;
     } finally {
         _lifecycleRunning = false;
-        endActivity();
+        task.end();
     }
 }
 

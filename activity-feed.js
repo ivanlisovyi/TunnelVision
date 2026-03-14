@@ -529,6 +529,17 @@ function renderEmptyState(tab) {
 function renderAllItems() {
     if (!panelBody) return;
     const tab = getActiveTab();
+
+    panelBody.replaceChildren();
+
+    // Active background tasks — shown at top in 'all' and 'bg' tabs
+    const showActiveTasks = (tab === 'all' || tab === 'bg') && _activeTasks.size > 0;
+    if (showActiveTasks) {
+        for (const task of _activeTasks.values()) {
+            panelBody.appendChild(buildActiveTaskElement(task));
+        }
+    }
+
     const filtered = feedItems.filter(item => {
         if (tab === 'all') return true;
         if (tab === 'wi') return item.type === 'entry' || item.type === 'wi';
@@ -537,15 +548,48 @@ function renderAllItems() {
         return true;
     });
 
-    if (filtered.length === 0) {
+    if (filtered.length === 0 && !showActiveTasks) {
         renderEmptyState(tab);
         return;
     }
 
-    panelBody.replaceChildren();
     for (const item of filtered) {
         panelBody.appendChild(buildItemElement(item));
     }
+}
+
+function buildActiveTaskElement(task) {
+    const row = el('div', 'tv-float-item tv-active-task');
+
+    const iconWrap = el('div', 'tv-float-item-icon');
+    iconWrap.style.color = task.color;
+    const spinner = document.createElement('i');
+    spinner.className = task.cancelled
+        ? `fa-solid ${task.icon} tv-active-task-fading`
+        : `fa-solid ${task.icon} fa-spin`;
+    iconWrap.appendChild(spinner);
+    row.appendChild(iconWrap);
+
+    const body = el('div', 'tv-float-item-body');
+    const textRow = el('div', 'tv-float-item-row');
+    const verb = el('span', 'tv-float-item-verb', task.label);
+    verb.style.color = task.color;
+    textRow.appendChild(verb);
+
+    const statusText = task.cancelled ? 'Cancelling...' : 'Running...';
+    textRow.appendChild(el('span', 'tv-float-item-summary', statusText));
+    body.appendChild(textRow);
+    row.appendChild(body);
+
+    if (!task.cancelled) {
+        const cancelBtn = el('button', 'tv-active-task-cancel');
+        cancelBtn.title = 'Cancel';
+        cancelBtn.appendChild(icon('fa-xmark'));
+        cancelBtn.addEventListener('click', () => cancelBackgroundTask(task.id));
+        row.appendChild(cancelBtn);
+    }
+
+    return row;
 }
 
 function buildItemElement(item) {
@@ -713,6 +757,83 @@ export function markBackgroundStart() {
         ended = true;
         setBackgroundActive(false);
     };
+}
+
+// ── Cancellable Background Tasks ─────────────────────────────────
+
+/** @type {Map<number, BackgroundTask>} */
+const _activeTasks = new Map();
+let _nextTaskId = 0;
+
+/**
+ * @typedef {Object} BackgroundTask
+ * @property {number} id
+ * @property {string} label
+ * @property {string} icon
+ * @property {string} color
+ * @property {number} startedAt
+ * @property {boolean} cancelled - Check this at async boundaries to abort early
+ * @property {() => void} end - Call when the task finishes (success, error, or cancel)
+ */
+
+/**
+ * Register a cancellable background task. Shows a live indicator in the feed
+ * with a cancel button. The caller should check `task.cancelled` at each async
+ * boundary and bail out if true.
+ *
+ * @param {Object} opts
+ * @param {string} opts.label - Display label (e.g. 'Post-turn processing')
+ * @param {string} [opts.icon='fa-gear'] - FontAwesome icon class
+ * @param {string} [opts.color='#6c5ce7'] - CSS color
+ * @returns {BackgroundTask}
+ */
+export function registerBackgroundTask({ label, icon: taskIcon = 'fa-gear', color = '#6c5ce7' }) {
+    const id = _nextTaskId++;
+    const task = {
+        id,
+        label,
+        icon: taskIcon,
+        color,
+        startedAt: Date.now(),
+        cancelled: false,
+        _ended: false,
+        end() {
+            if (task._ended) return;
+            task._ended = true;
+            _activeTasks.delete(id);
+            setBackgroundActive(false);
+            refreshActiveTasksInPanel();
+        },
+    };
+
+    _activeTasks.set(id, task);
+    setBackgroundActive(true);
+    refreshActiveTasksInPanel();
+    return task;
+}
+
+/**
+ * Cancel a running background task by ID.
+ * Sets the cancelled flag — the processor is responsible for checking it.
+ */
+export function cancelBackgroundTask(id) {
+    const task = _activeTasks.get(id);
+    if (task && !task.cancelled) {
+        task.cancelled = true;
+        console.log(`[TunnelVision] Background task cancelled by user: ${task.label}`);
+        refreshActiveTasksInPanel();
+    }
+}
+
+/** @returns {ReadonlyMap<number, BackgroundTask>} */
+export function getActiveTasks() {
+    return _activeTasks;
+}
+
+function refreshActiveTasksInPanel() {
+    if (!panelEl?.classList.contains('open')) return;
+    if (showingWorldState) return;
+    renderAllItems();
 }
 
 // ── Hidden Tool Call (Visual Hiding) ──
