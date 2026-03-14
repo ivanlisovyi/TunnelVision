@@ -712,6 +712,34 @@
                                     <button id="tv_world_state_clear" class="tv-btn tv-btn-secondary tv-btn-sm" title="Clear the world state">Clear</button>
                                 </div>
                                 <div id="tv_world_state_preview" class="tv-help-text" style="margin-top: 6px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; font-size: 0.85em; opacity: 0.8; border: 1px solid var(--SmartThemeBorderColor); border-radius: 6px; padding: 8px; display: none;"></div>
+
+                                <hr class="tv-adv-divider" />
+                                <div class="tv-adv-section-title" style="font-size: 11px;">Prompt Overrides</div>
+                                <div class="tv-help-text" style="margin-bottom: 8px;">
+                                    Customize the prompts used by the world state system. Leave empty to use the built-in defaults.
+                                </div>
+
+                                <div class="tv-tool-prompt-block" id="tv_ws_injection_block">
+                                    <div class="tv-tool-prompt-header">
+                                        <span class="tv-tool-prompt-label">Injection Prompt</span>
+                                        <button class="tv-tool-prompt-reset" id="tv_ws_injection_reset" title="Reset to default">Reset</button>
+                                    </div>
+                                    <div class="tv-help-text" style="margin: 4px 0 6px; font-size: 10px;">
+                                        Header text prepended to the world state content when injected into the AI's context each turn.
+                                    </div>
+                                    <textarea id="tv_ws_injection_prompt" class="tv-tool-prompt-textarea" rows="4" placeholder="Uses built-in default if empty"></textarea>
+                                </div>
+
+                                <div class="tv-tool-prompt-block" id="tv_ws_update_block" style="margin-top: 8px;">
+                                    <div class="tv-tool-prompt-header">
+                                        <span class="tv-tool-prompt-label">Update Prompt</span>
+                                        <button class="tv-tool-prompt-reset" id="tv_ws_update_reset" title="Reset to default">Reset</button>
+                                    </div>
+                                    <div class="tv-help-text" style="margin: 4px 0 6px; font-size: 10px;">
+                                        Instructions sent to the LLM when generating or refreshing the world state. Controls the format, sections, and guidelines. The recent conversation and previous state are injected automatically.
+                                    </div>
+                                    <textarea id="tv_ws_update_prompt" class="tv-tool-prompt-textarea" rows="8" placeholder="Uses built-in default if empty"></textarea>
+                                </div>
                             </div>
                         </div>
 

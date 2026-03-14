@@ -22,6 +22,45 @@ import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
 
+/** Default injection header wrapping the world state text in the AI's context. */
+export const DEFAULT_WS_INJECTION_PROMPT = [
+    '[Rolling World State — Your maintained memory of the current story.',
+    'This is automatically kept up-to-date. Reference it to stay grounded in the scene,',
+    'know what\'s happening, and maintain consistency. Do NOT repeat this information',
+    'verbatim in your responses — use it to inform your writing.]',
+].join('\n');
+
+/** Default LLM instructions for generating/updating the world state document. */
+export const DEFAULT_WS_UPDATE_PROMPT = [
+    'You are a narrative state tracker for an ongoing roleplay. Maintain a concise "World State" document capturing the current state of the story.',
+    '',
+    'Follow this exact format:',
+    '',
+    '## Current Scene',
+    'Location: [where the action is happening]',
+    'Time: [in-world time estimate, or "unspecified" if unclear]',
+    'Present: [characters currently in the scene]',
+    'Situation: [1-2 sentences of what is actively happening right now]',
+    '',
+    '## Off-Screen',
+    '[Characters not in the current scene but still active in the story. Format: "- **Name**: location / activity (since when)". Remove characters who return to the scene. Only include characters who have been established — do not invent new ones.]',
+    '',
+    '## Pending',
+    '[Near-term events, promises, appointments, and deadlines the story has established. Format: "- event/obligation (when)". Remove items once they happen or become irrelevant. Only include things explicitly stated or strongly implied in the story — do not invent events.]',
+    '',
+    '## Recent Events',
+    '[3-5 bullet points of the most recent significant events, newest first. One line each.]',
+    '',
+    '## Active Threads',
+    '[Ongoing storylines/plot threads. Format each as: "- **Thread Name**: current status". Remove resolved threads, add new ones as they emerge.]',
+    '',
+    '## Key Character States',
+    '[For each active character: "- **Name**: mood, current goal, notable status". Only characters active in recent scenes.]',
+    '',
+    'Be concise — the entire document should be under 600 words. This replaces the previous version entirely.',
+    'Respond with ONLY the world state content. No JSON, no code fences, no commentary.',
+].join('\n');
+
 let _updateRunning = false;
 const _chatRef = { lastChatLength: 0 };
 
@@ -64,14 +103,8 @@ export function buildWorldStatePrompt() {
         text = text.substring(0, cutoff > maxChars * 0.5 ? cutoff : maxChars) + '\n[...truncated]';
     }
 
-    return [
-        '[Rolling World State — Your maintained memory of the current story.',
-        'This is automatically kept up-to-date. Reference it to stay grounded in the scene,',
-        'know what\'s happening, and maintain consistency. Do NOT repeat this information',
-        'verbatim in your responses — use it to inform your writing.]',
-        '',
-        text,
-    ].join('\n');
+    const header = settings.worldStateInjectionOverride?.trim() || DEFAULT_WS_INJECTION_PROMPT;
+    return header + '\n\n' + text;
 }
 
 // ── Update Decision ──────────────────────────────────────────────
@@ -98,11 +131,10 @@ function shouldUpdate() {
 
 function buildUpdatePrompt(previousState, recentExcerpt) {
     const hasPrevious = previousState && previousState.trim().length > 0;
+    const settings = getSettings();
+    const instructions = settings.worldStateUpdateOverride?.trim() || DEFAULT_WS_UPDATE_PROMPT;
 
-    const parts = [
-        'You are a narrative state tracker for an ongoing roleplay. Maintain a concise "World State" document capturing the current state of the story.',
-        '',
-    ];
+    const parts = [];
 
     if (hasPrevious) {
         parts.push(
@@ -113,8 +145,6 @@ function buildUpdatePrompt(previousState, recentExcerpt) {
         );
     } else {
         parts.push(
-            'No previous world state exists — create one from scratch based on the conversation.',
-            '',
             '[Recent Conversation]',
         );
     }
@@ -124,33 +154,9 @@ function buildUpdatePrompt(previousState, recentExcerpt) {
         '',
         hasPrevious
             ? 'Update the World State based on what happened in these messages. Preserve information that is still relevant, update what changed, remove what is no longer applicable.'
-            : 'Create an initial World State based on this conversation.',
+            : 'No previous world state exists. Create an initial World State based on this conversation.',
         '',
-        'Follow this exact format:',
-        '',
-        '## Current Scene',
-        'Location: [where the action is happening]',
-        'Time: [in-world time estimate, or "unspecified" if unclear]',
-        'Present: [characters currently in the scene]',
-        'Situation: [1-2 sentences of what is actively happening right now]',
-        '',
-        '## Off-Screen',
-        '[Characters not in the current scene but still active in the story. Track where they are and what they\'re doing. Format: "- **Name**: location / activity (since when)". Remove characters who return to the scene. Only include characters who have been established — do not invent new ones.]',
-        '',
-        '## Pending',
-        '[Near-term events, promises, appointments, and deadlines the story has established. Format: "- event/obligation (when)". Remove items once they happen or become irrelevant. Only include things explicitly stated or strongly implied in the story — do not invent events.]',
-        '',
-        '## Recent Events',
-        '[3-5 bullet points of the most recent significant events, newest first. One line each.]',
-        '',
-        '## Active Threads',
-        '[Ongoing storylines/plot threads. Format each as: "- **Thread Name**: current status". Remove resolved threads, add new ones as they emerge.]',
-        '',
-        '## Key Character States',
-        '[For each active character: "- **Name**: mood, current goal, notable status". Only characters active in recent scenes.]',
-        '',
-        'Be concise — the entire document should be under 600 words. This replaces the previous version entirely.',
-        'Respond with ONLY the world state content. No JSON, no code fences, no commentary.',
+        instructions,
     );
 
     return parts.join('\n');

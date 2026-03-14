@@ -336,6 +336,8 @@ Write naturally. Use tools when they help you stay consistent with established d
     worldStatePosition: 'in_chat',
     worldStateDepth: 2,
     worldStateRole: 'system',
+    worldStateInjectionOverride: '',
+    worldStateUpdateOverride: '',
     postTurnEnabled: false,
     postTurnCooldown: 1,
     postTurnExtractFacts: true,

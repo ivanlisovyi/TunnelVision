@@ -7,7 +7,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { world_names, loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getAutoSummaryCount, resetAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
-import { getWorldStateText, getWorldStateLastIndex, updateWorldState, clearWorldState, isWorldStateUpdating } from './world-state.js';
+import { getWorldStateText, getWorldStateLastIndex, updateWorldState, clearWorldState, isWorldStateUpdating, DEFAULT_WS_INJECTION_PROMPT, DEFAULT_WS_UPDATE_PROMPT } from './world-state.js';
 import { getLastProcessingResult, getLastProcessedIndex } from './post-turn-processor.js';
 import { getLastLifecycleResult, getLastLifecycleRunIndex } from './memory-lifecycle.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
@@ -168,6 +168,10 @@ export function bindUIEvents() {
     $('#tv_world_state_role').on('change', onWorldStateInjectionChange);
     $('#tv_world_state_refresh').on('click', onWorldStateRefresh);
     $('#tv_world_state_clear').on('click', onWorldStateClear);
+    $('#tv_ws_injection_prompt').on('input', onWsInjectionPromptChange);
+    $('#tv_ws_injection_reset').on('click', onWsInjectionPromptReset);
+    $('#tv_ws_update_prompt').on('input', onWsUpdatePromptChange);
+    $('#tv_ws_update_reset').on('click', onWsUpdatePromptReset);
 
     // Post-turn processor settings
     $('#tv_post_turn_enabled').on('change', onPostTurnToggle);
@@ -311,6 +315,7 @@ export function refreshUI() {
     $('#tv_world_state_depth').val(settings.worldStateDepth ?? 2);
     $('#tv_world_state_role').val(settings.worldStateRole || 'system');
     $('#tv_world_state_depth_row').toggle((settings.worldStatePosition || 'in_chat') === 'in_chat');
+    syncWsPromptOverrides(settings);
     refreshWorldStateStatus();
 
     // Sync post-turn processor settings
@@ -1033,6 +1038,59 @@ function refreshWorldStateStatus() {
         $('#tv_world_state_status_text').text('No world state yet');
         $('#tv_world_state_preview').hide();
     }
+}
+
+// ── World State Prompt Override Handlers ──────────────────────────
+
+function syncWsPromptOverrides(settings) {
+    const injOverride = settings.worldStateInjectionOverride || '';
+    const updOverride = settings.worldStateUpdateOverride || '';
+    $('#tv_ws_injection_prompt').val(injOverride || DEFAULT_WS_INJECTION_PROMPT);
+    $('#tv_ws_update_prompt').val(updOverride || DEFAULT_WS_UPDATE_PROMPT);
+    $('#tv_ws_injection_block').toggleClass('tv-tool-prompt-modified', !!injOverride);
+    $('#tv_ws_update_block').toggleClass('tv-tool-prompt-modified', !!updOverride);
+}
+
+function onWsInjectionPromptChange() {
+    const value = $(this).val().trim();
+    const settings = getSettings();
+    if (!value || value === DEFAULT_WS_INJECTION_PROMPT) {
+        settings.worldStateInjectionOverride = '';
+        $('#tv_ws_injection_block').removeClass('tv-tool-prompt-modified');
+    } else {
+        settings.worldStateInjectionOverride = value;
+        $('#tv_ws_injection_block').addClass('tv-tool-prompt-modified');
+    }
+    saveSettingsDebounced();
+}
+
+function onWsInjectionPromptReset() {
+    const settings = getSettings();
+    settings.worldStateInjectionOverride = '';
+    saveSettingsDebounced();
+    $('#tv_ws_injection_prompt').val(DEFAULT_WS_INJECTION_PROMPT);
+    $('#tv_ws_injection_block').removeClass('tv-tool-prompt-modified');
+}
+
+function onWsUpdatePromptChange() {
+    const value = $(this).val().trim();
+    const settings = getSettings();
+    if (!value || value === DEFAULT_WS_UPDATE_PROMPT) {
+        settings.worldStateUpdateOverride = '';
+        $('#tv_ws_update_block').removeClass('tv-tool-prompt-modified');
+    } else {
+        settings.worldStateUpdateOverride = value;
+        $('#tv_ws_update_block').addClass('tv-tool-prompt-modified');
+    }
+    saveSettingsDebounced();
+}
+
+function onWsUpdatePromptReset() {
+    const settings = getSettings();
+    settings.worldStateUpdateOverride = '';
+    saveSettingsDebounced();
+    $('#tv_ws_update_prompt').val(DEFAULT_WS_UPDATE_PROMPT);
+    $('#tv_ws_update_block').removeClass('tv-tool-prompt-modified');
 }
 
 // ── Post-Turn Processor Handlers ─────────────────────────────────
