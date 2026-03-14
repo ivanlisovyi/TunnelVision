@@ -507,6 +507,12 @@
     cursor: not-allowed;
 }
 
+.tv-btn-sm {
+    padding: 3px 10px;
+    font-size: 0.8em;
+    flex: 0;
+}
+
 .tv-btn-icon {
     background: none;
     border: none;
