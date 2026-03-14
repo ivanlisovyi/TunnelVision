@@ -76,6 +76,7 @@ export function saveTree(lorebookName, tree) {
     ensureSettings();
     normalizeTree(tree, lorebookName);
     tree.lorebookName = lorebookName;
+    invalidateNodeIndex(tree.root);
     extension_settings[EXTENSION_NAME].trees[lorebookName] = tree;
     saveSettingsDebounced();
 }
@@ -132,20 +133,44 @@ export function setBookDescription(lorebookName, description) {
     saveSettingsDebounced();
 }
 
+// ── Node Index Cache ─────────────────────────────────────────────
+
+const _nodeIndexCache = new WeakMap();
+
+function buildNodeIndex(root) {
+    const index = new Map();
+    (function walk(node) {
+        if (!node) return;
+        if (node.id) index.set(node.id, node);
+        for (const child of (node.children || [])) walk(child);
+    })(root);
+    return index;
+}
+
 /**
- * Find a node by ID in the tree (depth-first).
- * @param {TreeNode} node
+ * Invalidate the cached node ID→node map for a tree root.
+ * Called automatically by saveTree; call manually after direct tree mutations.
+ * @param {TreeNode} root
+ */
+export function invalidateNodeIndex(root) {
+    if (root) _nodeIndexCache.delete(root);
+}
+
+/**
+ * Find a node by ID in the tree. Uses a lazily-built index for O(1) lookups.
+ * The index is invalidated when saveTree is called.
+ * @param {TreeNode} node - Tree root (or subtree root)
  * @param {string} nodeId
  * @returns {TreeNode|null}
  */
 export function findNodeById(node, nodeId) {
     if (!node) return null;
-    if (node.id === nodeId) return node;
-    for (const child of (node.children || [])) {
-        const found = findNodeById(child, nodeId);
-        if (found) return found;
+    let index = _nodeIndexCache.get(node);
+    if (!index) {
+        index = buildNodeIndex(node);
+        _nodeIndexCache.set(node, index);
     }
-    return null;
+    return index.get(nodeId) || null;
 }
 
 /**
@@ -225,28 +250,6 @@ export function getAllEntryUids(node) {
         uids.push(...getAllEntryUids(child));
     }
     return uids;
-}
-
-/**
- * Build a text representation of the tree for the LLM tool description.
- * This is what the model sees when deciding which branch to search.
- * @param {TreeNode} node
- * @param {number} depth
- * @returns {string}
- */
-export function buildTreeDescription(node, depth = 0) {
-    if (!node) return '';
-    const indent = '  '.repeat(depth);
-    const entryCount = (node.entryUids || []).length;
-    let desc = `${indent}- [${node.id}] ${node.label || 'Unnamed'}`;
-    if (node.summary) desc += `: ${node.summary}`;
-    if (entryCount > 0) desc += ` (${entryCount} entries)`;
-    desc += '\n';
-
-    for (const child of (node.children || [])) {
-        desc += buildTreeDescription(child, depth + 1);
-    }
-    return desc;
 }
 
 /**

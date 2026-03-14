@@ -23,7 +23,8 @@ import { getContext } from '../../../st-context.js';
 import { ToolManager } from '../../../tool-calling.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
-import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable } from './tool-registry.js';
+import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache } from './tool-registry.js';
+import { resetTurnEntryCount, invalidateWorldInfoCache } from './entry-manager.js';
 import { buildNotebookPrompt } from './tools/notebook.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
@@ -99,11 +100,15 @@ async function init() {
 }
 
 async function onChatChanged() {
+    invalidateActiveBookCache();
+    invalidateWorldInfoCache();
     refreshUI();
     await registerTools();
 }
 
 async function onWorldInfoUpdated() {
+    invalidateActiveBookCache();
+    invalidateWorldInfoCache();
     refreshUI();
     await registerTools();
 }
@@ -193,7 +198,7 @@ function stripOldToolResults() {
     if (!Array.isArray(filterList) || filterList.length === 0) return;
 
     // Notebook is always immune — it stores action confirmations the model needs
-    const strippable = new Set(filterList.filter(n => n !== 'TunnelVision_Notebook'));
+    const strippable = new Set(filterList.filter(n => n !== NOTEBOOK_NAME));
     if (strippable.size === 0) return;
 
     const context = getContext();
@@ -235,52 +240,58 @@ function stripOldToolResults() {
  * generations.
  */
 async function onGenerationStarted(type, opts) {
-    const settings = getSettings();
+    let settings, isRecursiveToolPass;
 
     // ── Synchronous section — must complete before ST builds the prompt ──
+    try {
+        settings = getSettings();
 
-    // Ephemeral mode: strip old TunnelVision tool results from context
-    if (settings.ephemeralResults) {
-        stripOldToolResults();
-    }
+        const context = getContext();
+        const lastMsg = context.chat?.[context.chat.length - 1];
+        const invocations = lastMsg?.extra?.tool_invocations;
+        isRecursiveToolPass = Array.isArray(invocations) && invocations.length > 0;
 
-    // Detect recursive tool-call passes: if the last chat message is a tool invocation,
-    // ST is re-running Generate() after processing tool results. Skip mandatory injection
-    // to prevent infinite tool-call loops (the model sees "you MUST call a tool" every pass).
-    const context = getContext();
-    const lastMsg = context.chat?.[context.chat.length - 1];
-    const invocations = lastMsg?.extra?.tool_invocations;
-    const isRecursiveToolPass = Array.isArray(invocations) && invocations.length > 0;
+        // Reset per-turn state on first pass only (not during tool recursion)
+        if (!isRecursiveToolPass) {
+            resetTurnEntryCount();
+            invalidateWorldInfoCache();
+        }
 
-    // Mandatory tool call instruction (only on first pass, not recursive)
-    const mandatoryPosition = mapPositionSetting(settings.mandatoryPromptPosition);
-    const mandatoryDepth = settings.mandatoryPromptDepth ?? 1;
-    const mandatoryRole = mapRoleSetting(settings.mandatoryPromptRole);
+        if (settings.ephemeralResults) {
+            stripOldToolResults();
+        }
 
-    const activeBooks = getActiveTunnelVisionBooks();
+        const mandatoryPosition = mapPositionSetting(settings.mandatoryPromptPosition);
+        const mandatoryDepth = settings.mandatoryPromptDepth ?? 1;
+        const mandatoryRole = mapRoleSetting(settings.mandatoryPromptRole);
 
-    if (
-        !isRecursiveToolPass
-        && settings.globalEnabled !== false
-        && settings.mandatoryTools
-        && activeBooks.length > 0
-    ) {
-        const prompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use TunnelVision tools this turn. Search for relevant context, Remember new facts, Update stale entries, and use Notebook for plans.]';
-        setExtensionPrompt(TV_PROMPT_KEY, prompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
-    } else {
-        setExtensionPrompt(TV_PROMPT_KEY, '', mandatoryPosition, mandatoryDepth, false, mandatoryRole);
-    }
+        const activeBooks = getActiveTunnelVisionBooks();
 
-    // Inject notebook contents every turn (if enabled and notes exist)
-    const notebookPosition = mapPositionSetting(settings.notebookPromptPosition);
-    const notebookDepth = settings.notebookPromptDepth ?? 1;
-    const notebookRole = mapRoleSetting(settings.notebookPromptRole);
+        if (
+            !isRecursiveToolPass
+            && settings.globalEnabled !== false
+            && settings.mandatoryTools
+            && activeBooks.length > 0
+        ) {
+            const prompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use TunnelVision tools this turn. Search for relevant context, Remember new facts, Update stale entries, and use Notebook for plans.]';
+            setExtensionPrompt(TV_PROMPT_KEY, prompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
+        } else {
+            setExtensionPrompt(TV_PROMPT_KEY, '', mandatoryPosition, mandatoryDepth, false, mandatoryRole);
+        }
 
-    if (settings.globalEnabled !== false && settings.notebookEnabled !== false) {
-        const notebookPrompt = buildNotebookPrompt();
-        setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, notebookPosition, notebookDepth, false, notebookRole);
-    } else {
-        setExtensionPrompt(TV_NOTEBOOK_KEY, '', notebookPosition, notebookDepth, false, notebookRole);
+        const notebookPosition = mapPositionSetting(settings.notebookPromptPosition);
+        const notebookDepth = settings.notebookPromptDepth ?? 1;
+        const notebookRole = mapRoleSetting(settings.notebookPromptRole);
+
+        if (settings.globalEnabled !== false && settings.notebookEnabled !== false) {
+            const notebookPrompt = buildNotebookPrompt();
+            setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, notebookPosition, notebookDepth, false, notebookRole);
+        } else {
+            setExtensionPrompt(TV_NOTEBOOK_KEY, '', notebookPosition, notebookDepth, false, notebookRole);
+        }
+    } catch (e) {
+        console.error('[TunnelVision] Error in onGenerationStarted synchronous section:', e);
+        if (!settings) return;
     }
 
     // ── Async section — background repair, safe to run after prompt is built ──

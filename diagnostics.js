@@ -22,6 +22,7 @@ import {
 } from './tree-store.js';
 import { getContext } from '../../../st-context.js';
 import { getActiveTunnelVisionBooks, ALL_TOOL_NAMES, CONFIRMABLE_TOOLS, preflightToolRuntimeState } from './tool-registry.js';
+import { buildUidMap, getCachedWorldInfo } from './entry-manager.js';
 
 
 /**
@@ -56,57 +57,64 @@ export async function runDiagnostics() {
         }
     }
 
+    // Phase 1: Settings and API connectivity (sequential — fast sync checks)
     await collect(checkSettingsExist);
     await collect(checkApiConnected);
     await collect(checkToolCallingSupport);
-    await collect(checkPromptPostProcessing);
-    await collect(checkActiveLorebooksExist);
-    await collect(checkTreesValid);
+
+    // Phase 2: Checks that may auto-fix tree/entry state (sequential to avoid races)
     await collect(checkEntryUidsValid);
-    await collect(checkNodeSummaries);
-    await collect(checkDuplicateUids);
-    await collect(checkNearDuplicateEntries);
-    await collect(checkEmptyLorebooks);
-    await collect(checkNodeIntegrity);
+    await collect(checkTreesValid);
     await collect(checkToolRuntimeDuringDiagnostics);
-    await collect(checkDisabledTools);
-    await collect(checkConfirmToolConfig);
-    await collect(checkToolPromptOverrides);
-    await collect(checkWorldInfoApi);
-    await collect(checkOrphanedTrees);
-    await collect(checkSearchMode);
-    await collect(checkSelectiveRetrieval);
-    await collect(checkRecurseLimit);
-    await collect(checkLlmBuildDetail);
-    await collect(checkLlmChunkSize);
-    await collect(checkVectorDedupConfig);
-    await collect(checkSummariesNode);
-    await collect(checkCollapsedTreeSize);
-    await collect(checkOversizedLeafNodes);
-    await collect(checkGranularityMismatch);
-    await collect(checkLargeLorebookSettings);
-    await collect(checkMultiDocConsistency);
-    await collect(checkPopupAvailability);
-    await collect(checkActivityFeedEvent);
-    await collect(checkFeedPersistence);
-    await collect(checkGenerateRawAvailability);
-    await collect(checkWiSuppressionEvent);
-    await collect(checkChatIngestRequirements);
-    await collect(checkMandatoryToolsEvent);
-    await collect(checkPromptInjectionSettings);
-    await collect(checkCommandsConfig);
-    await collect(checkAutoSummaryConfig);
-    await collect(checkMultiBookMode);
-    await collect(checkConnectionProfile);
     await collect(checkTrackerUids);
-    await collect(checkArcNodes);
-    await collect(checkNotebookConfig);
-    await collect(checkStealthMode);
-    await collect(checkEphemeralResults);
-    await collect(checkAutoHideSummarized);
-    await collect(checkConstantPassthrough);
-    await collect(checkBookDescriptions);
-    await collect(checkTurnSummaryEvent);
+
+    // Phase 3: Independent read-only checks (parallel for speed)
+    await Promise.all([
+        collect(checkPromptPostProcessing),
+        collect(checkActiveLorebooksExist),
+        collect(checkNodeSummaries),
+        collect(checkDuplicateUids),
+        collect(checkNearDuplicateEntries),
+        collect(checkEmptyLorebooks),
+        collect(checkNodeIntegrity),
+        collect(checkDisabledTools),
+        collect(checkConfirmToolConfig),
+        collect(checkToolPromptOverrides),
+        collect(checkWorldInfoApi),
+        collect(checkOrphanedTrees),
+        collect(checkSearchMode),
+        collect(checkSelectiveRetrieval),
+        collect(checkRecurseLimit),
+        collect(checkLlmBuildDetail),
+        collect(checkLlmChunkSize),
+        collect(checkVectorDedupConfig),
+        collect(checkSummariesNode),
+        collect(checkCollapsedTreeSize),
+        collect(checkOversizedLeafNodes),
+        collect(checkGranularityMismatch),
+        collect(checkLargeLorebookSettings),
+        collect(checkMultiDocConsistency),
+        collect(checkPopupAvailability),
+        collect(checkActivityFeedEvent),
+        collect(checkFeedPersistence),
+        collect(checkGenerateRawAvailability),
+        collect(checkWiSuppressionEvent),
+        collect(checkChatIngestRequirements),
+        collect(checkMandatoryToolsEvent),
+        collect(checkPromptInjectionSettings),
+        collect(checkCommandsConfig),
+        collect(checkAutoSummaryConfig),
+        collect(checkMultiBookMode),
+        collect(checkConnectionProfile),
+        collect(checkArcNodes),
+        collect(checkNotebookConfig),
+        collect(checkStealthMode),
+        collect(checkEphemeralResults),
+        collect(checkAutoHideSummarized),
+        collect(checkConstantPassthrough),
+        collect(checkBookDescriptions),
+        collect(checkTurnSummaryEvent),
+    ]);
 
     try {
         const settingsAfter = JSON.stringify(getSettings());
@@ -256,13 +264,11 @@ async function checkEntryUidsValid() {
         const tree = getTree(bookName);
         if (!tree || !tree.root) continue;
 
-        const bookData = await loadWorldInfo(bookName);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData || !bookData.entries) continue;
 
-        const validUids = new Set();
-        for (const key of Object.keys(bookData.entries)) {
-            validUids.add(bookData.entries[key].uid);
-        }
+        const uidMap = buildUidMap(bookData.entries);
+        const validUids = new Set(uidMap.keys());
 
         const treeUids = getAllEntryUids(tree.root);
         const staleUids = treeUids.filter(uid => !validUids.has(uid));
@@ -515,10 +521,9 @@ async function checkNearDuplicateEntries() {
     const activeBooks = getActiveTunnelVisionBooks();
 
     for (const bookName of activeBooks) {
-        const bookData = await loadWorldInfo(bookName);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData?.entries) continue;
 
-        // Collect all non-disabled entry titles
         const entries = [];
         for (const key of Object.keys(bookData.entries)) {
             const entry = bookData.entries[key];
@@ -580,7 +585,7 @@ async function checkEmptyLorebooks() {
     const activeBooks = getActiveTunnelVisionBooks();
 
     for (const bookName of activeBooks) {
-        const bookData = await loadWorldInfo(bookName);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData || !bookData.entries) {
             results.push(fail(`Lorebook "${bookName}" has no entry data. TunnelVision cannot index it.`));
             continue;
@@ -1140,17 +1145,13 @@ async function checkTrackerUids() {
             continue;
         }
 
-        const bookData = await loadWorldInfo(bookName);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData?.entries) {
             results.push(warn(`Tracker entries for "${bookName}" could not be validated because the lorebook failed to load.`));
             continue;
         }
 
-        const entryMap = new Map();
-        for (const key of Object.keys(bookData.entries)) {
-            const entry = bookData.entries[key];
-            entryMap.set(entry.uid, entry);
-        }
+        const entryMap = buildUidMap(bookData.entries);
 
         const next = [];
         let staleCount = 0;

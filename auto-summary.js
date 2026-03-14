@@ -156,8 +156,6 @@ function incrementCounter() {
 }
 
 function onChatChanged() {
-    // Snapshot current chat length so the first regeneration in this chat
-    // is correctly detected (chat.length stays the same → skip).
     try {
         _lastCountedChatLength = getContext().chat?.length || 0;
     } catch {
@@ -165,6 +163,14 @@ function onChatChanged() {
     }
 
     const chatId = getChatId();
+
+    // Clean up stale counter entries — keep only current chat to prevent unbounded growth
+    if (chatId) {
+        for (const key of counters.keys()) {
+            if (key !== chatId) counters.delete(key);
+        }
+    }
+
     if (chatId && !counters.has(chatId)) {
         const persisted = loadPersistedCount();
         if (persisted > 0) {
@@ -200,8 +206,19 @@ async function runBackgroundSummary(chatId, count) {
     console.log(`[TunnelVision] Auto-summary triggered after ${count} messages`);
 
     try {
-        // Dynamic import to avoid circular dependency at module load time
+        // Abort if user switched chats during async work
+        if (getChatId() !== chatId) {
+            console.log('[TunnelVision] Auto-summary aborted: chat changed during execution');
+            return;
+        }
+
         const { runQuietSummarize } = await import('./commands.js');
+
+        if (getChatId() !== chatId) {
+            console.log('[TunnelVision] Auto-summary aborted: chat changed during import');
+            return;
+        }
+
         const messageCount = Math.min(chat.length, count);
         const result = await runQuietSummarize(lorebook, chat, messageCount);
         const factsMsg = result.factsCreated > 0 ? ` + ${result.factsCreated} fact(s)` : '';

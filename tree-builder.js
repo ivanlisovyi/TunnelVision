@@ -13,7 +13,7 @@ import { generateRaw as _generateRaw } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { loadWorldInfo } from '../../../world-info.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
-import { createEntry, findEntryByUid } from './entry-manager.js';
+import { createEntry, findEntryByUid, parseJsonFromLLM } from './entry-manager.js';
 import {
     createEmptyTree,
     createTreeNode,
@@ -453,10 +453,7 @@ Respond with ONLY valid JSON in this exact format:
  */
 function mergeLLMResponse(tree, response, validUids) {
     try {
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) return;
-
-        const parsed = JSON.parse(jsonMatch[0]);
+        const parsed = parseJsonFromLLM(response);
         if (!parsed.categories || !Array.isArray(parsed.categories)) return;
 
         const validSet = new Set(validUids);
@@ -610,21 +607,15 @@ async function _generateSummariesForTree(rootNode, lorebookName, _isRoot = true,
             // Single-node batch: response is the summary directly
             batch[0].summary = response.trim();
         } else {
-            // Multi-node batch: parse JSON mapping
             try {
-                const jsonMatch = response.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    const parsed = JSON.parse(jsonMatch[0]);
-                    for (const node of batch) {
-                        // Try exact match, then case-insensitive
-                        const summary = parsed[node.label]
-                            || Object.entries(parsed).find(([k]) => k.toLowerCase() === node.label.toLowerCase())?.[1];
-                        if (summary) node.summary = String(summary).trim();
-                    }
+                const parsed = parseJsonFromLLM(response);
+                for (const node of batch) {
+                    const summary = parsed[node.label]
+                        || Object.entries(parsed).find(([k]) => k.toLowerCase() === node.label.toLowerCase())?.[1];
+                    if (summary) node.summary = String(summary).trim();
                 }
             } catch (e) {
                 console.warn('[TunnelVision] Failed to parse batched summary response:', e);
-                // Fallback: if only one entry in response, try to assign to first unsummarized node
             }
         }
     }
@@ -692,26 +683,23 @@ async function subdivideLargeNodes(node, bookData, totalEntryCount = 0) {
                     systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
                 });
                 if (response) {
-                    const jsonMatch = response.match(/\{[\s\S]*\}/);
-                    if (jsonMatch) {
-                        const parsed = JSON.parse(jsonMatch[0]);
-                        if (parsed.subcategories && Array.isArray(parsed.subcategories)) {
-                            const assigned = new Set();
-                            for (const sub of parsed.subcategories) {
-                                const child = createTreeNode(sub.label || 'Unnamed', '');
-                                if (Array.isArray(sub.entries)) {
-                                    for (const uid of sub.entries) {
-                                        const n = Number(uid);
-                                        if (node.entryUids.includes(n) && !assigned.has(n)) {
-                                            addEntryToNode(child, n);
-                                            assigned.add(n);
-                                        }
+                    const parsed = parseJsonFromLLM(response);
+                    if (parsed.subcategories && Array.isArray(parsed.subcategories)) {
+                        const assigned = new Set();
+                        for (const sub of parsed.subcategories) {
+                            const child = createTreeNode(sub.label || 'Unnamed', '');
+                            if (Array.isArray(sub.entries)) {
+                                for (const uid of sub.entries) {
+                                    const n = Number(uid);
+                                    if (node.entryUids.includes(n) && !assigned.has(n)) {
+                                        addEntryToNode(child, n);
+                                        assigned.add(n);
                                     }
                                 }
-                                if (child.entryUids.length > 0) node.children.push(child);
                             }
-                            node.entryUids = node.entryUids.filter(uid => !assigned.has(uid));
+                            if (child.entryUids.length > 0) node.children.push(child);
                         }
+                        node.entryUids = node.entryUids.filter(uid => !assigned.has(uid));
                     }
                 }
             } catch (e) {
@@ -761,10 +749,7 @@ Respond with ONLY valid JSON in this exact format:
 
 async function parseLLMTreeResponse(lorebookName, response, entryUids) {
     try {
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error('No JSON found in response');
-
-        const parsed = JSON.parse(jsonMatch[0]);
+        const parsed = parseJsonFromLLM(response);
         if (!parsed.categories || !Array.isArray(parsed.categories)) throw new Error('Invalid structure');
 
         const tree = createEmptyTree(lorebookName);
@@ -885,17 +870,12 @@ async function _ingestChatMessages(lorebookName, { from, to, progress, detail })
         // Parse JSON response
         let entries;
         try {
-            const jsonMatch = response.match(/\[[\s\S]*\]/);
-            if (!jsonMatch) {
-                const objMatch = response.match(/\{[\s\S]*\}/);
-                if (objMatch) {
-                    const parsed = JSON.parse(objMatch[0]);
-                    entries = parsed.entries || [parsed];
-                } else {
-                    throw new Error('No JSON found in response');
-                }
+            const arrayResult = parseJsonFromLLM(response, { type: 'array' });
+            if (Array.isArray(arrayResult) && arrayResult.length > 0) {
+                entries = arrayResult;
             } else {
-                entries = JSON.parse(jsonMatch[0]);
+                const objResult = parseJsonFromLLM(response);
+                entries = objResult.entries || [objResult];
             }
         } catch (e) {
             console.warn(`[TunnelVision] Ingest chunk ${i + 1} JSON parse failed:`, e, response);

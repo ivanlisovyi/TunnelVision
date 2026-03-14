@@ -11,6 +11,7 @@ import { characters, this_chid, chat_metadata } from '../../../../script.js';
 import { getCharaFilename } from '../../../utils.js';
 import { callGenericPopup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { isLorebookEnabled, getSettings, getTree, getBookDescription, syncTrackerUidsForLorebook } from './tree-store.js';
+import { escapeHtml } from './entry-manager.js';
 
 import { getDefinition as getSearchDef, getTreeOverview, TOOL_NAME as SEARCH_NAME } from './tools/search.js';
 import { getDefinition as getRememberDef, TOOL_NAME as REMEMBER_NAME } from './tools/remember.js';
@@ -112,21 +113,38 @@ async function getTrackerList() {
         : '';
 }
 
+// ── Active Book Cache ────────────────────────────────────────────
+
+let _activeBookCache = null;
+let _activeBookCacheDirty = true;
+
+/**
+ * Invalidate the active lorebook cache. Called on chat change, WI update,
+ * and at the start of registerTools().
+ */
+export function invalidateActiveBookCache() {
+    _activeBookCacheDirty = true;
+    _activeBookCache = null;
+}
+
 /**
  * Get all active lorebooks that have TunnelVision enabled.
  * Checks global, character-attached (primary + extraBooks), and chat-attached lorebooks.
+ * Results are cached and invalidated on chat/WI changes.
  * Shared by all tools via import from this module.
  * @returns {string[]}
  */
 export function getActiveTunnelVisionBooks() {
+    if (!_activeBookCacheDirty && _activeBookCache !== null) {
+        return _activeBookCache;
+    }
+
     const candidates = new Set();
 
-    // 1. Global lorebooks (selected in World Info dropdown)
     if (Array.isArray(selected_world_info)) {
         for (const name of selected_world_info) candidates.add(name);
     }
 
-    // 2. Character-attached lorebooks (primary + extraBooks via charLore)
     if (this_chid !== undefined && this_chid !== null) {
         const character = characters[this_chid];
         const primaryBook = character?.data?.extensions?.world;
@@ -140,18 +158,19 @@ export function getActiveTunnelVisionBooks() {
         }
     }
 
-    // 3. Chat-attached lorebook (native ST + CarrotKernel multi-book)
     const chatWorld = chat_metadata?.[METADATA_KEY];
     if (chatWorld) candidates.add(chatWorld);
     if (Array.isArray(chat_metadata?.carrot_chat_books)) {
         for (const name of chat_metadata.carrot_chat_books) candidates.add(name);
     }
 
-    // Filter to only TV-enabled books
     const active = [];
     for (const bookName of candidates) {
         if (isLorebookEnabled(bookName)) active.push(bookName);
     }
+
+    _activeBookCache = active;
+    _activeBookCacheDirty = false;
     return active;
 }
 
@@ -336,15 +355,6 @@ export function getDefaultToolDescriptions() {
     return result;
 }
 
-/**
- * Format args object into readable HTML for the confirmation popup.
- * @param {Object} args
- * @returns {string}
- */
-function escapeHtml(str) {
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
 function formatConfirmArgs(args) {
     if (!args || typeof args !== 'object') return '';
     const lines = [];
@@ -405,6 +415,7 @@ let _registerVersion = 0;
  * (e.g. Search returns null if no valid trees exist).
  */
 export async function registerTools() {
+    invalidateActiveBookCache();
     const myVersion = ++_registerVersion;
 
     while (_registerLock) {
@@ -525,4 +536,4 @@ export function isSearchToolAvailable() {
 }
 
 // Re-export tool names and constants for diagnostics/UI
-export { SEARCH_NAME, REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, REORGANIZE_NAME, SUMMARIZE_NAME, MERGESPLIT_NAME, NOTEBOOK_NAME, ALL_TOOL_NAMES, CONFIRMABLE_TOOLS };
+export { SEARCH_NAME, REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, REORGANIZE_NAME, SUMMARIZE_NAME, MERGESPLIT_NAME, NOTEBOOK_NAME, ALL_TOOL_NAMES, CONFIRMABLE_TOOLS, invalidateActiveBookCache };

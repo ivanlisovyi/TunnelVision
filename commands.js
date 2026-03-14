@@ -19,11 +19,10 @@ import { getContext } from '../../../st-context.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument } from '../../../slash-commands/SlashCommandArgument.js';
-import { loadWorldInfo } from '../../../world-info.js';
 import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNodeById, createTreeNode, saveTree } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
-import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid } from './entry-manager.js';
+import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo } from './entry-manager.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { hideSummarizedMessages } from './tools/summarize.js';
 
@@ -231,7 +230,7 @@ async function handleRememberCommand(_namedArgs, unnamedArgs) {
         ].filter(Boolean).join('\n');
 
         const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
-        const parsed = parseJsonResponse(response);
+        const parsed = parseJsonFromLLM(response);
 
         if (!parsed.title || !parsed.content) throw new Error('Model returned invalid format.');
 
@@ -258,7 +257,7 @@ async function handleSearchCommand(_namedArgs, unnamedArgs) {
 
     try {
         const activeBooks = getActiveTunnelVisionBooks();
-        const results = await searchEntries(query, activeBooks);
+        const results = await searchEntriesAcrossBooks(query, activeBooks);
         if (results.length === 0) {
             toastr.info(`No entries found for "${query}".`, 'TunnelVision');
             return '';
@@ -303,8 +302,7 @@ async function handleForgetCommand(_namedArgs, unnamedArgs) {
             }
         }
 
-        // Search by name
-        const results = await searchEntries(query, activeBooks, 5);
+        const results = await searchEntriesAcrossBooks(query, activeBooks, { maxResults: 5 });
         if (results.length === 0) return showWarning(`No entries found matching "${query}".`);
 
         if (results.length === 1) {
@@ -345,7 +343,7 @@ async function handleMergeCommand(_namedArgs, unnamedArgs) {
 
     try {
         const activeBooks = getActiveTunnelVisionBooks();
-        const results = await searchEntries(arg, activeBooks, 10);
+        const results = await searchEntriesAcrossBooks(arg, activeBooks, { maxResults: 10 });
         if (results.length < 2) return showWarning(`Need at least 2 matching entries to merge. Found ${results.length}.`);
 
         const entryList = results.map(r => `[UID ${r.uid}] "${r.title}" (${r.book}): ${r.preview}`).join('\n');
@@ -360,7 +358,7 @@ async function handleMergeCommand(_namedArgs, unnamedArgs) {
         ].join('\n');
 
         const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
-        const parsed = parseJsonResponse(response);
+        const parsed = parseJsonFromLLM(response);
 
         if (!parsed.keep_uid || !parsed.remove_uid || !parsed.merged_content) {
             throw new Error('Model returned invalid merge instructions.');
@@ -406,11 +404,11 @@ async function handleSplitCommand(_namedArgs, unnamedArgs) {
             if (found) { targetEntry = found.entry; targetBook = found.bookName; }
         }
         if (!targetEntry) {
-            const results = await searchEntries(arg, activeBooks, 1);
+            const results = await searchEntriesAcrossBooks(arg, activeBooks, { maxResults: 1 });
             if (results.length === 0) return showWarning(`No entry found matching "${arg}".`);
             const r = results[0];
             targetBook = r.book;
-            const bookData = await loadWorldInfo(r.book);
+            const bookData = await getCachedWorldInfo(r.book);
             targetEntry = findEntryByUid(bookData.entries, r.uid);
         }
         if (!targetEntry) return showWarning('Entry not found.');
@@ -426,7 +424,7 @@ async function handleSplitCommand(_namedArgs, unnamedArgs) {
         ].join('\n');
 
         const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
-        const parsed = parseJsonResponse(response);
+        const parsed = parseJsonFromLLM(response);
 
         if (!parsed.keep_content || !parsed.new_content || !parsed.new_title) {
             throw new Error('Model returned invalid split instructions.');
@@ -556,7 +554,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
     ].join('\n');
 
     const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
-    const parsed = parseJsonResponse(response);
+    const parsed = parseJsonFromLLM(response);
 
     if (!parsed.title || !parsed.summary) {
         throw new Error('Model returned invalid summary format.');
@@ -722,62 +720,14 @@ function formatTimestamp(raw) {
  * @param {number} [maxResults=10]
  * @returns {Promise<Array<{uid: number, title: string, book: string, preview: string}>>}
  */
-async function searchEntries(query, activeBooks, maxResults = 10) {
-    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const results = [];
-
-    for (const bookName of activeBooks) {
-        const bookData = await loadWorldInfo(bookName);
-        if (!bookData?.entries) continue;
-
-        for (const key of Object.keys(bookData.entries)) {
-            const entry = bookData.entries[key];
-            if (entry.disable) continue;
-
-            const title = (entry.comment || '').toLowerCase();
-            const keys = (entry.key || []).join(' ').toLowerCase();
-            const content = (entry.content || '').toLowerCase();
-            if (!terms.every(t => `${title} ${keys} ${content}`.includes(t))) continue;
-
-            results.push({
-                uid: entry.uid,
-                title: entry.comment || entry.key?.[0] || `#${entry.uid}`,
-                book: bookName,
-                preview: (entry.content || '').substring(0, 150).replace(/\n/g, ' '),
-            });
-            if (results.length >= maxResults) return results;
-        }
-    }
-    return results;
-}
-
 async function findEntryInBooks(uid, activeBooks) {
     const numUid = Number(uid);
     if (!isFinite(numUid)) return null;
     for (const bookName of activeBooks) {
-        const bookData = await loadWorldInfo(bookName);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData?.entries) continue;
         const entry = findEntryByUid(bookData.entries, numUid);
         if (entry) return { entry, bookName };
     }
     return null;
-}
-
-function parseJsonResponse(text) {
-    if (!text) return {};
-    let cleaned = text.trim();
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-    try {
-        return JSON.parse(cleaned);
-    } catch {
-        const match = cleaned.match(/\{[\s\S]*\}/);
-        if (match) {
-            try { return JSON.parse(match[0]); } catch { /* fall through */ }
-        }
-        return {};
-    }
-}
-
-function escapeHtml(str) {
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

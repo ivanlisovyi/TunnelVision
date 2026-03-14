@@ -10,7 +10,6 @@
  *     retrieval consistently outperforms top-down traversal.
  */
 
-import { loadWorldInfo } from '../../../../world-info.js';
 import {
     getTree,
     findNodeById,
@@ -18,35 +17,7 @@ import {
     getSettings,
 } from '../tree-store.js';
 import { getActiveTunnelVisionBooks } from '../tool-registry.js';
-
-/**
- * Build a UID→entry lookup map from lorebook data.
- * Eliminates O(n²) iteration when resolving multiple UIDs.
- * @param {Object} entries - bookData.entries
- * @returns {Map<number, Object>}
- */
-function buildUidMap(entries) {
-    const map = new Map();
-    for (const key of Object.keys(entries)) {
-        map.set(entries[key].uid, entries[key]);
-    }
-    return map;
-}
-
-/**
- * Short-lived per-action cache for loadWorldInfo.
- * Avoids redundant disk reads when multiple nodes reference the same book.
- * Create one at the start of each tool action and pass it through.
- * @param {string} bookName
- * @param {Map<string, Object>} cache
- * @returns {Promise<Object|null>}
- */
-async function cachedLoadWorldInfo(bookName, cache) {
-    if (cache.has(bookName)) return cache.get(bookName);
-    const data = await loadWorldInfo(bookName);
-    if (data) cache.set(bookName, data);
-    return data;
-}
+import { buildUidMap, getCachedWorldInfo, searchEntriesAcrossBooks } from '../entry-manager.js';
 
 export const TOOL_NAME = 'TunnelVision_Search';
 
@@ -361,7 +332,7 @@ function formatCollapsedNode(node, depth, isRoot = false, maxDepth = Infinity) {
  * @param {string} nodeId
  * @returns {Promise<string>}
  */
-async function resolveNodeEntries(nodeId, seenEntries = new Set(), cache = new Map()) {
+async function resolveNodeEntries(nodeId, seenEntries = new Set()) {
     const results = [];
 
     // Document-level node: resolve all entries from that specific lorebook
@@ -371,7 +342,7 @@ async function resolveNodeEntries(nodeId, seenEntries = new Set(), cache = new M
         const tree = getTree(bookName);
         if (!tree || !tree.root) return '';
         const uids = getAllEntryUids(tree.root);
-        const bookData = await cachedLoadWorldInfo(bookName, cache);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData || !bookData.entries) return '';
         const uidMap = buildUidMap(bookData.entries);
         pushResolvedEntries(results, seenEntries, bookName, uidMap, uids);
@@ -388,7 +359,7 @@ async function resolveNodeEntries(nodeId, seenEntries = new Set(), cache = new M
         if (!node) continue;
 
         const uids = getAllEntryUids(node);
-        const bookData = await cachedLoadWorldInfo(bookName, cache);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData || !bookData.entries) continue;
 
         const uidMap = buildUidMap(bookData.entries);
@@ -417,7 +388,7 @@ function pushResolvedEntries(results, seenEntries, bookName, uidMap, uids) {
  * @param {string} nodeId
  * @returns {Promise<{manifest: string, count: number}>}
  */
-async function buildEntryManifest(nodeId, seen = new Set(), cache = new Map()) {
+async function buildEntryManifest(nodeId, seen = new Set()) {
     const lines = [];
     let count = 0;
 
@@ -442,7 +413,7 @@ async function buildEntryManifest(nodeId, seen = new Set(), cache = new Map()) {
         const tree = getTree(bookName);
         if (!tree?.root) return { manifest: '', count: 0 };
         const uids = getAllEntryUids(tree.root);
-        const bookData = await cachedLoadWorldInfo(bookName, cache);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData?.entries) return { manifest: '', count: 0 };
         resolveFromBook(bookName, buildUidMap(bookData.entries), uids);
     } else {
@@ -452,7 +423,7 @@ async function buildEntryManifest(nodeId, seen = new Set(), cache = new Map()) {
             const node = findNodeById(tree.root, nodeId);
             if (!node) continue;
             const uids = getAllEntryUids(node);
-            const bookData = await cachedLoadWorldInfo(bookName, cache);
+            const bookData = await getCachedWorldInfo(bookName);
             if (!bookData?.entries) continue;
             resolveFromBook(bookName, buildUidMap(bookData.entries), uids);
         }
@@ -467,12 +438,12 @@ async function buildEntryManifest(nodeId, seen = new Set(), cache = new Map()) {
  * @param {number[]} uids
  * @returns {Promise<string>}
  */
-async function resolveEntriesByUid(uids, cache = new Map()) {
+async function resolveEntriesByUid(uids) {
     const results = [];
     const seen = new Set();
 
     for (const bookName of getActiveTunnelVisionBooks()) {
-        const bookData = await cachedLoadWorldInfo(bookName, cache);
+        const bookData = await getCachedWorldInfo(bookName);
         if (!bookData?.entries) continue;
         const uidMap = buildUidMap(bookData.entries);
 
@@ -691,24 +662,18 @@ CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword
                 console.log(`[TunnelVision] Search | ${args.reasoning}`);
             }
 
-            // Per-action cache: avoids redundant loadWorldInfo for the same book
-            const cache = new Map();
-
-            // Selective retrieval: resolve specific entries by UID
             if (selective && Array.isArray(args.entry_uids) && args.entry_uids.length > 0) {
-                return handleSelectiveEntryRetrieval(args.entry_uids, cache);
+                return handleSelectiveEntryRetrieval(args.entry_uids);
             }
 
-            // Cross-book keyword search
             if (args.action === 'search') {
-                return handleCrossBookSearch(args, selective, cache);
+                return handleCrossBookSearch(args, selective);
             }
 
-            // Collapsed mode: support node_ids (array) or node_id (string)
             if (isCollapsed) {
-                return handleCollapsedSearch(args, selective, cache);
+                return handleCollapsedSearch(args, selective);
             }
-            return handleTraversalSearch(args, selective, cache);
+            return handleTraversalSearch(args, selective);
         },
         formatMessage: async (args) => {
             if (args?.action === 'search') return 'Searching across all lorebooks...';
@@ -731,8 +696,8 @@ CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword
  * @param {number[]} entryUids
  * @returns {Promise<string>}
  */
-async function handleSelectiveEntryRetrieval(entryUids, cache = new Map()) {
-    const content = await resolveEntriesByUid(entryUids, cache);
+async function handleSelectiveEntryRetrieval(entryUids) {
+    const content = await resolveEntriesByUid(entryUids);
     if (!content) {
         return `No entries found for UIDs: ${entryUids.join(', ')}. Double-check the UIDs from the manifest — they must be numeric entry UIDs, not node IDs.`;
     }
@@ -746,7 +711,7 @@ async function handleSelectiveEntryRetrieval(entryUids, cache = new Map()) {
  * @param {Object} args
  * @param {boolean} selective - If true, return manifest instead of full content
  */
-async function handleCollapsedSearch(args, selective = false, cache = new Map()) {
+async function handleCollapsedSearch(args, selective = false) {
     // Gather all requested node IDs
     let nodeIds = [];
     if (Array.isArray(args.node_ids) && args.node_ids.length > 0) {
@@ -793,13 +758,13 @@ async function handleCollapsedSearch(args, selective = false, cache = new Map())
         }
 
         if (selective) {
-            const { manifest, count } = await buildEntryManifest(nodeId, seenEntries, cache);
+            const { manifest, count } = await buildEntryManifest(nodeId, seenEntries);
             if (manifest) {
                 retrieved.push({ label: found.node.label, count });
                 allContent.push(`Category: ${found.node.label} (${count} entries)\n${manifest}`);
             }
         } else {
-            const content = await resolveNodeEntries(nodeId, seenEntries, cache);
+            const content = await resolveNodeEntries(nodeId, seenEntries);
             if (content) {
                 const entryCount = getAllEntryUids(found.node).length;
                 retrieved.push({ label: found.node.label, count: entryCount });
@@ -833,7 +798,7 @@ async function handleCollapsedSearch(args, selective = false, cache = new Map())
  * @param {Object} args
  * @param {boolean} selective - If true, return manifest instead of full content
  */
-async function handleTraversalSearch(args, selective = false, cache = new Map()) {
+async function handleTraversalSearch(args, selective = false) {
     if (!args?.node_id) {
         return 'No node_id provided. Select a node from the tree above.';
     }
@@ -869,7 +834,7 @@ async function handleTraversalSearch(args, selective = false, cache = new Map())
 
     // Selective mode: show manifest instead of full content
     if (selective) {
-        const { manifest, count } = await buildEntryManifest(args.node_id, new Set(), cache);
+        const { manifest, count } = await buildEntryManifest(args.node_id, new Set());
         if (!manifest) {
             return `Node "${node.label}" has no entry content. Try a different branch.`;
         }
@@ -879,7 +844,7 @@ async function handleTraversalSearch(args, selective = false, cache = new Map())
         return response;
     }
 
-    const content = await resolveNodeEntries(args.node_id, new Set(), cache);
+    const content = await resolveNodeEntries(args.node_id, new Set());
     if (!content) {
         return `Node "${node.label}" has no entry content. Try a different branch.`;
     }
@@ -901,56 +866,28 @@ const SEARCH_PREVIEW_LEN = 200;
  * Matches against entry title (comment), keywords, and content.
  * Returns matching entries with source book, UID, tree location, and content preview.
  */
-async function handleCrossBookSearch(args, selective = false, cache = new Map()) {
+async function handleCrossBookSearch(args, selective = false) {
     const query = (args.query || '').trim();
     if (!query) {
         return 'Search requires a "query" — a keyword or phrase to find across lorebooks.';
     }
 
-    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     const activeBooks = getActiveTunnelVisionBooks();
-    const results = [];
+    const rawResults = await searchEntriesAcrossBooks(query, activeBooks, {
+        maxResults: SEARCH_MAX_RESULTS,
+        previewLength: SEARCH_PREVIEW_LEN,
+    });
 
-    for (const bookName of activeBooks) {
-        const bookData = await cachedLoadWorldInfo(bookName, cache);
-        if (!bookData?.entries) continue;
-
-        const tree = getTree(bookName);
-
-        for (const key of Object.keys(bookData.entries)) {
-            const entry = bookData.entries[key];
-            if (entry.disable) continue;
-
-            // Build searchable text from title, keys, and content
-            const title = (entry.comment || '').toLowerCase();
-            const keys = (entry.key || []).join(' ').toLowerCase();
-            const content = (entry.content || '').toLowerCase();
-            const searchable = `${title} ${keys} ${content}`;
-
-            // All terms must match somewhere in the entry
-            const matches = terms.every(t => searchable.includes(t));
-            if (!matches) continue;
-
-            // Find which tree node this entry belongs to
-            let nodeLabel = '(unassigned)';
-            if (tree?.root) {
-                const nodeName = findEntryNode(tree.root, entry.uid);
-                if (nodeName) nodeLabel = nodeName;
-            }
-
-            results.push({
-                uid: entry.uid,
-                title: entry.comment || entry.key?.[0] || `#${entry.uid}`,
-                book: bookName,
-                node: nodeLabel,
-                keys: (entry.key || []).slice(0, 5).join(', '),
-                preview: (entry.content || '').substring(0, SEARCH_PREVIEW_LEN),
-            });
-
-            if (results.length >= SEARCH_MAX_RESULTS) break;
+    // Enrich results with tree node labels
+    const results = rawResults.map(r => {
+        let nodeLabel = '(unassigned)';
+        const tree = getTree(r.book);
+        if (tree?.root) {
+            const nodeName = findEntryNode(tree.root, r.uid);
+            if (nodeName) nodeLabel = nodeName;
         }
-        if (results.length >= SEARCH_MAX_RESULTS) break;
-    }
+        return { ...r, node: nodeLabel, keys: r.keys.join(', ') };
+    });
 
     if (results.length === 0) {
         return `No entries found matching "${query}" across ${activeBooks.length} lorebook(s). Try different keywords, or use tree navigation to browse by category.`;

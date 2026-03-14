@@ -27,6 +27,171 @@ import {
     setTrackerUid,
 } from './tree-store.js';
 
+// ── Shared Constants ─────────────────────────────────────────────
+
+const MAX_ENTRY_CONTENT_LENGTH = 15000;
+const MAX_ENTRIES_PER_TURN = 15;
+
+// ── Turn-Scoped WorldInfo Cache ──────────────────────────────────
+
+const _worldInfoCache = new Map();
+
+/**
+ * Load world info with per-turn caching. Avoids redundant disk reads
+ * when multiple tool actions reference the same lorebook in one generation.
+ * @param {string} bookName
+ * @returns {Promise<Object|null>}
+ */
+export async function getCachedWorldInfo(bookName) {
+    if (_worldInfoCache.has(bookName)) return _worldInfoCache.get(bookName);
+    const data = await loadWorldInfo(bookName);
+    if (data) _worldInfoCache.set(bookName, data);
+    return data;
+}
+
+/**
+ * Invalidate the world info cache for a specific book (after writes)
+ * or all books (at turn boundaries).
+ * @param {string} [bookName] - If omitted, clears entire cache.
+ */
+export function invalidateWorldInfoCache(bookName) {
+    if (bookName) {
+        _worldInfoCache.delete(bookName);
+    } else {
+        _worldInfoCache.clear();
+    }
+}
+
+// ── Turn-Scoped Rate Limiter ─────────────────────────────────────
+
+let _turnEntryCount = 0;
+
+/** Reset entry creation counter. Call at start of each generation (non-recursive). */
+export function resetTurnEntryCount() {
+    _turnEntryCount = 0;
+}
+
+// ── UID Map Builder ──────────────────────────────────────────────
+
+/**
+ * Build a UID→entry lookup map from lorebook data.
+ * Eliminates O(n²) iteration when resolving multiple UIDs.
+ * @param {Object} entries - bookData.entries
+ * @returns {Map<number, Object>}
+ */
+export function buildUidMap(entries) {
+    const map = new Map();
+    for (const key of Object.keys(entries)) {
+        map.set(entries[key].uid, entries[key]);
+    }
+    return map;
+}
+
+// ── Cross-Book Keyword Search ────────────────────────────────────
+
+/**
+ * Search lorebook entries by keyword across multiple books.
+ * Shared by tools/search.js and commands.js.
+ * @param {string} query - Space-separated search terms (all must match)
+ * @param {string[]} activeBooks - Book names to search
+ * @param {Object} [options]
+ * @param {number} [options.maxResults=10]
+ * @param {number} [options.previewLength=200]
+ * @returns {Promise<Array<{uid: number, title: string, book: string, keys: string[], preview: string}>>}
+ */
+export async function searchEntriesAcrossBooks(query, activeBooks, { maxResults = 10, previewLength = 200 } = {}) {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return [];
+    const results = [];
+
+    for (const bookName of activeBooks) {
+        const bookData = await getCachedWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable) continue;
+
+            const title = (entry.comment || '').toLowerCase();
+            const keys = (entry.key || []).join(' ').toLowerCase();
+            const content = (entry.content || '').toLowerCase();
+            if (!terms.every(t => `${title} ${keys} ${content}`.includes(t))) continue;
+
+            results.push({
+                uid: entry.uid,
+                title: entry.comment || entry.key?.[0] || `#${entry.uid}`,
+                book: bookName,
+                keys: (entry.key || []).slice(0, 5),
+                preview: (entry.content || '').substring(0, previewLength).replace(/\n/g, ' '),
+            });
+            if (results.length >= maxResults) return results;
+        }
+    }
+    return results;
+}
+
+// ── Robust JSON Parser ───────────────────────────────────────────
+
+/**
+ * Parse JSON from LLM responses with multiple fallback strategies:
+ * 1. Direct JSON.parse on cleaned text
+ * 2. Balanced-brace extraction (handles surrounding commentary)
+ * 3. Greedy regex fallback
+ * @param {string} text - Raw LLM response
+ * @param {Object} [options]
+ * @param {'object'|'array'} [options.type='object'] - Expected top-level JSON type
+ * @returns {Object|Array}
+ */
+export function parseJsonFromLLM(text, { type = 'object' } = {}) {
+    const empty = type === 'array' ? [] : {};
+    if (!text) return empty;
+
+    let cleaned = text.trim();
+    cleaned = cleaned.replace(/<think[\s\S]*?<\/think>/gi, '').trim();
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+
+    try { return JSON.parse(cleaned); } catch { /* fall through */ }
+
+    const opener = type === 'array' ? '[' : '{';
+    const closer = type === 'array' ? ']' : '}';
+    const startIdx = cleaned.indexOf(opener);
+    if (startIdx < 0) return empty;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = startIdx; i < cleaned.length; i++) {
+        const c = cleaned[i];
+        if (escape) { escape = false; continue; }
+        if (c === '\\' && inString) { escape = true; continue; }
+        if (c === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (c === opener) depth++;
+        if (c === closer) {
+            depth--;
+            if (depth === 0) {
+                try { return JSON.parse(cleaned.substring(startIdx, i + 1)); } catch { break; }
+            }
+        }
+    }
+
+    const pattern = type === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
+    const match = cleaned.match(pattern);
+    if (match) {
+        try { return JSON.parse(match[0]); } catch { /* fall through */ }
+    }
+
+    return empty;
+}
+
+// ── HTML Escaping ────────────────────────────────────────────────
+
+/** Shared HTML escaper for popup/confirmation UI across modules. */
+export function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 /**
  * Create a new lorebook entry and assign it to a tree node.
  * @param {string} bookName - Lorebook name
@@ -44,8 +209,15 @@ export async function createEntry(bookName, { content, comment, keys, nodeId, _b
     if (!comment || !comment.trim()) {
         throw new Error('Entry comment/title cannot be empty.');
     }
+    if (content.length > MAX_ENTRY_CONTENT_LENGTH) {
+        content = content.substring(0, MAX_ENTRY_CONTENT_LENGTH);
+        console.warn(`[TunnelVision] Entry content truncated to ${MAX_ENTRY_CONTENT_LENGTH} chars for "${comment}"`);
+    }
+    if (++_turnEntryCount > MAX_ENTRIES_PER_TURN) {
+        throw new Error(`Rate limit: maximum ${MAX_ENTRIES_PER_TURN} entries per turn exceeded. Wait for the next generation.`);
+    }
 
-    const bookData = _bookData || await loadWorldInfo(bookName);
+    const bookData = _bookData || await getCachedWorldInfo(bookName);
     if (!bookData || !bookData.entries) {
         throw new Error(`Lorebook "${bookName}" not found or has no entry data.`);
     }
@@ -69,6 +241,7 @@ export async function createEntry(bookName, { content, comment, keys, nodeId, _b
 
     // Persist to disk
     await saveWorldInfo(bookName, bookData, true);
+    invalidateWorldInfoCache(bookName);
 
     // Assign to tree node
     let nodeLabel = 'Root';
@@ -107,7 +280,7 @@ export async function createEntry(bookName, { content, comment, keys, nodeId, _b
  * @returns {Promise<{uid: number, comment: string, updated: string[]}>}
  */
 export async function updateEntry(bookName, uid, updates) {
-    const bookData = await loadWorldInfo(bookName);
+    const bookData = await getCachedWorldInfo(bookName);
     if (!bookData || !bookData.entries) {
         throw new Error(`Lorebook "${bookName}" not found or has no entry data.`);
     }
@@ -120,7 +293,12 @@ export async function updateEntry(bookName, uid, updates) {
     const changed = [];
 
     if (updates.content !== undefined && updates.content.trim()) {
-        entry.content = updates.content.trim();
+        let trimmed = updates.content.trim();
+        if (trimmed.length > MAX_ENTRY_CONTENT_LENGTH) {
+            trimmed = trimmed.substring(0, MAX_ENTRY_CONTENT_LENGTH);
+            console.warn(`[TunnelVision] Updated content truncated to ${MAX_ENTRY_CONTENT_LENGTH} chars for UID ${uid}`);
+        }
+        entry.content = trimmed;
         changed.push('content');
     }
     if (updates.comment !== undefined && updates.comment.trim()) {
@@ -137,6 +315,7 @@ export async function updateEntry(bookName, uid, updates) {
     }
 
     await saveWorldInfo(bookName, bookData, true);
+    invalidateWorldInfoCache(bookName);
     if (entry.disable) {
         setTrackerUid(bookName, uid, false);
     } else if (isTrackerTitle(entry.comment) || isTrackerUid(bookName, uid)) {
@@ -155,7 +334,7 @@ export async function updateEntry(bookName, uid, updates) {
  * @returns {Promise<{uid: number, comment: string, action: string}>}
  */
 export async function forgetEntry(bookName, uid, hardDelete = false) {
-    const bookData = await loadWorldInfo(bookName);
+    const bookData = await getCachedWorldInfo(bookName);
     if (!bookData || !bookData.entries) {
         throw new Error(`Lorebook "${bookName}" not found or has no entry data.`);
     }
@@ -169,7 +348,6 @@ export async function forgetEntry(bookName, uid, hardDelete = false) {
     let action;
 
     if (hardDelete) {
-        // Find the correct key for this UID (keys are NOT the same as UIDs in ST)
         for (const key of Object.keys(bookData.entries)) {
             if (bookData.entries[key].uid === uid) {
                 delete bookData.entries[key];
@@ -183,6 +361,7 @@ export async function forgetEntry(bookName, uid, hardDelete = false) {
     }
 
     await saveWorldInfo(bookName, bookData, true);
+    invalidateWorldInfoCache(bookName);
 
     // Remove from tree regardless
     const tree = getTree(bookName);
@@ -260,7 +439,7 @@ export function createCategory(bookName, label, parentNodeId) {
  * @returns {Promise<{entry: Object, bookName: string}|null>}
  */
 export async function findEntry(bookName, uid) {
-    const bookData = await loadWorldInfo(bookName);
+    const bookData = await getCachedWorldInfo(bookName);
     if (!bookData || !bookData.entries) return null;
     const entry = findEntryByUid(bookData.entries, uid);
     return entry ? { entry, bookName } : null;
@@ -283,7 +462,7 @@ export async function listNodeEntries(bookName, nodeId) {
     const uids = node.entryUids || [];
     if (uids.length === 0) return [];
 
-    const bookData = await loadWorldInfo(bookName);
+    const bookData = await getCachedWorldInfo(bookName);
     if (!bookData || !bookData.entries) return [];
 
     return uids.map(uid => {
@@ -314,7 +493,7 @@ export async function mergeEntries(bookName, keepUid, removeUid, opts = {}) {
         throw new Error('Cannot merge an entry with itself.');
     }
 
-    const bookData = await loadWorldInfo(bookName);
+    const bookData = await getCachedWorldInfo(bookName);
     if (!bookData || !bookData.entries) {
         throw new Error(`Lorebook "${bookName}" not found or has no entry data.`);
     }
@@ -365,6 +544,7 @@ export async function mergeEntries(bookName, keepUid, removeUid, opts = {}) {
     }
 
     await saveWorldInfo(bookName, bookData, true);
+    invalidateWorldInfoCache(bookName);
 
     // Remove absorbed entry from tree
     const tree = getTree(bookName);
@@ -408,7 +588,7 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
         throw new Error('newTitle cannot be empty — the new entry needs a title.');
     }
 
-    const bookData = await loadWorldInfo(bookName);
+    const bookData = await getCachedWorldInfo(bookName);
     if (!bookData || !bookData.entries) {
         throw new Error(`Lorebook "${bookName}" not found or has no entry data.`);
     }
@@ -419,7 +599,6 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
     }
     const wasTracker = isTrackerUid(bookName, uid) || isTrackerTitle(original.comment);
 
-    // Find the node the original lives in, so we can place the new entry alongside it
     const tree = getTree(bookName);
     let nodeId = null;
     if (tree && tree.root) {
@@ -427,9 +606,6 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
         if (containingNode) nodeId = containingNode.id;
     }
 
-    // Create the new split-off entry FIRST — the original is still untouched at
-    // this point. If createEntry fails, no content is lost because the original
-    // hasn't been truncated yet.
     const newResult = await createEntry(bookName, {
         content: newContent,
         comment: newTitle,
@@ -438,14 +614,12 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
         _bookData: bookData,
     });
 
-    // Now safely truncate the original. If this save fails, the worst case is
-    // duplicated content (original retains full text + new entry exists), which
-    // is a recoverable state — far better than losing content.
     original.content = keepContent.trim();
     if (keepTitle && keepTitle.trim()) {
         original.comment = keepTitle.trim();
     }
     await saveWorldInfo(bookName, bookData, true);
+    invalidateWorldInfoCache(bookName);
 
     if (wasTracker) {
         setTrackerUid(bookName, uid, true);
