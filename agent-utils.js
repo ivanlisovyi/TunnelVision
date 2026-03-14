@@ -46,6 +46,75 @@ export function getEntryTitle(entry) {
     return entry.comment || entry.key?.[0] || `#${entry.uid}`;
 }
 
+// ── Trigram Similarity ────────────────────────────────────────────
+
+/**
+ * Build a set of character trigrams from a string.
+ * @param {string} s
+ * @returns {Set<string>}
+ */
+function trigrams(s) {
+    const norm = `  ${s.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim()}  `;
+    const set = new Set();
+    for (let i = 0; i <= norm.length - 3; i++) {
+        set.add(norm.substring(i, i + 3));
+    }
+    return set;
+}
+
+/**
+ * Compute trigram similarity between two strings (0–1, 1 = identical).
+ * @param {string} a
+ * @param {string} b
+ * @returns {number}
+ */
+export function trigramSimilarity(a, b) {
+    const setA = trigrams(a);
+    const setB = trigrams(b);
+    if (setA.size === 0 && setB.size === 0) return 1;
+    if (setA.size === 0 || setB.size === 0) return 0;
+
+    let intersection = 0;
+    for (const tri of setA) {
+        if (setB.has(tri)) intersection++;
+    }
+    return intersection / (setA.size + setB.size - intersection);
+}
+
+// ── Retry Logic ──────────────────────────────────────────────────
+
+/**
+ * Call an async function with retry on failure / empty results.
+ * @param {Function} fn - Async function to call
+ * @param {Object} [opts]
+ * @param {number} [opts.maxRetries=2] - Max retry attempts
+ * @param {number} [opts.backoff=2000] - Base backoff in ms (doubled each retry)
+ * @param {string} [opts.label='LLM call'] - Label for logging
+ * @returns {Promise<*>} Result of fn
+ */
+export async function callWithRetry(fn, { maxRetries = 2, backoff = 2000, label = 'LLM call' } = {}) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const result = await fn();
+            if (result !== undefined && result !== null && result !== '') return result;
+            if (attempt < maxRetries) {
+                console.warn(`[TunnelVision] ${label}: empty response, retrying (${attempt + 1}/${maxRetries})`);
+                await new Promise(r => setTimeout(r, backoff * (attempt + 1)));
+                continue;
+            }
+            return result;
+        } catch (e) {
+            lastError = e;
+            if (attempt < maxRetries) {
+                console.warn(`[TunnelVision] ${label}: attempt ${attempt + 1} failed (${e.message}), retrying in ${backoff * (attempt + 1)}ms`);
+                await new Promise(r => setTimeout(r, backoff * (attempt + 1)));
+            }
+        }
+    }
+    throw lastError;
+}
+
 /**
  * Check if the current AI message event should be skipped (tool recursion or regeneration).
  * Call this at the top of MESSAGE_RECEIVED handlers.

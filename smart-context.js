@@ -22,6 +22,8 @@ import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfoSync } from './entry-manager.js';
 import { getEntryTitle } from './agent-utils.js';
 
+const RELEVANCE_KEY = 'tunnelvision_relevance';
+
 // ── Entity Extraction ────────────────────────────────────────────
 
 /**
@@ -72,6 +74,38 @@ function scoreEntry(entry, recentText) {
     return score;
 }
 
+// ── Relevance Tracking ───────────────────────────────────────────
+
+function getRelevanceMap() {
+    try {
+        return getContext().chatMetadata?.[RELEVANCE_KEY] || {};
+    } catch {
+        return {};
+    }
+}
+
+function touchRelevance(uids) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const map = context.chatMetadata[RELEVANCE_KEY] || {};
+        const now = Date.now();
+        for (const uid of uids) map[uid] = now;
+        context.chatMetadata[RELEVANCE_KEY] = map;
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+function relevanceDecay(uid, relevanceMap) {
+    const lastSeen = relevanceMap[uid];
+    if (!lastSeen) return 0;
+    const hoursAgo = (Date.now() - lastSeen) / (1000 * 60 * 60);
+    if (hoursAgo < 0.5) return 5;
+    if (hoursAgo < 2) return 3;
+    if (hoursAgo < 8) return 1;
+    return 0;
+}
+
 // ── Core Logic ───────────────────────────────────────────────────
 
 /**
@@ -101,6 +135,17 @@ export function buildSmartContextPrompt() {
     // Gather and score all active entries across books
     const candidates = [];
     const trackerUidSets = new Map();
+    const relevanceMap = getRelevanceMap();
+
+    // Find max UID for recency boost calculation
+    let maxUid = 0;
+    for (const bookName of activeBooks) {
+        const bd = getCachedWorldInfoSync(bookName);
+        if (!bd?.entries) continue;
+        for (const key of Object.keys(bd.entries)) {
+            if (bd.entries[key].uid > maxUid) maxUid = bd.entries[key].uid;
+        }
+    }
 
     for (const bookName of activeBooks) {
         const bookData = getCachedWorldInfoSync(bookName);
@@ -115,7 +160,15 @@ export function buildSmartContextPrompt() {
             if (!entry.content || !entry.content.trim()) continue;
 
             const isTracker = trackerSet.has(entry.uid);
-            const relevance = scoreEntry(entry, recentText);
+            const lowerComment = (entry.comment || '').toLowerCase();
+            const isSummary = lowerComment.startsWith('[summary]') || lowerComment.startsWith('[scene summary');
+            let relevance = scoreEntry(entry, recentText);
+
+            // Relevance decay bonus — recently relevant entries score higher
+            relevance += relevanceDecay(entry.uid, relevanceMap);
+
+            // Recency boost — higher UIDs are newer entries
+            if (maxUid > 0 && entry.uid > maxUid * 0.9) relevance += 3;
 
             // Tracker entries for mentioned entities get a boost
             if (isTracker && relevance > 0) {
@@ -124,6 +177,16 @@ export function buildSmartContextPrompt() {
                     bookName,
                     score: relevance + 20,
                     isTracker: true,
+                    isSummary: false,
+                });
+            } else if (isSummary && relevance >= 3) {
+                // Lower threshold for summaries — they provide rich scene context
+                candidates.push({
+                    entry,
+                    bookName,
+                    score: relevance + 2,
+                    isTracker: false,
+                    isSummary: true,
                 });
             } else if (relevance >= 5) {
                 candidates.push({
@@ -131,6 +194,7 @@ export function buildSmartContextPrompt() {
                     bookName,
                     score: relevance,
                     isTracker,
+                    isSummary,
                 });
             }
         }
@@ -142,18 +206,23 @@ export function buildSmartContextPrompt() {
     candidates.sort((a, b) => b.score - a.score);
 
     const selected = [];
+    const selectedUids = [];
     let totalChars = 0;
 
     for (const c of candidates) {
         if (selected.length >= maxEntries) break;
-        const entryText = formatEntryForInjection(c.entry, c.bookName, c.isTracker);
+        const entryText = formatEntryForInjection(c.entry, c.bookName, c.isTracker, c.isSummary);
         if (totalChars + entryText.length > maxChars) continue;
 
         selected.push(entryText);
+        selectedUids.push(c.entry.uid);
         totalChars += entryText.length;
     }
 
     if (selected.length === 0) return '';
+
+    // Record which entries were selected for relevance decay tracking
+    if (selectedUids.length > 0) touchRelevance(selectedUids);
 
     return [
         `[TunnelVision Smart Context — ${selected.length} relevant entries auto-retrieved based on current scene. This is supplemental memory; the AI can search for more with TunnelVision_Search if needed.]`,
@@ -164,7 +233,7 @@ export function buildSmartContextPrompt() {
 
 // ── Formatting ───────────────────────────────────────────────────
 
-function formatEntryForInjection(entry, bookName, isTracker) {
-    const tag = isTracker ? ' [Tracker]' : '';
+function formatEntryForInjection(entry, bookName, isTracker, isSummary = false) {
+    const tag = isTracker ? ' [Tracker]' : isSummary ? ' [Summary]' : '';
     return `[${getEntryTitle(entry)}${tag} — ${bookName}, UID ${entry.uid}]\n${(entry.content || '').trim()}`;
 }

@@ -25,7 +25,7 @@ import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNod
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
 import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo } from './entry-manager.js';
-import { getWorldStateText, updateWorldState, clearWorldState } from './world-state.js';
+import { getWorldStateText, updateWorldState, clearWorldState, appendTimeline } from './world-state.js';
 import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { hideSummarizedMessages, setWatermark } from './tools/summarize.js';
@@ -279,6 +279,7 @@ async function handleRememberCommand(_namedArgs, unnamedArgs) {
             recentContext ? `\nRecent conversation for context:\n${recentContext}` : '',
             '\nCreate a structured lorebook entry. Respond with ONLY a JSON object (no markdown, no code fences):',
             '{"title": "short descriptive title", "content": "the entry content, well-formatted and organized", "keys": ["keyword1", "keyword2"]}',
+            '\nFor keys: provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this entry?',
         ].filter(Boolean).join('\n');
 
         const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
@@ -647,6 +648,12 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         ? `Use this as the title: "${titleHint}".`
         : 'Create a short, descriptive title for the summary.';
 
+    // Include world state for better contextual awareness
+    const worldStateText = getWorldStateText();
+    const worldStateSection = worldStateText
+        ? `\n[Current Story Context — use this to understand the broader narrative when writing your summary]\n${worldStateText}\n`
+        : '';
+
     const quietPrompt = [
         'You are a summarization assistant for a roleplay lorebook. This is a PRIVATE memory document for story continuity, not a public-facing text.',
         'Analyze the following conversation excerpt and produce TWO things:',
@@ -658,6 +665,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         'For "when": estimate the in-world date/time from story context (e.g. "Late evening, Day 3", "Morning after the festival"). Use whatever granularity the story supports. If no time cues exist, write "unspecified".',
         'For significance: "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
         'For facts: extract ONLY facts significant enough to matter for long-term story continuity. Facts are persistent state changes — relationship shifts, relocations, status changes, revelations, consequential decisions, world-state changes, new character traits. Skip mundane actions ("asked about X", "poured tea"), fleeting emotions, and anything the summary already covers narratively. Fewer high-quality facts are better than many trivial ones.',
+        'For keys on each fact: provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this fact?',
         '',
         'For arc: if the events belong to an ongoing storyline or narrative thread, provide a short arc name (e.g. "The Curse Investigation", "Elena & Ren\'s Romance"). If this is a standalone scene with no clear thread, omit the field or set it to null.',
         '',
@@ -673,7 +681,8 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         '    {"title": "short fact title", "content": "factual description in third person", "keys": ["keyword1", "keyword2"]}',
         '  ]',
         '}',
-        `\nConversation to summarize:\n${recentContext}`,
+        worldStateSection,
+        `Conversation to summarize:\n${recentContext}`,
     ].join('\n');
 
     let response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
@@ -779,6 +788,13 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
             console.warn('[TunnelVision] Failed to hide summarized messages:', e);
         }
     }
+
+    // Append to persistent timeline
+    appendTimeline([{
+        when: parsed.when || 'unspecified',
+        event: `Summary: "${parsed.title}" (${significance})`,
+        msgIdx: (chat?.length || 1) - 1,
+    }]);
 
     const factsMsg = factsCreated.length > 0 ? ` + ${factsCreated.length} fact(s)` : '';
     console.log(`[TunnelVision] Background summary created: "${parsed.title}" (UID ${result.uid})${factsMsg}`);

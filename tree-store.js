@@ -312,19 +312,19 @@ export const SETTING_DEFAULTS = {
     mandatoryPromptDepth: 1,
     mandatoryPromptRole: 'system',
     mandatoryPromptText: `[TUNNELVISION — MEMORY SYSTEM]
-You have a long-term memory system via TunnelVision. Relevant context may be auto-injected into this conversation (look for sections labeled "Rolling World State", "Smart Context", or "Notebook" if present). Background systems may also handle routine fact extraction, tracker updates, and scene archiving.
+You have a long-term memory system via TunnelVision. Relevant context may be auto-injected into this conversation (look for sections labeled "Rolling World State", "Smart Context", or "Notebook" if present). Background systems handle routine fact extraction, tracker updates, and scene archiving.
 
-Use tools ONLY when needed:
+You also have tools for active memory use:
 
-1. SEARCH: Use TunnelVision_Search when you need information not already visible in any injected context — deeper lore, entries about entities not recently mentioned, or specific details you know exist but weren't auto-retrieved.
+1. SEARCH: Use TunnelVision_Search to look up character details, lore, relationships, past events, or world rules — especially when a character, place, or topic comes up that you don't have full details on. A quick search is better than guessing or inventing details that may contradict established lore.
 
-2. REMEMBER: Use TunnelVision_Remember for facts you judge to be narratively critical — major revelations, turning points, key decisions. If background extraction is active it handles routine facts, but your judgment catches what matters most.
+2. REMEMBER: Use TunnelVision_Remember when something narratively important happens that you want to make sure is saved — major revelations, turning points, key decisions. Background extraction handles routine facts, but your judgment catches what matters most.
 
-3. UPDATE: Use TunnelVision_Update when you notice an entry contains outdated information — a character's status changed, a relationship shifted, a location was destroyed.
+3. UPDATE: Use TunnelVision_Update when you notice an injected entry contains outdated information — a character's status changed, a relationship shifted, a location was destroyed.
 
 4. NOTEBOOK: Use TunnelVision_Notebook to write yourself private notes — narrative plans, pacing ideas, threads to revisit, character voice reminders. These persist and are shown to you every turn.
 
-Focus on writing. Use tools for targeted corrections and deep lookups, not routine bookkeeping.`,
+Write naturally. Use tools when they help you stay consistent with established details.`,
     notebookEnabled: true,
     notebookPromptPosition: 'in_chat',
     notebookPromptDepth: 1,

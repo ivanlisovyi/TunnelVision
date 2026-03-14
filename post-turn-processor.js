@@ -26,8 +26,9 @@ import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.j
 import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
-import { getChatId, formatChatExcerpt as formatRecentExchange } from './agent-utils.js';
+import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
+import { appendTimeline } from './world-state.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -171,19 +172,37 @@ export async function runPostTurnProcessor(force = false) {
         // Rollback data — collected so swipe/regeneration can undo this run
         const rollback = { createdUids: [], trackerReverts: [], book: targetBook };
 
-        // ── Step 1: Fact Extraction + Scene Detection ────────────
-        let sceneChange = null;
-        if (settings.postTurnExtractFacts !== false) {
-            const analysisResult = await analyzeExchange(targetBook, recentExcerpt, chatId);
+        // ── Steps 1 + 3 in parallel: Fact Extraction and Tracker Updates ──
+        // These are independent LLM calls that don't depend on each other.
+        // Scene archiving (Step 2) waits for fact extraction since it needs scene detection.
+        const analysisPromise = settings.postTurnExtractFacts !== false
+            ? analyzeExchange(targetBook, recentExcerpt, chatId)
+            : Promise.resolve(null);
+
+        const trackerPromise = settings.postTurnUpdateTrackers !== false
+            ? loadTrackerEntries(activeBooks).then(trackers =>
+                trackers.length > 0 ? updateTrackers(trackers, recentExcerpt, chatId) : null,
+            )
+            : Promise.resolve(null);
+
+        const [analysisResult, trackerResult] = await Promise.all([analysisPromise, trackerPromise]);
+
+        if (analysisResult) {
             result.factsCreated = analysisResult.factsCreated;
             result.errors += analysisResult.errors;
-            sceneChange = analysisResult.sceneChange;
             rollback.createdUids.push(...analysisResult.createdUids);
+        }
+
+        if (trackerResult) {
+            result.trackersUpdated = trackerResult.updated;
+            result.errors += trackerResult.errors;
+            rollback.trackerReverts.push(...trackerResult.reverts);
         }
 
         if (getChatId() !== chatId || task.cancelled) return null;
 
-        // ── Step 2: Scene Archiving ──────────────────────────────
+        // ── Step 2: Scene Archiving (depends on scene detection from Step 1) ──
+        const sceneChange = analysisResult?.sceneChange;
         if (sceneChange?.detected && settings.postTurnSceneArchive !== false) {
             const archiveResult = await archiveScene(targetBook, chat, sceneChange, chatId);
             result.sceneArchived = archiveResult.archived;
@@ -192,20 +211,23 @@ export async function runPostTurnProcessor(force = false) {
             if (archiveResult.archived) _lastArchivedAt = Date.now();
         }
 
-        if (getChatId() !== chatId || task.cancelled) return null;
-
-        // ── Step 3: Tracker Updates ──────────────────────────────
-        if (settings.postTurnUpdateTrackers !== false) {
-            const trackers = await loadTrackerEntries(activeBooks);
-            if (trackers.length > 0) {
-                const trackerResult = await updateTrackers(trackers, recentExcerpt, chatId);
-                result.trackersUpdated = trackerResult.updated;
-                result.errors += trackerResult.errors;
-                rollback.trackerReverts.push(...trackerResult.reverts);
-            }
-        }
-
         if (task.cancelled) return null;
+
+        // ── Append to persistent timeline ──
+        const timelineEvents = [];
+        if (sceneChange?.detected) {
+            timelineEvents.push({
+                event: sceneChange.description || `Scene change: ${sceneChange.type}`,
+                msgIdx: chat.length - 1,
+            });
+        }
+        if (result.sceneArchived && result.sceneTitle) {
+            timelineEvents.push({
+                event: `Scene archived: "${result.sceneTitle}"`,
+                msgIdx: chat.length - 1,
+            });
+        }
+        if (timelineEvents.length > 0) appendTimeline(timelineEvents);
 
         // Record completion + rollback data for swipe recovery
         setProcessorState({
@@ -272,6 +294,27 @@ export async function runPostTurnProcessor(force = false) {
 async function analyzeExchange(targetBook, recentExcerpt, chatId) {
     const result = { factsCreated: 0, errors: 0, sceneChange: null, createdUids: [] };
 
+    // Build compact list of existing fact titles so the LLM avoids re-extracting them
+    let existingFactsSection = '';
+    try {
+        const preBookData = await getCachedWorldInfo(targetBook);
+        if (preBookData?.entries) {
+            const titles = [];
+            for (const key of Object.keys(preBookData.entries)) {
+                const e = preBookData.entries[key];
+                if (e.disable) continue;
+                const t = (e.comment || '').trim();
+                if (t && !t.toLowerCase().startsWith('[tracker') && !t.toLowerCase().startsWith('[summary') && !t.toLowerCase().startsWith('[scene summary')) {
+                    titles.push(t);
+                }
+            }
+            if (titles.length > 0) {
+                const recent = titles.slice(-30);
+                existingFactsSection = '\n[Already Known Facts — do NOT re-extract these]\n' + recent.map(t => `- ${t}`).join('\n') + '\n';
+            }
+        }
+    } catch { /* proceed without existing facts */ }
+
     const quietPrompt = [
         'You are an analysis assistant for a roleplay lorebook. Perform TWO tasks on this exchange:',
         '',
@@ -297,6 +340,8 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '',
         'When in doubt, do NOT extract. Fewer high-quality facts are better than many trivial ones. An empty facts array is perfectly fine.',
         '',
+        'KEYS: For each fact, provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this fact?',
+        '',
         'TASK 2 — SCENE CHANGE DETECTION:',
         'Determine if a MAJOR NARRATIVE BOUNDARY just occurred. The bar is HIGH — a scene change means the story has moved to a fundamentally different context, not just a minor shift within the same ongoing situation.',
         '',
@@ -316,6 +361,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '',
         'When in doubt, it is NOT a scene change. Err on the side of keeping the scene going — premature archiving fragments coherent scenes into useless pieces.',
         '',
+        existingFactsSection,
         '[Recent Exchange]',
         recentExcerpt,
         '',
@@ -334,17 +380,41 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
     ].join('\n');
 
     try {
-        const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+        const response = await callWithRetry(
+            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            { label: 'Post-turn analysis' },
+        );
 
         if (getChatId() !== chatId) return result;
 
         const parsed = parseJsonFromLLM(response);
         if (!parsed || typeof parsed !== 'object') return result;
 
+        // Build existing-entry text list for dedup
+        const bookData = await getCachedWorldInfo(targetBook);
+        const existingTexts = [];
+        if (bookData?.entries) {
+            for (const key of Object.keys(bookData.entries)) {
+                const e = bookData.entries[key];
+                if (e.disable) continue;
+                existingTexts.push(`${e.comment || ''} ${e.content || ''}`);
+            }
+        }
+
+        const DEDUP_THRESHOLD = 0.7;
+
         // Process facts
         const facts = Array.isArray(parsed.facts) ? parsed.facts : [];
         for (const fact of facts) {
             if (!fact?.title || !fact?.content) continue;
+
+            const newText = `${String(fact.title).trim()} ${String(fact.content).trim()}`;
+            const isDuplicate = existingTexts.some(et => trigramSimilarity(newText, et) >= DEDUP_THRESHOLD);
+            if (isDuplicate) {
+                console.log(`[TunnelVision] Post-turn skipped duplicate fact: "${fact.title}"`);
+                continue;
+            }
+
             try {
                 const entryResult = await createEntry(targetBook, {
                     content: String(fact.content).trim(),
@@ -479,7 +549,10 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
     ].join('\n');
 
     try {
-        const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+        const response = await callWithRetry(
+            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            { label: 'Post-turn trackers' },
+        );
 
         if (getChatId() !== chatId) return result;
 

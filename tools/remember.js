@@ -12,46 +12,9 @@ import { loadWorldInfo } from '../../../../world-info.js';
 import { getSettings } from '../tree-store.js';
 import { createEntry } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
+import { trigramSimilarity } from '../agent-utils.js';
 
 export const TOOL_NAME = 'TunnelVision_Remember';
-
-// ─── Trigram Similarity ─────────────────────────────────────────
-
-/**
- * Build a set of character trigrams from a string.
- * Pads with spaces so edge characters get represented.
- * @param {string} s
- * @returns {Set<string>}
- */
-function trigrams(s) {
-    const norm = `  ${s.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim()}  `;
-    const set = new Set();
-    for (let i = 0; i <= norm.length - 3; i++) {
-        set.add(norm.substring(i, i + 3));
-    }
-    return set;
-}
-
-/**
- * Compute trigram similarity between two strings.
- * Returns 0-1 where 1 = identical trigram sets.
- * Catches partial words, typos, and morphological variants.
- * @param {string} a
- * @param {string} b
- * @returns {number}
- */
-function trigramSimilarity(a, b) {
-    const setA = trigrams(a);
-    const setB = trigrams(b);
-    if (setA.size === 0 && setB.size === 0) return 1;
-    if (setA.size === 0 || setB.size === 0) return 0;
-
-    let intersection = 0;
-    for (const tri of setA) {
-        if (setB.has(tri)) intersection++;
-    }
-    return intersection / (setA.size + setB.size - intersection);
-}
 
 // ─── Dedup ──────────────────────────────────────────────────────
 
@@ -129,7 +92,7 @@ Save entries to the lorebook where they belong based on the descriptions above. 
                 keys: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: 'Optional keywords for cross-referencing (e.g. ["Elena", "curse", "dark magic"]).',
+                    description: '4-10 short keywords for cross-referencing and search. Always include character names (canonical form), location names when relevant, topic/theme words, and synonyms or related terms. Think: what would someone search to find this? E.g. ["Elena", "curse", "dark magic", "hex", "enchantment"].',
                 },
                 node_id: {
                     type: 'string',

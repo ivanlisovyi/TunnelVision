@@ -943,7 +943,7 @@ NOT WORTH EXTRACTING (skip these):
 Rules:
 - Write content in third person, factual style
 - Each entry should be a single, distinct piece of information
-- Include character names in keys for cross-referencing
+- Keys: provide 4-10 short keywords for cross-referencing. Always include character names (canonical form — "Elena" not "she"), location names when relevant, topic/theme words (e.g. "curse", "betrayal"), and synonyms or related terms. Think: what would someone search to find this fact?
 - Merge related facts into single entries when they belong together
 - Fewer high-quality entries are better than many trivial ones`;
 }

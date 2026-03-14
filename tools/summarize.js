@@ -177,7 +177,7 @@ When you notice related events forming a pattern or storyline, group them into "
                         properties: {
                             title: { type: 'string', description: 'Short fact title.' },
                             content: { type: 'string', description: 'Factual description in third person.' },
-                            keys: { type: 'array', items: { type: 'string' }, description: 'Keywords for cross-referencing.' },
+                            keys: { type: 'array', items: { type: 'string' }, description: '4-10 short keywords for cross-referencing and search. Include character names (canonical form), location names, topic/theme words, and synonyms or related terms.' },
                         },
                         required: ['title', 'content'],
                     },

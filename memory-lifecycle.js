@@ -20,9 +20,9 @@ import { eventSource, event_types, generateQuietPrompt } from '../../../../scrip
 import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache } from './entry-manager.js';
+import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
-import { getChatId, shouldSkipAiMessage } from './agent-utils.js';
+import { getChatId, shouldSkipAiMessage, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_lifecycle';
@@ -93,6 +93,7 @@ export async function runLifecycleMaintenance(force = false) {
     const result = {
         entriesCompressed: 0,
         duplicatesFound: 0,
+        duplicatesMerged: 0,
         errors: 0,
     };
 
@@ -105,10 +106,11 @@ export async function runLifecycleMaintenance(force = false) {
             const bookData = await getCachedWorldInfo(bookName);
             if (!bookData?.entries) continue;
 
-            // ── Step 1: Find near-duplicate entries and suggest consolidation ──
+            // ── Step 1: Find and merge near-duplicate entries ──
             if (settings.lifecycleConsolidate !== false) {
-                const dupeResult = await findAndReportDuplicates(bookName, bookData, chatId);
+                const dupeResult = await findAndMergeDuplicates(bookName, bookData, chatId);
                 result.duplicatesFound += dupeResult.found;
+                result.duplicatesMerged += dupeResult.merged;
                 result.errors += dupeResult.errors;
             }
 
@@ -132,7 +134,8 @@ export async function runLifecycleMaintenance(force = false) {
 
         const details = [];
         if (result.entriesCompressed > 0) details.push(`${result.entriesCompressed} compressed`);
-        if (result.duplicatesFound > 0) details.push(`${result.duplicatesFound} duplicate pairs`);
+        if (result.duplicatesMerged > 0) details.push(`${result.duplicatesMerged} merged`);
+        else if (result.duplicatesFound > 0) details.push(`${result.duplicatesFound} duplicate pairs`);
         console.log(`[TunnelVision] Lifecycle maintenance complete: ${details.length > 0 ? details.join(', ') : 'no changes needed'}`);
 
         if (details.length > 0) {
@@ -163,8 +166,8 @@ export async function runLifecycleMaintenance(force = false) {
 
 // ── Step 1: Duplicate Detection ──────────────────────────────────
 
-async function findAndReportDuplicates(bookName, bookData, chatId) {
-    const result = { found: 0, errors: 0 };
+async function findAndMergeDuplicates(bookName, bookData, chatId) {
+    const result = { found: 0, merged: 0, errors: 0 };
 
     const entries = [];
     for (const key of Object.keys(bookData.entries)) {
@@ -172,40 +175,60 @@ async function findAndReportDuplicates(bookName, bookData, chatId) {
         if (entry.disable) continue;
         const title = (entry.comment || '').trim();
         if (!title) continue;
+        // Skip trackers and summaries — they should not be auto-merged
+        const lowerTitle = title.toLowerCase();
+        if (lowerTitle.startsWith('[tracker') || lowerTitle.startsWith('[summary') || lowerTitle.startsWith('[scene summary')) continue;
         entries.push({ uid: entry.uid, title, content: (entry.content || '').substring(0, 200) });
     }
 
     if (entries.length < 2) return result;
 
-    // Build a compact list for the LLM to analyze
     const entryList = entries.slice(0, 80).map(e =>
         `- UID ${e.uid}: "${e.title}" — ${e.content.replace(/\n/g, ' ').substring(0, 100)}...`,
     ).join('\n');
 
     const quietPrompt = [
         'You are a lorebook maintenance assistant. Analyze these lorebook entry titles and previews.',
-        'Identify pairs that appear to be about the SAME topic/entity and could be consolidated.',
+        'Identify pairs that are genuinely about the SAME topic/entity and contain overlapping information that should be consolidated into one entry.',
         '',
         `[Entries in "${bookName}"]`,
         entryList,
         '',
-        'Find entries that are duplicates or near-duplicates (same entity/topic, overlapping information).',
-        'Respond with a JSON array of duplicate pairs. If no duplicates found, respond with [].',
-        'Format: [{"uid_a": 123, "uid_b": 456, "reason": "brief reason they overlap"}]',
+        'Find entries that are duplicates or near-duplicates. For each pair, decide which entry to KEEP (the more complete one) and provide merged content that combines the best of both.',
+        'Respond with a JSON array. If no duplicates found, respond with [].',
+        'Format: [{"keep_uid": 123, "remove_uid": 456, "merged_title": "best title", "merged_content": "combined content preserving all unique facts", "reason": "brief reason"}]',
         '',
         'Only flag genuine duplicates — not entries that merely reference the same character in different contexts.',
+        'Limit to at most 3 merge pairs per run.',
         'Respond with ONLY the JSON array.',
     ].join('\n');
 
     try {
-        const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+        const response = await callWithRetry(
+            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            { label: 'Lifecycle duplicates' },
+        );
         if (getChatId() !== chatId) return result;
 
         const pairs = parseJsonFromLLM(response, { type: 'array' });
-        if (Array.isArray(pairs) && pairs.length > 0) {
-            result.found = pairs.length;
-            for (const pair of pairs.slice(0, 5)) {
-                console.log(`[TunnelVision] Lifecycle: duplicate candidate in "${bookName}": UID ${pair.uid_a} ↔ ${pair.uid_b} (${pair.reason || 'similar content'})`);
+        if (!Array.isArray(pairs) || pairs.length === 0) return result;
+
+        result.found = pairs.length;
+
+        for (const pair of pairs.slice(0, 3)) {
+            if (!pair?.keep_uid || !pair?.remove_uid) continue;
+            if (getChatId() !== chatId) break;
+
+            try {
+                await mergeEntries(bookName, Number(pair.keep_uid), Number(pair.remove_uid), {
+                    mergedContent: pair.merged_content || undefined,
+                    mergedTitle: pair.merged_title || undefined,
+                });
+                result.merged++;
+                console.log(`[TunnelVision] Lifecycle: merged UID ${pair.remove_uid} → ${pair.keep_uid} in "${bookName}" (${pair.reason || 'duplicate'})`);
+            } catch (e) {
+                console.warn(`[TunnelVision] Lifecycle: merge failed for ${pair.keep_uid} ↔ ${pair.remove_uid}:`, e);
+                result.errors++;
             }
         }
     } catch (e) {
@@ -262,7 +285,10 @@ async function compressVerboseEntries(bookName, bookData, chatId) {
         ].join('\n');
 
         try {
-            const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+            const response = await callWithRetry(
+                () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+                { label: 'Lifecycle compress', maxRetries: 1 },
+            );
             if (getChatId() !== chatId) return result;
 
             const compressed = response?.trim();

@@ -17,7 +17,7 @@ import { eventSource, event_types, generateQuietPrompt } from '../../../../scrip
 import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getChatId, formatChatExcerpt } from './agent-utils.js';
+import { getChatId, formatChatExcerpt, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
@@ -196,7 +196,10 @@ export async function updateWorldState(forceUpdate = false) {
         const previousState = currentState?.text || '';
         const quietPrompt = buildUpdatePrompt(previousState, recentExcerpt);
 
-        const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+        const response = await callWithRetry(
+            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            { label: 'World state update' },
+        );
 
         if (getChatId() !== chatId || task.cancelled) {
             console.log('[TunnelVision] World state update aborted after generation');
@@ -334,4 +337,55 @@ export function clearWorldState() {
 /** Check if a world state update is currently in progress. */
 export function isWorldStateUpdating() {
     return _updateRunning;
+}
+
+// ── Persistent Timeline ──────────────────────────────────────────
+
+const TIMELINE_KEY = 'tunnelvision_timeline';
+const MAX_TIMELINE_ENTRIES = 100;
+
+/**
+ * Get the persistent timeline array for the current chat.
+ * @returns {Array<{when: string, event: string, msgIdx: number, ts: number}>}
+ */
+export function getTimeline() {
+    try {
+        return getContext().chatMetadata?.[TIMELINE_KEY] || [];
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Append one or more events to the persistent timeline.
+ * @param {Array<{when: string, event: string, msgIdx: number}>} events
+ */
+export function appendTimeline(events) {
+    if (!Array.isArray(events) || events.length === 0) return;
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const timeline = context.chatMetadata[TIMELINE_KEY] || [];
+        const now = Date.now();
+        for (const e of events) {
+            timeline.push({ when: e.when || 'unspecified', event: e.event, msgIdx: e.msgIdx, ts: now });
+        }
+        // Cap at MAX_TIMELINE_ENTRIES, keeping the most recent
+        if (timeline.length > MAX_TIMELINE_ENTRIES) {
+            timeline.splice(0, timeline.length - MAX_TIMELINE_ENTRIES);
+        }
+        context.chatMetadata[TIMELINE_KEY] = timeline;
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+/** Clear the timeline for the current chat. */
+export function clearTimeline() {
+    try {
+        const context = getContext();
+        if (context.chatMetadata) {
+            delete context.chatMetadata[TIMELINE_KEY];
+            context.saveMetadataDebounced?.();
+        }
+    } catch { /* ignore */ }
 }
