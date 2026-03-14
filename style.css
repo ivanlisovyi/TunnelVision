@@ -2083,6 +2083,84 @@
     border: 1px solid rgba(240, 148, 108, 0.15);
 }
 
+/* ===== Clickable Entry Expansion (Feed) ===== */
+.tv-feed-clickable {
+    cursor: pointer;
+}
+
+.tv-feed-clickable:hover {
+    background: rgba(232, 67, 147, 0.06);
+}
+
+.tv-float-item.expanded {
+    background: rgba(232, 67, 147, 0.08);
+    border-bottom-color: transparent;
+}
+
+.tv-feed-expand {
+    padding: 8px 12px 10px;
+    background: rgba(232, 67, 147, 0.04);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 11px;
+}
+
+.tv-feed-expand-content {
+    max-height: 150px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 8px;
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: var(--SmartThemeBodyColor);
+}
+
+.tv-feed-expand-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.tv-feed-expand-empty {
+    font-size: 11px;
+    opacity: 0.6;
+    padding: 4px 0;
+}
+
+/* ===== Stats Summary Bar (Feed) ===== */
+.tv-feed-stats {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 12px;
+    background: rgba(0, 0, 0, 0.12);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    flex-wrap: wrap;
+}
+
+.tv-feed-stat {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--SmartThemeQuoteColor, #888);
+}
+
+.tv-feed-stat i {
+    font-size: 10px;
+}
+
+.tv-feed-stat-value {
+    font-weight: 600;
+    color: var(--SmartThemeBodyColor);
+}
+
 /* ===== Hidden Tool Call Messages ===== */
 .tv-hidden-tool-call {
     display: none !important;

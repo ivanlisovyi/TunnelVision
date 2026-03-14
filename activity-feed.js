@@ -7,7 +7,8 @@
 import { chat, eventSource, event_types, saveChatConditional } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { ALL_TOOL_NAMES, getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getSettings, isLorebookEnabled, getTree } from './tree-store.js';
+import { getSettings, isLorebookEnabled, getTree, isSummaryTitle, isTrackerTitle } from './tree-store.js';
+import { findEntry, getCachedWorldInfo } from './entry-manager.js';
 import { openTreeEditorForBook } from './ui-controller.js';
 import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating } from './world-state.js';
 
@@ -66,6 +67,11 @@ let panelBody = null;
 let panelTabs = null;
 /** Whether the panel is currently showing the world state view. */
 let showingWorldState = false;
+
+/** Cached lorebook stats for the stats bar. */
+let _lorebookStatsCache = null;
+let _lorebookStatsCacheTime = 0;
+const LOREBOOK_STATS_CACHE_TTL = 30000;
 
 // Tool display config
 const TOOL_DISPLAY = {
@@ -355,6 +361,7 @@ function togglePanel() {
     if (!panelEl) return;
     const isOpen = panelEl.classList.toggle('open');
     if (isOpen) {
+        _lorebookStatsCache = null;
         positionPanel();
         if (showingWorldState) {
             renderWorldStateView();
@@ -532,6 +539,11 @@ function renderAllItems() {
 
     panelBody.replaceChildren();
 
+    // Stats bar — only on "All" tab when there are items
+    if (tab === 'all' && feedItems.length > 0) {
+        panelBody.appendChild(renderStatsBar());
+    }
+
     // Active background tasks — shown at top in 'all' and 'bg' tabs
     const showActiveTasks = (tab === 'all' || tab === 'bg') && _activeTasks.size > 0;
     if (showActiveTasks) {
@@ -673,7 +685,146 @@ function buildItemElement(item) {
     // Time
     row.appendChild(el('div', 'tv-float-item-time', formatTime(item.timestamp)));
 
+    // Clickable entry expansion
+    if (item.type === 'entry' && item.lorebook && item.uid != null) {
+        row.classList.add('tv-feed-clickable');
+        row.addEventListener('click', () => toggleFeedEntryExpand(row, item));
+    }
+
     return row;
+}
+
+async function toggleFeedEntryExpand(row, item) {
+    const expandEl = row.nextElementSibling;
+    if (expandEl?.classList.contains('tv-feed-expand')) {
+        expandEl.remove();
+        row.classList.remove('expanded');
+        return;
+    }
+
+    row.classList.add('expanded');
+    const expandDiv = el('div', 'tv-feed-expand');
+    expandDiv.textContent = 'Loading…';
+    row.after(expandDiv);
+
+    try {
+        const result = await findEntry(item.lorebook, item.uid);
+        if (!row.classList.contains('expanded')) return;
+        expandDiv.replaceChildren();
+
+        if (!result?.entry) {
+            expandDiv.appendChild(el('div', 'tv-feed-expand-empty', 'Entry not found or deleted'));
+            return;
+        }
+
+        const entry = result.entry;
+        const contentDiv = el('div', 'tv-feed-expand-content');
+        contentDiv.textContent = entry.content || '(empty)';
+        expandDiv.appendChild(contentDiv);
+
+        const actions = el('div', 'tv-feed-expand-actions');
+        const openBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
+        openBtn.appendChild(icon('fa-folder-tree'));
+        openBtn.append(' Open in Tree');
+        openBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openTreeEditorForBook(item.lorebook);
+        });
+        actions.appendChild(openBtn);
+
+        const copyBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
+        copyBtn.appendChild(icon('fa-copy'));
+        copyBtn.append(' Copy');
+        copyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(entry.content || '');
+            copyBtn.replaceChildren(icon('fa-check'));
+            copyBtn.append(' Copied');
+            setTimeout(() => {
+                copyBtn.replaceChildren(icon('fa-copy'));
+                copyBtn.append(' Copy');
+            }, 1500);
+        });
+        actions.appendChild(copyBtn);
+
+        expandDiv.appendChild(actions);
+    } catch (err) {
+        expandDiv.replaceChildren(el('div', 'tv-feed-expand-empty', `Failed to load: ${err.message}`));
+    }
+}
+
+function renderStatsBar() {
+    const bar = el('div', 'tv-feed-stats');
+    let nativeEntries = 0, tvEntries = 0, toolCount = 0, bgCount = 0;
+    for (const item of feedItems) {
+        if (item.type === 'entry') {
+            item.source === 'native' ? nativeEntries++ : tvEntries++;
+        } else if (item.type === 'tool') toolCount++;
+        else if (item.type === 'background') bgCount++;
+    }
+
+    addStatPair(bar, 'fa-book-open', nativeEntries + tvEntries, `Entries (${nativeEntries} native, ${tvEntries} TV)`, '#e84393');
+    addStatPair(bar, 'fa-gear', toolCount, 'Tool calls', '#f0946c');
+    addStatPair(bar, 'fa-robot', bgCount, 'Agent tasks', '#6c5ce7');
+
+    const lbStat = el('div', 'tv-feed-stat');
+    lbStat.title = 'Lorebook entries (loading…)';
+    const lbIcon = icon('fa-database');
+    lbIcon.style.color = '#00b894';
+    lbStat.appendChild(lbIcon);
+    const lbValue = el('span', 'tv-feed-stat-value', '…');
+    lbStat.appendChild(lbValue);
+    bar.appendChild(lbStat);
+
+    computeLorebookStats().then(({ facts, summaries, trackers }) => {
+        const total = facts + summaries + trackers;
+        lbValue.textContent = String(total);
+        lbStat.title = `Lorebook: ${facts} facts, ${summaries} summaries, ${trackers} trackers`;
+    }).catch(() => {
+        lbValue.textContent = '–';
+        lbStat.title = 'Lorebook stats unavailable';
+    });
+
+    return bar;
+}
+
+async function computeLorebookStats() {
+    const now = Date.now();
+    if (_lorebookStatsCache && now - _lorebookStatsCacheTime < LOREBOOK_STATS_CACHE_TTL) {
+        return _lorebookStatsCache;
+    }
+
+    const activeBooks = getActiveTunnelVisionBooks();
+    let facts = 0, summaries = 0, trackers = 0;
+
+    for (const bookName of activeBooks) {
+        try {
+            const bookData = await getCachedWorldInfo(bookName);
+            if (!bookData?.entries) continue;
+            for (const key of Object.keys(bookData.entries)) {
+                const entry = bookData.entries[key];
+                if (entry.disable) continue;
+                const title = entry.comment || '';
+                if (isSummaryTitle(title)) summaries++;
+                else if (isTrackerTitle(title)) trackers++;
+                else facts++;
+            }
+        } catch { /* skip unavailable books */ }
+    }
+
+    _lorebookStatsCache = { facts, summaries, trackers };
+    _lorebookStatsCacheTime = now;
+    return _lorebookStatsCache;
+}
+
+function addStatPair(container, iconClass, value, tooltip, color) {
+    const pair = el('div', 'tv-feed-stat');
+    pair.title = tooltip;
+    const i = icon(iconClass);
+    i.style.color = color;
+    pair.appendChild(i);
+    pair.appendChild(el('span', 'tv-feed-stat-value', String(value)));
+    container.appendChild(pair);
 }
 
 function updateBadge(count) {
@@ -697,6 +848,7 @@ function trimFeed() {
 
 function addFeedItems(items) {
     if (!Array.isArray(items) || items.length === 0) return;
+    _lorebookStatsCache = null;
 
     feedItems = [...items, ...feedItems];
     trimFeed();
