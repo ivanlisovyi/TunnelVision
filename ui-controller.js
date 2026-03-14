@@ -143,9 +143,8 @@ export function bindUIEvents() {
     $('#tv_ephemeral_results').on('change', onEphemeralResultsToggle);
     $('.tv_ephemeral_tool').on('change', onEphemeralToolFilterChange);
 
-    // !commands settings
+    // Slash commands settings
     $('#tv_commands_enabled').on('change', onCommandsEnabledToggle);
-    $('#tv_command_prefix').on('change', onCommandPrefixChange);
     $('#tv_command_context').on('change', onCommandContextChange);
 
     // Auto-summary settings
@@ -249,9 +248,8 @@ export function refreshUI() {
         $(this).prop('checked', filterList.includes($(this).val()));
     });
 
-    // Sync !commands settings
+    // Sync slash commands settings
     $('#tv_commands_enabled').prop('checked', settings.commandsEnabled !== false);
-    $('#tv_command_prefix').val(settings.commandPrefix || '!');
     $('#tv_command_context').val(settings.commandContextMessages ?? 50);
 
     // Sync auto-summary settings
@@ -803,19 +801,11 @@ function onEphemeralToolFilterChange() {
     saveSettingsDebounced();
 }
 
-// ─── Commands Settings ───────────────────────────────────────────
+// ─── Slash Commands Settings ─────────────────────────────────────
 
 function onCommandsEnabledToggle() {
     const settings = getSettings();
     settings.commandsEnabled = $(this).prop('checked');
-    saveSettingsDebounced();
-}
-
-function onCommandPrefixChange() {
-    const val = $(this).val()?.trim() || '!';
-    $(this).val(val);
-    const settings = getSettings();
-    settings.commandPrefix = val;
     saveSettingsDebounced();
 }
 

@@ -39,62 +39,81 @@ export async function runDiagnostics() {
     const settingsBefore = JSON.stringify(getSettings());
     const results = [];
 
-    results.push(checkSettingsExist());
-    results.push(checkApiConnected());
-    results.push(checkToolCallingSupport());
-    results.push(checkPromptPostProcessing());
-    results.push(...checkActiveLorebooksExist());
-    results.push(...checkTreesValid());
-    results.push(...await checkEntryUidsValid());
-    results.push(...checkNodeSummaries());
-    results.push(...checkDuplicateUids());
-    results.push(...await checkNearDuplicateEntries());
-    results.push(...await checkEmptyLorebooks());
-    results.push(...checkNodeIntegrity());
-    results.push(...await checkToolRuntimeDuringDiagnostics());
-    results.push(checkDisabledTools());
-    results.push(checkConfirmToolConfig());
-    results.push(checkToolPromptOverrides());
-    results.push(checkWorldInfoApi());
-    results.push(checkOrphanedTrees());
-    results.push(checkSearchMode());
-    results.push(checkSelectiveRetrieval());
-    results.push(checkRecurseLimit());
-    results.push(checkLlmBuildDetail());
-    results.push(checkLlmChunkSize());
-    results.push(checkVectorDedupConfig());
-    results.push(...checkSummariesNode());
-    results.push(...checkCollapsedTreeSize());
-    results.push(...checkOversizedLeafNodes());
-    results.push(...checkGranularityMismatch());
-    results.push(...checkLargeLorebookSettings());
-    results.push(...checkMultiDocConsistency());
-    results.push(checkPopupAvailability());
-    results.push(...checkActivityFeedEvent());
-    results.push(checkFeedPersistence());
-    results.push(checkGenerateRawAvailability());
-    results.push(checkWiSuppressionEvent());
-    results.push(checkChatIngestRequirements());
-    results.push(checkMandatoryToolsEvent());
-    results.push(checkPromptInjectionSettings());
-    results.push(checkCommandsConfig());
-    results.push(checkAutoSummaryConfig());
-    results.push(checkMultiBookMode());
-    results.push(checkConnectionProfile());
-    results.push(...await checkTrackerUids());
-    results.push(...checkArcNodes());
-    results.push(checkNotebookConfig());
-    results.push(checkStealthMode());
-    results.push(checkEphemeralResults());
-    results.push(checkAutoHideSummarized());
-    results.push(checkConstantPassthrough());
-    results.push(...checkBookDescriptions());
-    results.push(checkTurnSummaryEvent());
-
-    const settingsAfter = JSON.stringify(getSettings());
-    if (settingsBefore !== settingsAfter) {
-        saveSettingsDebounced();
+    /**
+     * Run a diagnostic check with an error boundary so one failing check
+     * doesn't abort all subsequent checks.
+     */
+    async function collect(checkFn) {
+        try {
+            const result = await checkFn();
+            if (Array.isArray(result)) {
+                results.push(...result);
+            } else {
+                results.push(result);
+            }
+        } catch (e) {
+            results.push(fail(`Check "${checkFn.name || 'anonymous'}" threw: ${e.message}`));
+        }
     }
+
+    await collect(checkSettingsExist);
+    await collect(checkApiConnected);
+    await collect(checkToolCallingSupport);
+    await collect(checkPromptPostProcessing);
+    await collect(checkActiveLorebooksExist);
+    await collect(checkTreesValid);
+    await collect(checkEntryUidsValid);
+    await collect(checkNodeSummaries);
+    await collect(checkDuplicateUids);
+    await collect(checkNearDuplicateEntries);
+    await collect(checkEmptyLorebooks);
+    await collect(checkNodeIntegrity);
+    await collect(checkToolRuntimeDuringDiagnostics);
+    await collect(checkDisabledTools);
+    await collect(checkConfirmToolConfig);
+    await collect(checkToolPromptOverrides);
+    await collect(checkWorldInfoApi);
+    await collect(checkOrphanedTrees);
+    await collect(checkSearchMode);
+    await collect(checkSelectiveRetrieval);
+    await collect(checkRecurseLimit);
+    await collect(checkLlmBuildDetail);
+    await collect(checkLlmChunkSize);
+    await collect(checkVectorDedupConfig);
+    await collect(checkSummariesNode);
+    await collect(checkCollapsedTreeSize);
+    await collect(checkOversizedLeafNodes);
+    await collect(checkGranularityMismatch);
+    await collect(checkLargeLorebookSettings);
+    await collect(checkMultiDocConsistency);
+    await collect(checkPopupAvailability);
+    await collect(checkActivityFeedEvent);
+    await collect(checkFeedPersistence);
+    await collect(checkGenerateRawAvailability);
+    await collect(checkWiSuppressionEvent);
+    await collect(checkChatIngestRequirements);
+    await collect(checkMandatoryToolsEvent);
+    await collect(checkPromptInjectionSettings);
+    await collect(checkCommandsConfig);
+    await collect(checkAutoSummaryConfig);
+    await collect(checkMultiBookMode);
+    await collect(checkConnectionProfile);
+    await collect(checkTrackerUids);
+    await collect(checkArcNodes);
+    await collect(checkNotebookConfig);
+    await collect(checkStealthMode);
+    await collect(checkEphemeralResults);
+    await collect(checkAutoHideSummarized);
+    await collect(checkConstantPassthrough);
+    await collect(checkBookDescriptions);
+    await collect(checkTurnSummaryEvent);
+
+    try {
+        const settingsAfter = JSON.stringify(getSettings());
+        if (settingsBefore !== settingsAfter) {
+            saveSettingsDebounced();
+        }
+    } catch { /* best effort */ }
 
     return results;
 }
@@ -1033,45 +1052,27 @@ function checkPromptInjectionSettings() {
     return pass('Prompt injection settings valid');
 }
 
-/** Check !commands configuration: prerequisites, settings validation, and auto-fix. */
+/** Check slash commands availability and settings. */
 function checkCommandsConfig() {
     const settings = getSettings();
-
-    // Feature disabled — just report it
-    if (!settings.commandsEnabled) {
-        return pass('User commands: disabled');
+    if (settings.commandsEnabled === false) {
+        return pass('Slash commands: disabled');
     }
 
-    // Check prerequisite event
-    if (!event_types || !event_types.GENERATION_STARTED) {
-        return warn(
-            'event_types.GENERATION_STARTED not available. ' +
-            '!commands will not intercept generations. Requires a newer ST version.',
-        );
-    }
+    try {
+        const SlashCommandParser = window?.SillyTavern?.getContext?.()?.SlashCommandParser;
+        if (!SlashCommandParser) {
+            return warn('SlashCommandParser not available — /tv-* commands will not work. Requires ST 1.12+.');
+        }
+    } catch { /* ignore */ }
 
-    // Validate and auto-fix commandPrefix
-    let prefix = settings.commandPrefix;
-    if (!prefix || typeof prefix !== 'string' || prefix.length === 0) {
-        settings.commandPrefix = '!';
-        prefix = '!';
-        return warn('Command prefix was empty. Auto-reset to "!".');
-    }
-    if (prefix.length > 3) {
-        const oldLen = prefix.length;
-        settings.commandPrefix = prefix.slice(0, 3);
-        prefix = settings.commandPrefix;
-        return warn(`Command prefix was ${oldLen} chars (max 3). Truncated to "${prefix}".`);
-    }
-
-    // Validate and auto-fix commandContextMessages
     const ctx = Number(settings.commandContextMessages);
     if (!isFinite(ctx) || ctx < 1) {
         settings.commandContextMessages = 50;
         return warn('Command context messages was invalid. Auto-reset to 50.');
     }
 
-    return pass(`User commands: enabled (prefix "${prefix}", context ${ctx} msgs)`);
+    return pass(`Slash commands: enabled (context ${ctx} msgs)`);
 }
 
 /** Check auto-summary configuration. */

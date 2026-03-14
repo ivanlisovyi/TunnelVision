@@ -266,6 +266,30 @@ export function getEntriesForNodes(root, nodeIds) {
     return [...new Set(uids)];
 }
 
+const SUMMARIES_NODE_LABEL = 'Summaries';
+
+/**
+ * Find or create the "Summaries" node in a lorebook's tree.
+ * Returns the node ID, creating the node under root if absent.
+ * Shared by the Summarize tool and auto-summary / slash commands.
+ * @param {string} bookName
+ * @returns {string|null}
+ */
+export function ensureSummariesNode(bookName) {
+    const tree = getTree(bookName);
+    if (!tree || !tree.root) return null;
+
+    for (const child of (tree.root.children || [])) {
+        if (child.label === SUMMARIES_NODE_LABEL) return child.id;
+    }
+
+    const node = createTreeNode(SUMMARIES_NODE_LABEL, 'Temporal scene summaries and event records created by the AI.');
+    tree.root.children.push(node);
+    saveTree(bookName, tree);
+    console.log(`[TunnelVision] Created "${SUMMARIES_NODE_LABEL}" category in "${bookName}"`);
+    return node.id;
+}
+
 /** Default settings values. Adding a new setting = add one line here. */
 export const SETTING_DEFAULTS = {
     globalEnabled: true,
@@ -284,7 +308,6 @@ export const SETTING_DEFAULTS = {
     treeGranularity: 0,
     llmChunkTokens: 30000,
     commandsEnabled: true,
-    commandPrefix: '!',
     commandContextMessages: 50,
     autoSummaryEnabled: false,
     autoSummaryInterval: 20,
@@ -309,7 +332,11 @@ export const SETTING_DEFAULTS = {
     toolPromptOverrides: {},
 };
 
+let _settingsInitialized = false;
+
 function ensureSettings() {
+    if (_settingsInitialized && extension_settings[EXTENSION_NAME]) return;
+
     if (!extension_settings[EXTENSION_NAME]) {
         extension_settings[EXTENSION_NAME] = {};
     }
@@ -346,6 +373,8 @@ function ensureSettings() {
     if (didMutate) {
         saveSettingsDebounced();
     }
+
+    _settingsInitialized = true;
 }
 
 export function getSettings() {

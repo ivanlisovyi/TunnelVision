@@ -570,26 +570,31 @@
 
                         <hr class="tv-adv-divider" />
 
-                        <!-- ═══ !Commands ═══ -->
+                        <!-- ═══ Slash Commands ═══ -->
                         <div class="tv-adv-section">
-                            <div class="tv-adv-section-title">User Commands</div>
+                            <div class="tv-adv-section-title">Slash Commands</div>
                             <div class="tv-help-text" style="margin-bottom: 8px;">
-                                Type commands in the chat box to force tool calls. Example: <code>!summarize "The Battle"</code> forces a summary with that title.
+                                Type these in the chat input to run TunnelVision actions directly. Commands run in the background — they do not trigger a model response or add messages to the chat.
                             </div>
                             <label class="tv-checkbox-row">
                                 <input id="tv_commands_enabled" type="checkbox" checked />
-                                <span>Enable !commands</span>
+                                <span>Enable slash commands</span>
                             </label>
-                            <div class="tv-number-row" style="margin-top: 8px;">
-                                <label class="tv-number-label" for="tv_command_prefix">Prefix:</label>
-                                <input id="tv_command_prefix" type="text" class="tv-text-input" style="width: 40px;" value="!" maxlength="3" />
-                            </div>
                             <div class="tv-number-row" style="margin-top: 6px;">
                                 <label class="tv-number-label" for="tv_command_context">Context messages:</label>
                                 <input id="tv_command_context" type="number" class="tv-number-input" min="5" max="500" step="5" value="50" />
                             </div>
-                            <div class="tv-help-text" style="margin-top: 4px;">
-                                Available: <code>!summarize</code>, <code>!remember</code>, <code>!search</code>, <code>!forget</code>, <code>!ingest</code>
+                            <div class="tv-help-text" style="margin-top: 6px;">
+                                How many recent messages to include as context for commands like <code>/tv-summarize</code> and <code>/tv-remember</code>.
+                            </div>
+                            <div class="tv-help-text" style="margin-top: 8px;">
+                                <code>/tv-summarize [title]</code> — Summarize recent events<br/>
+                                <code>/tv-remember [content]</code> — Save info to lorebook<br/>
+                                <code>/tv-search [query]</code> — Search lorebook entries<br/>
+                                <code>/tv-forget [name or UID]</code> — Disable an entry<br/>
+                                <code>/tv-merge [description]</code> — Merge two entries<br/>
+                                <code>/tv-split [name or UID]</code> — Split an entry<br/>
+                                <code>/tv-ingest [lorebook]</code> — Ingest chat into lorebook
                             </div>
                         </div>
 
@@ -599,7 +604,7 @@
                         <div class="tv-adv-section">
                             <div class="tv-adv-section-title">Auto-Summary</div>
                             <div class="tv-help-text" style="margin-bottom: 8px;">
-                                Automatically inject a summarize instruction every N messages. The AI will create a summary of recent events as part of its next response.
+                                Automatically summarize recent events every N messages. Runs in the background after the AI's response — does not interrupt or hijack the conversation.
                             </div>
                             <label class="tv-toggle">
                                 <input id="tv_auto_summary_enabled" type="checkbox" />

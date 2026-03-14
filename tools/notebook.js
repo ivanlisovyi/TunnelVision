@@ -28,6 +28,7 @@ const MAX_NOTES = 50;
  */
 function getNotebook() {
     const context = getContext();
+    if (!context.chatMetadata) return [];
     if (!context.chatMetadata[METADATA_KEY]) {
         context.chatMetadata[METADATA_KEY] = [];
     }
@@ -39,7 +40,7 @@ function getNotebook() {
  */
 function saveNotebook() {
     const context = getContext();
-    context.saveMetadataDebounced();
+    context.saveMetadataDebounced?.();
 }
 
 /**
@@ -116,7 +117,7 @@ Actions:
                     if (notebook.length >= MAX_NOTES) {
                         return `Notebook is full (${MAX_NOTES} notes). Remove some old notes first.`;
                     }
-                    const id = `note_${Date.now().toString(36)}`;
+                    const id = `note_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
                     notebook.push({
                         id,
                         title: args.title.trim(),

@@ -37,7 +37,7 @@ import {
  * @param {string} [params.nodeId] - Tree node to assign to (defaults to root)
  * @returns {Promise<{uid: number, comment: string, nodeLabel: string}>}
  */
-export async function createEntry(bookName, { content, comment, keys, nodeId }) {
+export async function createEntry(bookName, { content, comment, keys, nodeId, _bookData }) {
     if (!content || !content.trim()) {
         throw new Error('Entry content cannot be empty.');
     }
@@ -45,7 +45,7 @@ export async function createEntry(bookName, { content, comment, keys, nodeId }) 
         throw new Error('Entry comment/title cannot be empty.');
     }
 
-    const bookData = await loadWorldInfo(bookName);
+    const bookData = _bookData || await loadWorldInfo(bookName);
     if (!bookData || !bookData.entries) {
         throw new Error(`Lorebook "${bookName}" not found or has no entry data.`);
     }
@@ -419,14 +419,6 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
     }
     const wasTracker = isTrackerUid(bookName, uid) || isTrackerTitle(original.comment);
 
-    // Update the original entry
-    original.content = keepContent.trim();
-    if (keepTitle && keepTitle.trim()) {
-        original.comment = keepTitle.trim();
-    }
-
-    await saveWorldInfo(bookName, bookData, true);
-
     // Find the node the original lives in, so we can place the new entry alongside it
     const tree = getTree(bookName);
     let nodeId = null;
@@ -435,13 +427,26 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
         if (containingNode) nodeId = containingNode.id;
     }
 
-    // Create the new split-off entry (reuses createEntry for consistency)
+    // Create the new split-off entry FIRST — the original is still untouched at
+    // this point. If createEntry fails, no content is lost because the original
+    // hasn't been truncated yet.
     const newResult = await createEntry(bookName, {
         content: newContent,
         comment: newTitle,
         keys: newKeys || [],
         nodeId,
+        _bookData: bookData,
     });
+
+    // Now safely truncate the original. If this save fails, the worst case is
+    // duplicated content (original retains full text + new entry exists), which
+    // is a recoverable state — far better than losing content.
+    original.content = keepContent.trim();
+    if (keepTitle && keepTitle.trim()) {
+        original.comment = keepTitle.trim();
+    }
+    await saveWorldInfo(bookName, bookData, true);
+
     if (wasTracker) {
         setTrackerUid(bookName, uid, true);
         setTrackerUid(bookName, newResult.uid, true);

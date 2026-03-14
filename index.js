@@ -23,7 +23,7 @@ import { getContext } from '../../../st-context.js';
 import { ToolManager } from '../../../tool-calling.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
-import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks } from './tool-registry.js';
+import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable } from './tool-registry.js';
 import { buildNotebookPrompt } from './tools/notebook.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
@@ -53,11 +53,16 @@ async function init() {
     // Initialize activity feed (listens for tool call events)
     initActivityFeed();
 
-    // Wire up !command interception
+    // Register slash commands (/tv-summarize, /tv-remember, etc.)
     initCommands();
 
     // Wire up auto-summary interval tracking
     initAutoSummary();
+
+    // Clean up legacy auto-summary prompt key from the old injection-based system
+    try {
+        setExtensionPrompt('tunnelvision_autosummary', '', extension_prompt_types.IN_CHAT, 1, false, extension_prompt_roles.SYSTEM);
+    } catch { /* ignore if prompt system isn't ready */ }
 
     // Load initial state
     refreshUI();
@@ -116,6 +121,11 @@ async function onAppReady() {
 function onWorldInfoEntriesLoaded(data) {
     const settings = getSettings();
     if (settings.globalEnabled === false) return;
+
+    // Safety net: don't suppress entries if the Search tool isn't registered or
+    // tool calling isn't supported. Without Search, suppression would leave the
+    // model with zero lorebook context — a total blackout.
+    if (!isSearchToolAvailable()) return;
 
     const passthrough = settings.passthroughConstant !== false;
     let removed = 0;

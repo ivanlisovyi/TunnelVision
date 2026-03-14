@@ -12,7 +12,7 @@
  * referential knowledge (characters, locations, rules, etc.).
  */
 
-import { getTree, findNodeById, createTreeNode, saveTree, getSettings } from '../tree-store.js';
+import { getTree, findNodeById, createTreeNode, saveTree, getSettings, ensureSummariesNode } from '../tree-store.js';
 import { createEntry } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
 import { markAutoSummaryComplete } from '../auto-summary.js';
@@ -21,7 +21,6 @@ import { hideChatMessageRange } from '../../../../chats.js';
 
 export const TOOL_NAME = 'TunnelVision_Summarize';
 
-const SUMMARIES_NODE_LABEL = 'Summaries';
 const WATERMARK_KEY = 'tunnelvision_summary_watermark';
 
 /**
@@ -99,31 +98,6 @@ export async function hideSummarizedMessages(messagesBack, overrideStart, overri
         console.error('[TunnelVision] Failed to hide summarized messages:', e);
         return null;
     }
-}
-
-/**
- * Find or create the "Summaries" node in a lorebook's tree.
- * Returns the node ID. Creates the node under root if it doesn't exist.
- * @param {string} bookName
- * @returns {string|null} Node ID of the Summaries category, or null if no tree
- */
-function ensureSummariesNode(bookName) {
-    const tree = getTree(bookName);
-    if (!tree || !tree.root) return null;
-
-    // Look for existing Summaries node (direct child of root)
-    for (const child of (tree.root.children || [])) {
-        if (child.label === SUMMARIES_NODE_LABEL) {
-            return child.id;
-        }
-    }
-
-    // Create it
-    const node = createTreeNode(SUMMARIES_NODE_LABEL, 'Temporal scene summaries and event records created by the AI.');
-    tree.root.children.push(node);
-    saveTree(bookName, tree);
-    console.log(`[TunnelVision] Created "${SUMMARIES_NODE_LABEL}" category in "${bookName}"`);
-    return node.id;
 }
 
 /**

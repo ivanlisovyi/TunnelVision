@@ -394,10 +394,10 @@ function wrapWithConfirmation(originalAction, displayName) {
     };
 }
 
-/** Guard against overlapping registerTools() calls — a second call waits for the
- *  first to finish then re-runs, preventing interleaved unregister/register cycles. */
+/** Guard against overlapping registerTools() calls — concurrent callers are
+ *  coalesced so only the latest request actually runs after the lock is freed. */
 let _registerLock = null;
-let _registerQueued = false;
+let _registerVersion = 0;
 
 /**
  * Register all TunnelVision tools with ToolManager.
@@ -405,15 +405,17 @@ let _registerQueued = false;
  * (e.g. Search returns null if no valid trees exist).
  */
 export async function registerTools() {
-    if (_registerLock) {
-        _registerQueued = true;
+    const myVersion = ++_registerVersion;
+
+    while (_registerLock) {
         await _registerLock;
-        if (!_registerQueued) return;
     }
+
+    // A newer caller arrived while we waited — let it handle registration
+    if (myVersion !== _registerVersion) return;
 
     let unlock;
     _registerLock = new Promise(r => { unlock = r; });
-    _registerQueued = false;
 
     try {
         await _doRegisterTools();
@@ -504,6 +506,22 @@ export function unregisterTools() {
             // Tool may not be registered — that's fine
         }
     }
+}
+
+/**
+ * Check whether the Search tool is actually registered and tool calling is
+ * supported by the current API. Used by WI suppression to avoid removing
+ * entries when the model has no way to retrieve them via tools.
+ * @returns {boolean}
+ */
+export function isSearchToolAvailable() {
+    if (typeof ToolManager.isToolCallingSupported === 'function' && !ToolManager.isToolCallingSupported()) {
+        return false;
+    }
+    return ToolManager.tools.some(tool => {
+        try { return getToolDefinitionName(tool) === SEARCH_NAME; }
+        catch { return false; }
+    });
 }
 
 // Re-export tool names and constants for diagnostics/UI

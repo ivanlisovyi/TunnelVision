@@ -132,7 +132,7 @@ function saveFeed() {
         if (!context.chatMetadata || !context.chatId) return;
         if (activeChatId && context.chatId !== activeChatId) return;
         context.chatMetadata[METADATA_KEY] = { items: feedItems, nextId };
-        context.saveMetadataDebounced();
+        context.saveMetadataDebounced?.();
     } catch { /* no active chat */ }
 }
 
@@ -636,37 +636,41 @@ function addFeedItems(items) {
 // ── Hidden Tool Call (Visual Hiding) ──
 
 export async function refreshHiddenToolCallMessages({ syncFlags = false } = {}) {
-    const hideMode = getSettings().stealthMode === true;
-    let flagsMutated = false;
+    try {
+        const hideMode = getSettings().stealthMode === true;
+        let flagsMutated = false;
 
-    for (let messageIndex = 0; messageIndex < chat.length; messageIndex++) {
-        const message = chat[messageIndex];
-        const invocations = Array.isArray(message?.extra?.tool_invocations) ? message.extra.tool_invocations : null;
-        if (!invocations?.length) continue;
+        for (let messageIndex = 0; messageIndex < chat.length; messageIndex++) {
+            const message = chat[messageIndex];
+            const invocations = Array.isArray(message?.extra?.tool_invocations) ? message.extra.tool_invocations : null;
+            if (!invocations?.length) continue;
 
-        const isPureTunnelVision = areTunnelVisionInvocations(invocations);
-        if (!message.extra) {
-            message.extra = {};
+            const isPureTunnelVision = areTunnelVisionInvocations(invocations);
+            if (!message.extra) {
+                message.extra = {};
+            }
+
+            if (syncFlags && !isPureTunnelVision && message.extra[HIDDEN_TOOL_CALL_FLAG]) {
+                delete message.extra[HIDDEN_TOOL_CALL_FLAG];
+                flagsMutated = true;
+            }
+
+            if (syncFlags && hideMode && isPureTunnelVision && message.extra[HIDDEN_TOOL_CALL_FLAG] !== true) {
+                message.extra[HIDDEN_TOOL_CALL_FLAG] = true;
+                flagsMutated = true;
+            }
+
+            const shouldHide = hideMode
+                && isPureTunnelVision
+                && message.extra[HIDDEN_TOOL_CALL_FLAG] === true;
+            applyHiddenToolCallVisibility(messageIndex, shouldHide);
         }
 
-        if (syncFlags && !isPureTunnelVision && message.extra[HIDDEN_TOOL_CALL_FLAG]) {
-            delete message.extra[HIDDEN_TOOL_CALL_FLAG];
-            flagsMutated = true;
+        if (flagsMutated) {
+            await saveChatConditional();
         }
-
-        if (syncFlags && hideMode && isPureTunnelVision && message.extra[HIDDEN_TOOL_CALL_FLAG] !== true) {
-            message.extra[HIDDEN_TOOL_CALL_FLAG] = true;
-            flagsMutated = true;
-        }
-
-        const shouldHide = hideMode
-            && isPureTunnelVision
-            && message.extra[HIDDEN_TOOL_CALL_FLAG] === true;
-        applyHiddenToolCallVisibility(messageIndex, shouldHide);
-    }
-
-    if (flagsMutated) {
-        await saveChatConditional();
+    } catch (err) {
+        console.error('[TunnelVision] Failed to refresh hidden tool call messages:', err);
     }
 }
 
