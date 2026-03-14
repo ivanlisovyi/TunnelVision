@@ -7,7 +7,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { world_names, loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getAutoSummaryCount, resetAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
-import { getWorldStateText, getWorldStateLastIndex, updateWorldState, clearWorldState, isWorldStateUpdating, DEFAULT_WS_INJECTION_PROMPT, DEFAULT_WS_UPDATE_PROMPT } from './world-state.js';
+import { getWorldStateText, getWorldStateLastIndex, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState, DEFAULT_WS_INJECTION_PROMPT, DEFAULT_WS_UPDATE_PROMPT } from './world-state.js';
 import { getLastProcessingResult, getLastProcessedIndex } from './post-turn-processor.js';
 import { getLastLifecycleResult, getLastLifecycleRunIndex } from './memory-lifecycle.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
@@ -167,6 +167,7 @@ export function bindUIEvents() {
     $('#tv_world_state_depth').on('change', onWorldStateInjectionChange);
     $('#tv_world_state_role').on('change', onWorldStateInjectionChange);
     $('#tv_world_state_refresh').on('click', onWorldStateRefresh);
+    $('#tv_world_state_revert').on('click', onWorldStateRevert);
     $('#tv_world_state_clear').on('click', onWorldStateClear);
     $('#tv_ws_injection_prompt').on('input', onWsInjectionPromptChange);
     $('#tv_ws_injection_reset').on('click', onWsInjectionPromptReset);
@@ -1019,6 +1020,15 @@ async function onWorldStateRefresh() {
     }
 }
 
+function onWorldStateRevert() {
+    if (revertWorldState()) {
+        toastr.info('World state reverted to previous version', 'TunnelVision');
+    } else {
+        toastr.warning('No previous world state version available', 'TunnelVision');
+    }
+    refreshWorldStateStatus();
+}
+
 function onWorldStateClear() {
     clearWorldState();
     toastr.info('World state cleared', 'TunnelVision');
@@ -1038,6 +1048,8 @@ function refreshWorldStateStatus() {
         $('#tv_world_state_status_text').text('No world state yet');
         $('#tv_world_state_preview').hide();
     }
+
+    $('#tv_world_state_revert').toggle(hasPreviousWorldState());
 }
 
 // ── World State Prompt Override Handlers ──────────────────────────

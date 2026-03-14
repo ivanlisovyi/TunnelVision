@@ -28,6 +28,7 @@ import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
+import { requestPriorityUpdate } from './world-state.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -223,6 +224,16 @@ export async function runPostTurnProcessor(force = false) {
         }
 
         if (task.cancelled) return null;
+
+        // Trigger priority world state update on significant events
+        if (result.sceneArchived || result.factsCreated >= 3) {
+            requestPriorityUpdate({
+                sceneArchived: result.sceneArchived,
+                sceneTitle: result.sceneTitle,
+                factsCreated: result.factsCreated,
+                sceneChangeType: analysisResult?.sceneChange?.type || null,
+            });
+        }
 
         // Record completion + rollback data for swipe recovery
         setProcessorState({

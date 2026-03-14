@@ -10,7 +10,7 @@ import { ALL_TOOL_NAMES, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getSettings, isLorebookEnabled, getTree, isSummaryTitle, isTrackerTitle } from './tree-store.js';
 import { findEntry, getCachedWorldInfo } from './entry-manager.js';
 import { openTreeEditorForBook } from './ui-controller.js';
-import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating } from './world-state.js';
+import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState } from './world-state.js';
 
 const MAX_FEED_ITEMS = 50;
 const MAX_RENDERED_RETRIEVED_ENTRIES = 5;
@@ -1181,6 +1181,22 @@ function renderWorldStateView() {
         refreshBtn.append(' Refresh');
         refreshBtn.addEventListener('click', () => onWorldStateRefreshFromFeed(refreshBtn));
         actions.appendChild(refreshBtn);
+
+        if (hasPreviousWorldState()) {
+            const revertBtn = el('button', 'tv-float-panel-btn');
+            revertBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #e17055;';
+            revertBtn.appendChild(icon('fa-rotate-left'));
+            revertBtn.append(' Revert');
+            revertBtn.addEventListener('click', () => {
+                if (revertWorldState()) {
+                    toastr.info('World state reverted to previous version', 'TunnelVision');
+                    renderWorldStateView();
+                } else {
+                    toastr.warning('No previous version available', 'TunnelVision');
+                }
+            });
+            actions.appendChild(revertBtn);
+        }
 
         const clearBtn = el('button', 'tv-float-panel-btn');
         clearBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #ef4444;';
