@@ -17,7 +17,7 @@ import { eventSource, event_types, generateQuietPrompt } from '../../../../scrip
 import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getChatId, formatChatExcerpt, shouldSkipAiMessage } from './agent-utils.js';
+import { getChatId, formatChatExcerpt } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
@@ -246,7 +246,34 @@ export async function updateWorldState(forceUpdate = false) {
 function onAiMessageReceived() {
     const settings = getSettings();
     if (!settings.worldStateEnabled || settings.globalEnabled === false) return;
-    if (shouldSkipAiMessage(_chatRef)) return;
+
+    // Skip tool-call recursion
+    try {
+        const context = getContext();
+        const lastMsg = context.chat?.[context.chat.length - 1];
+        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
+    } catch { /* proceed */ }
+
+    const chatLength = getContext().chat?.length || 0;
+    const isSwipe = chatLength > 0 && chatLength <= _chatRef.lastChatLength;
+
+    if (isSwipe) {
+        _chatRef.lastChatLength = chatLength;
+        // If the world state was last updated on the swiped message, invalidate it
+        const state = getWorldState();
+        if (state && state.lastUpdateMsgIdx >= chatLength - 1) {
+            setWorldState({ ...state, lastUpdateMsgIdx: Math.max(state.lastUpdateMsgIdx - 1, -1) });
+            console.log('[TunnelVision] World state invalidated after swipe — will re-update');
+        }
+        if (shouldUpdate()) {
+            updateWorldState().catch(e => {
+                console.error('[TunnelVision] World state re-update (swipe) failed:', e);
+            });
+        }
+        return;
+    }
+
+    _chatRef.lastChatLength = chatLength;
 
     if (shouldUpdate()) {
         updateWorldState().catch(e => {

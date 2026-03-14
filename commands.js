@@ -648,13 +648,13 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         : 'Create a short, descriptive title for the summary.';
 
     const quietPrompt = [
-        'You are a summarization assistant for a roleplay.',
+        'You are a summarization assistant for a roleplay lorebook. This is a PRIVATE memory document for story continuity, not a public-facing text.',
         'Analyze the following conversation excerpt and produce TWO things:',
         '1. A concise SUMMARY of the scene (what happened, narrative arc)',
         '2. A list of discrete FACTS that emerged (new information, state changes, relationship shifts, decisions made)',
         '',
         titleInstruction,
-        'For the summary: write in past tense, third person. Capture key actions, outcomes, and emotional beats. Be concise — this replaces re-reading the scene.',
+        'For the summary: write in past tense, third person. Capture ALL important actions, outcomes, emotional beats, physical interactions, intimate moments, conflicts, and character dynamics faithfully and without sanitizing or omitting anything. This summary replaces re-reading the scene — if you skip or censor what happened, continuity is lost. Be concise but thorough.',
         'For "when": estimate the in-world date/time from story context (e.g. "Late evening, Day 3", "Morning after the festival"). Use whatever granularity the story supports. If no time cues exist, write "unspecified".',
         'For significance: "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
         'For facts: extract ONLY facts significant enough to matter for long-term story continuity. Facts are persistent state changes — relationship shifts, relocations, status changes, revelations, consequential decisions, world-state changes, new character traits. Skip mundane actions ("asked about X", "poured tea"), fleeting emotions, and anything the summary already covers narratively. Fewer high-quality facts are better than many trivial ones.',

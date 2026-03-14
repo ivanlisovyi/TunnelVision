@@ -23,16 +23,18 @@ import { eventSource, event_types, generateQuietPrompt } from '../../../../scrip
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
-import { createEntry, updateEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
+import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
-import { getChatId, formatChatExcerpt as formatRecentExchange, shouldSkipAiMessage } from './agent-utils.js';
+import { getChatId, formatChatExcerpt as formatRecentExchange } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
 let _initialized = false;
 let _processorRunning = false;
+let _currentTask = null;
+let _swipePending = false;
 const _chatRef = { lastChatLength: 0 };
 let _lastArchivedAt = 0;
 
@@ -137,6 +139,7 @@ export async function runPostTurnProcessor(force = false) {
 
     _processorRunning = true;
     const task = registerBackgroundTask({ label: 'Post-turn', icon: 'fa-brain', color: '#6c5ce7' });
+    _currentTask = task;
 
     const state = getProcessorState();
     const lastIdx = state?.lastProcessedMsgIdx ?? -1;
@@ -146,6 +149,7 @@ export async function runPostTurnProcessor(force = false) {
 
     if (!recentExcerpt.trim()) {
         _processorRunning = false;
+        _currentTask = null;
         task.end();
         return null;
     }
@@ -164,6 +168,9 @@ export async function runPostTurnProcessor(force = false) {
         // Abort if chat changed or user cancelled
         if (getChatId() !== chatId || task.cancelled) return null;
 
+        // Rollback data — collected so swipe/regeneration can undo this run
+        const rollback = { createdUids: [], trackerReverts: [], book: targetBook };
+
         // ── Step 1: Fact Extraction + Scene Detection ────────────
         let sceneChange = null;
         if (settings.postTurnExtractFacts !== false) {
@@ -171,6 +178,7 @@ export async function runPostTurnProcessor(force = false) {
             result.factsCreated = analysisResult.factsCreated;
             result.errors += analysisResult.errors;
             sceneChange = analysisResult.sceneChange;
+            rollback.createdUids.push(...analysisResult.createdUids);
         }
 
         if (getChatId() !== chatId || task.cancelled) return null;
@@ -193,16 +201,18 @@ export async function runPostTurnProcessor(force = false) {
                 const trackerResult = await updateTrackers(trackers, recentExcerpt, chatId);
                 result.trackersUpdated = trackerResult.updated;
                 result.errors += trackerResult.errors;
+                rollback.trackerReverts.push(...trackerResult.reverts);
             }
         }
 
         if (task.cancelled) return null;
 
-        // Record completion
+        // Record completion + rollback data for swipe recovery
         setProcessorState({
             lastProcessedMsgIdx: chat.length - 1,
             lastProcessedAt: Date.now(),
             lastResult: result,
+            rollback,
         });
 
         const details = [];
@@ -239,7 +249,17 @@ export async function runPostTurnProcessor(force = false) {
         return null;
     } finally {
         _processorRunning = false;
+        _currentTask = null;
         task.end();
+
+        if (_swipePending) {
+            _swipePending = false;
+            rollbackLastPostTurn().then(() => {
+                runPostTurnProcessor().catch(e => {
+                    console.error('[TunnelVision] Post-turn re-processor (deferred swipe) failed:', e);
+                });
+            });
+        }
     }
 }
 
@@ -250,7 +270,7 @@ export async function runPostTurnProcessor(force = false) {
  * Returns facts created count and scene change info.
  */
 async function analyzeExchange(targetBook, recentExcerpt, chatId) {
-    const result = { factsCreated: 0, errors: 0, sceneChange: null };
+    const result = { factsCreated: 0, errors: 0, sceneChange: null, createdUids: [] };
 
     const quietPrompt = [
         'You are an analysis assistant for a roleplay lorebook. Perform TWO tasks on this exchange:',
@@ -278,12 +298,23 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         'When in doubt, do NOT extract. Fewer high-quality facts are better than many trivial ones. An empty facts array is perfectly fine.',
         '',
         'TASK 2 — SCENE CHANGE DETECTION:',
-        'Determine if a NARRATIVE TRANSITION just occurred. A scene change means:',
-        '- Location change (characters moved to a new place)',
-        '- Significant time skip (hours passed, next day, etc.)',
-        '- Major narrative shift (new chapter, flashback, dream sequence)',
-        '- Scene resolution (a confrontation ended, characters parted ways)',
-        'Normal conversation flow within the same scene is NOT a scene change.',
+        'Determine if a MAJOR NARRATIVE BOUNDARY just occurred. The bar is HIGH — a scene change means the story has moved to a fundamentally different context, not just a minor shift within the same ongoing situation.',
+        '',
+        'IS a scene change (archive-worthy):',
+        '- Day/night transition or significant time skip (next morning, hours later, next day)',
+        '- Major location change (left the building entirely, traveled to a new city/area)',
+        '- Characters parted ways and the narrative follows a different group',
+        '- A major event concluded and the story moved on (battle ended, ceremony finished)',
+        '- Narrative device (flashback, dream sequence, time jump, chapter break)',
+        '',
+        'NOT a scene change (same scene continuing):',
+        '- Moving between rooms in the same building or nearby areas',
+        '- Characters walking to a different part of the same location (kitchen → bedroom, lobby → pool)',
+        '- Conversation topic changing within the same setting',
+        '- Brief pauses, silences, or small time gaps (minutes, not hours)',
+        '- New character joining or leaving an ongoing scene',
+        '',
+        'When in doubt, it is NOT a scene change. Err on the side of keeping the scene going — premature archiving fragments coherent scenes into useless pieces.',
         '',
         '[Recent Exchange]',
         recentExcerpt,
@@ -315,7 +346,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         for (const fact of facts) {
             if (!fact?.title || !fact?.content) continue;
             try {
-                await createEntry(targetBook, {
+                const entryResult = await createEntry(targetBook, {
                     content: String(fact.content).trim(),
                     comment: String(fact.title).trim(),
                     keys: Array.isArray(fact.keys) ? fact.keys.map(k => String(k).trim()).filter(Boolean) : [],
@@ -323,6 +354,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
                     background: true,
                 });
                 result.factsCreated++;
+                result.createdUids.push(entryResult.uid);
             } catch (e) {
                 console.warn(`[TunnelVision] Post-turn fact creation failed for "${fact.title}":`, e);
                 result.errors++;
@@ -410,7 +442,7 @@ async function archiveScene(targetBook, chat, sceneChange, chatId) {
 // ── Step 2: Tracker Updates ──────────────────────────────────────
 
 async function updateTrackers(trackers, recentExcerpt, chatId) {
-    const result = { updated: 0, errors: 0 };
+    const result = { updated: 0, errors: 0, reverts: [] };
 
     const trackerSummaries = trackers.map(t =>
         `[UID ${t.uid} — "${t.title}" in "${t.book}"]\n${t.content}`,
@@ -465,10 +497,12 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
             if (tracker.content.trim() === String(update.content).trim()) continue;
 
             try {
+                const previousContent = tracker.content;
                 await updateEntry(tracker.book, Number(update.uid), {
                     content: String(update.content).trim(),
                 });
                 result.updated++;
+                result.reverts.push({ uid: tracker.uid, book: tracker.book, previousContent });
                 console.log(`[TunnelVision] Post-turn updated tracker "${tracker.title}" (UID ${tracker.uid})`);
             } catch (e) {
                 console.warn(`[TunnelVision] Post-turn tracker update failed for UID ${update.uid}:`, e);
@@ -483,12 +517,86 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
     return result;
 }
 
+// ── Swipe / Regeneration Rollback ────────────────────────────────
+
+async function rollbackLastPostTurn() {
+    const state = getProcessorState();
+    const rb = state?.rollback;
+    if (!rb) return;
+
+    let rolledBack = 0;
+
+    // Delete fact entries created by the previous run
+    if (Array.isArray(rb.createdUids) && rb.createdUids.length > 0 && rb.book) {
+        for (const uid of rb.createdUids) {
+            try {
+                await forgetEntry(rb.book, uid, true);
+                rolledBack++;
+            } catch { /* entry may have been manually removed */ }
+        }
+    }
+
+    // Revert tracker entries to their pre-update content
+    if (Array.isArray(rb.trackerReverts)) {
+        for (const { uid, book, previousContent } of rb.trackerReverts) {
+            try {
+                await updateEntry(book, uid, { content: previousContent });
+                rolledBack++;
+            } catch { /* tracker may have been manually changed */ }
+        }
+    }
+
+    // Reset processor state so the next run is allowed
+    setProcessorState({
+        lastProcessedMsgIdx: Math.max((state.lastProcessedMsgIdx ?? 0) - 1, -1),
+        lastProcessedAt: 0,
+        lastResult: null,
+        rollback: null,
+    });
+
+    if (rolledBack > 0) {
+        console.log(`[TunnelVision] Rolled back ${rolledBack} post-turn artifact(s) after swipe/regeneration`);
+        addBackgroundEvent({
+            icon: 'fa-rotate-left',
+            verb: 'Swipe detected',
+            summary: `rolled back ${rolledBack} artifact(s), re-processing`,
+            color: '#e17055',
+        });
+    }
+}
+
 // ── Event Handlers ───────────────────────────────────────────────
 
 function onAiMessageReceived() {
     const settings = getSettings();
     if (!settings.postTurnEnabled || settings.globalEnabled === false) return;
-    if (shouldSkipAiMessage(_chatRef)) return;
+
+    // Always skip tool-call recursion
+    try {
+        const context = getContext();
+        const lastMsg = context.chat?.[context.chat.length - 1];
+        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
+    } catch { /* proceed */ }
+
+    const chatLength = getContext().chat?.length || 0;
+    const isSwipe = chatLength > 0 && chatLength <= _chatRef.lastChatLength;
+
+    if (isSwipe) {
+        _chatRef.lastChatLength = chatLength;
+        if (_processorRunning) {
+            _swipePending = true;
+            if (_currentTask) _currentTask.cancelled = true;
+        } else {
+            rollbackLastPostTurn().then(() => {
+                runPostTurnProcessor().catch(e => {
+                    console.error('[TunnelVision] Post-turn re-processor (swipe) failed:', e);
+                });
+            });
+        }
+        return;
+    }
+
+    _chatRef.lastChatLength = chatLength;
 
     if (shouldProcess()) {
         runPostTurnProcessor().catch(e => {
