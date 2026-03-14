@@ -25,7 +25,7 @@ import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNod
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
 import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo } from './entry-manager.js';
-import { getWorldStateText, updateWorldState, clearWorldState, appendTimeline } from './world-state.js';
+import { getWorldStateText, updateWorldState, clearWorldState } from './world-state.js';
 import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { hideSummarizedMessages, setWatermark } from './tools/summarize.js';
@@ -788,13 +788,6 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
             console.warn('[TunnelVision] Failed to hide summarized messages:', e);
         }
     }
-
-    // Append to persistent timeline
-    appendTimeline([{
-        when: parsed.when || 'unspecified',
-        event: `Summary: "${parsed.title}" (${significance})`,
-        msgIdx: (chat?.length || 1) - 1,
-    }]);
 
     const factsMsg = factsCreated.length > 0 ? ` + ${factsCreated.length} fact(s)` : '';
     console.log(`[TunnelVision] Background summary created: "${parsed.title}" (UID ${result.uid})${factsMsg}`);

@@ -28,7 +28,6 @@ import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
-import { appendTimeline } from './world-state.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -224,22 +223,6 @@ export async function runPostTurnProcessor(force = false) {
         }
 
         if (task.cancelled) return null;
-
-        // ── Append to persistent timeline ──
-        const timelineEvents = [];
-        if (sceneChange?.detected) {
-            timelineEvents.push({
-                event: sceneChange.description || `Scene change: ${sceneChange.type}`,
-                msgIdx: chat.length - 1,
-            });
-        }
-        if (result.sceneArchived && result.sceneTitle) {
-            timelineEvents.push({
-                event: `Scene archived: "${result.sceneTitle}"`,
-                msgIdx: chat.length - 1,
-            });
-        }
-        if (timelineEvents.length > 0) appendTimeline(timelineEvents);
 
         // Record completion + rollback data for swipe recovery
         setProcessorState({
