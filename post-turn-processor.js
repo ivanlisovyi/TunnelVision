@@ -25,6 +25,7 @@ import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { createEntry, updateEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
+import { getWatermark } from './tools/summarize.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -328,14 +329,16 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
 async function archiveScene(targetBook, chat, sceneChange, chatId) {
     const result = { archived: false, errors: 0 };
 
-    const state = getProcessorState();
-    const lastProcessedIdx = state?.lastProcessedMsgIdx ?? -1;
-    const messagesSinceLastArchive = Math.max(chat.length - 1 - lastProcessedIdx, 0);
+    // Use the summary watermark to determine what hasn't been archived yet.
+    // The watermark tracks the last message index covered by any summary/archive.
+    const watermark = getWatermark();
+    const unsummarizedStart = watermark + 1;
+    const messagesSinceLastArchive = Math.max(chat.length - 1 - watermark, 0);
 
-    // Need at least a few messages to make a meaningful summary
-    if (messagesSinceLastArchive < 3) return result;
+    // Need enough unsummarized messages to make a meaningful summary
+    if (messagesSinceLastArchive < 4) return result;
 
-    const archiveCount = Math.min(messagesSinceLastArchive + 2, chat.length, 40);
+    const archiveCount = Math.min(messagesSinceLastArchive, chat.length, 50);
 
     try {
         const { runQuietSummarize } = await import('./commands.js');

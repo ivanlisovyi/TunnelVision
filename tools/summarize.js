@@ -27,7 +27,7 @@ const WATERMARK_KEY = 'tunnelvision_summary_watermark';
  * Get the last-summarized message ID watermark for the current chat.
  * @returns {number} The message ID after which no summary has covered, or -1 if none.
  */
-function getWatermark() {
+export function getWatermark() {
     const context = getContext();
     const val = context.chatMetadata?.[WATERMARK_KEY];
     return typeof val === 'number' ? val : -1;
@@ -40,6 +40,7 @@ function getWatermark() {
 function setWatermark(messageId) {
     const context = getContext();
     context.chatMetadata[WATERMARK_KEY] = messageId;
+    context.saveMetadataDebounced?.();
 }
 
 /**
