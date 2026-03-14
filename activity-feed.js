@@ -9,6 +9,7 @@ import { getContext } from '../../../st-context.js';
 import { ALL_TOOL_NAMES, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getSettings, isLorebookEnabled, getTree } from './tree-store.js';
 import { openTreeEditorForBook } from './ui-controller.js';
+import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating } from './world-state.js';
 
 const MAX_FEED_ITEMS = 50;
 const MAX_RENDERED_RETRIEVED_ENTRIES = 5;
@@ -60,6 +61,10 @@ let triggerEl = null;
 let panelEl = null;
 /** @type {HTMLElement|null} */
 let panelBody = null;
+/** @type {HTMLElement|null} */
+let panelTabs = null;
+/** Whether the panel is currently showing the world state view. */
+let showingWorldState = false;
 
 // Tool display config
 const TOOL_DISPLAY = {
@@ -106,6 +111,8 @@ export function initActivityFeed() {
     if (event_types.CHAT_CHANGED) {
         eventSource.on(event_types.CHAT_CHANGED, () => {
             loadFeed();
+            showingWorldState = false;
+            if (panelTabs) panelTabs.style.display = '';
             if (panelEl?.classList.contains('open')) renderAllItems();
             queueHiddenToolCallRefresh(false);
         });
@@ -293,6 +300,12 @@ function createPanel() {
     title.appendChild(icon('fa-satellite-dish'));
     title.append(' TunnelVision Feed');
     header.appendChild(title);
+    const worldStateBtn = el('button', 'tv-float-panel-btn tv-ws-btn');
+    worldStateBtn.title = 'View/edit world state';
+    worldStateBtn.appendChild(icon('fa-globe'));
+    worldStateBtn.addEventListener('click', toggleWorldStateView);
+    header.appendChild(worldStateBtn);
+
     const settingsBtn = el('button', 'tv-float-panel-btn');
     settingsBtn.title = 'Open tree editor';
     settingsBtn.appendChild(icon('fa-folder-tree'));
@@ -315,18 +328,18 @@ function createPanel() {
     panelEl.appendChild(header);
 
     // Tabs
-    const tabs = el('div', 'tv-float-panel-tabs');
+    panelTabs = el('div', 'tv-float-panel-tabs');
     for (const [key, label] of [['all', 'All'], ['wi', 'Entries'], ['tools', 'Tools']]) {
         const tab = el('button', `tv-float-tab${key === 'all' ? ' active' : ''}`, label);
         tab.dataset.tab = key;
         tab.addEventListener('click', () => {
-            tabs.querySelectorAll('.tv-float-tab').forEach(t => t.classList.remove('active'));
+            panelTabs.querySelectorAll('.tv-float-tab').forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
             renderAllItems();
         });
-        tabs.appendChild(tab);
+        panelTabs.appendChild(tab);
     }
-    panelEl.appendChild(tabs);
+    panelEl.appendChild(panelTabs);
 
     // Body
     panelBody = el('div', 'tv-float-panel-body');
@@ -342,7 +355,11 @@ function togglePanel() {
     const isOpen = panelEl.classList.toggle('open');
     if (isOpen) {
         positionPanel();
-        renderAllItems();
+        if (showingWorldState) {
+            renderWorldStateView();
+        } else {
+            renderAllItems();
+        }
         if (triggerEl) triggerEl.setAttribute('data-tv-count', '0');
     }
 }
@@ -739,6 +756,202 @@ function areTunnelVisionInvocations(invocations) {
     return Array.isArray(invocations)
         && invocations.length > 0
         && invocations.every(invocation => ALL_TOOL_NAMES.includes(invocation?.name));
+}
+
+// ── World State View ──
+
+function toggleWorldStateView() {
+    if (showingWorldState) {
+        exitWorldStateView();
+    } else {
+        enterWorldStateView();
+    }
+}
+
+function enterWorldStateView() {
+    showingWorldState = true;
+    if (panelTabs) panelTabs.style.display = 'none';
+    panelEl?.querySelector('.tv-ws-btn')?.classList.add('tv-ws-active');
+    renderWorldStateView();
+}
+
+function exitWorldStateView() {
+    showingWorldState = false;
+    if (panelTabs) panelTabs.style.display = '';
+    panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
+    renderAllItems();
+}
+
+function renderWorldStateView() {
+    if (!panelBody) return;
+    panelBody.replaceChildren();
+
+    const text = getWorldStateText();
+    const container = el('div', 'tv-ws-view');
+    container.style.cssText = 'padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; height: 100%;';
+
+    // Header row
+    const headerRow = el('div', '');
+    headerRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between;';
+
+    const titleEl = el('span', '', 'Rolling World State');
+    titleEl.style.cssText = 'font-weight: 600; font-size: 0.9em;';
+    headerRow.appendChild(titleEl);
+
+    const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
+    backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
+    backBtn.addEventListener('click', exitWorldStateView);
+    headerRow.appendChild(backBtn);
+    container.appendChild(headerRow);
+
+    if (!text) {
+        // Empty state
+        const emptyMsg = el('div', 'tv-float-empty');
+        emptyMsg.style.cssText = 'flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;';
+        emptyMsg.appendChild(icon('fa-globe'));
+        emptyMsg.appendChild(el('span', null, 'No world state yet'));
+        emptyMsg.appendChild(el('span', 'tv-float-empty-sub', 'Enable Rolling World State in settings, or click Refresh to generate one now.'));
+
+        const refreshBtn = el('button', 'tv-float-panel-btn');
+        refreshBtn.style.cssText = 'margin-top: 8px; padding: 4px 12px; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;';
+        refreshBtn.textContent = 'Refresh Now';
+        refreshBtn.addEventListener('click', () => onWorldStateRefreshFromFeed(refreshBtn));
+        emptyMsg.appendChild(refreshBtn);
+
+        container.appendChild(emptyMsg);
+    } else {
+        // Content display
+        const contentEl = el('div', 'tv-ws-content');
+        contentEl.style.cssText = 'flex: 1; overflow-y: auto; white-space: pre-wrap; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; background: rgba(0,0,0,0.1); max-height: 260px;';
+        contentEl.textContent = text;
+        container.appendChild(contentEl);
+
+        // Action buttons
+        const actions = el('div', '');
+        actions.style.cssText = 'display: flex; gap: 6px; flex-wrap: wrap;';
+
+        const editBtn = el('button', 'tv-float-panel-btn');
+        editBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;';
+        editBtn.appendChild(icon('fa-pen-to-square'));
+        editBtn.append(' Edit');
+        editBtn.addEventListener('click', () => renderWorldStateEditor(text));
+        actions.appendChild(editBtn);
+
+        const refreshBtn = el('button', 'tv-float-panel-btn');
+        refreshBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;';
+        refreshBtn.appendChild(icon('fa-arrows-rotate'));
+        refreshBtn.append(' Refresh');
+        refreshBtn.addEventListener('click', () => onWorldStateRefreshFromFeed(refreshBtn));
+        actions.appendChild(refreshBtn);
+
+        const clearBtn = el('button', 'tv-float-panel-btn');
+        clearBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #ef4444;';
+        clearBtn.appendChild(icon('fa-trash-can'));
+        clearBtn.append(' Clear');
+        clearBtn.addEventListener('click', () => {
+            clearWorldState();
+            toastr.info('World state cleared', 'TunnelVision');
+            renderWorldStateView();
+        });
+        actions.appendChild(clearBtn);
+
+        container.appendChild(actions);
+    }
+
+    panelBody.appendChild(container);
+}
+
+function renderWorldStateEditor(currentText) {
+    if (!panelBody) return;
+    panelBody.replaceChildren();
+
+    const container = el('div', 'tv-ws-editor');
+    container.style.cssText = 'padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; height: 100%;';
+
+    const headerRow = el('div', '');
+    headerRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between;';
+    const titleEl = el('span', '', 'Edit World State');
+    titleEl.style.cssText = 'font-weight: 600; font-size: 0.9em;';
+    headerRow.appendChild(titleEl);
+    container.appendChild(headerRow);
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'tv-ws-textarea';
+    textarea.style.cssText = 'flex: 1; min-height: 200px; max-height: 280px; resize: vertical; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; background: rgba(0,0,0,0.2); color: inherit; font-family: inherit;';
+    textarea.value = currentText;
+    container.appendChild(textarea);
+
+    const actions = el('div', '');
+    actions.style.cssText = 'display: flex; gap: 6px;';
+
+    const saveBtn = el('button', 'tv-float-panel-btn');
+    saveBtn.style.cssText = 'padding: 4px 14px; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; background: rgba(108,92,231,0.3);';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', () => {
+        const newText = textarea.value.trim();
+        if (newText) {
+            saveWorldStateFromEditor(newText);
+            toastr.success('World state saved', 'TunnelVision');
+        } else {
+            clearWorldState();
+            toastr.info('World state cleared', 'TunnelVision');
+        }
+        renderWorldStateView();
+    });
+    actions.appendChild(saveBtn);
+
+    const cancelBtn = el('button', 'tv-float-panel-btn');
+    cancelBtn.style.cssText = 'padding: 4px 14px; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', renderWorldStateView);
+    actions.appendChild(cancelBtn);
+
+    container.appendChild(actions);
+    panelBody.appendChild(container);
+
+    textarea.focus();
+}
+
+function saveWorldStateFromEditor(text) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const key = 'tunnelvision_worldstate';
+        const existing = context.chatMetadata[key] || {};
+        context.chatMetadata[key] = {
+            ...existing,
+            lastUpdated: Date.now(),
+            lastUpdateMsgIdx: existing.lastUpdateMsgIdx ?? ((context.chat?.length || 1) - 1),
+            text,
+        };
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+async function onWorldStateRefreshFromFeed(btn) {
+    if (isWorldStateUpdating()) {
+        toastr.info('World state update already in progress', 'TunnelVision');
+        return;
+    }
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Updating...';
+
+    try {
+        const result = await updateWorldState(true);
+        if (result) {
+            toastr.success('World state updated', 'TunnelVision');
+        } else {
+            toastr.warning('No result. Ensure you have an active chat with enough messages.', 'TunnelVision');
+        }
+    } catch (e) {
+        toastr.error(`Update failed: ${e.message}`, 'TunnelVision');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        if (showingWorldState) renderWorldStateView();
+    }
 }
 
 // ── Public API ──

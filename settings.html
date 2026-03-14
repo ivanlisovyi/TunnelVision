@@ -267,14 +267,14 @@
                                 Controls where and how TunnelVision injects its prompts into the conversation. Position and depth determine where the prompt lands in the message list the AI sees.
                             </div>
 
-                            <!-- Mandatory Tool Calls -->
+                            <!-- Memory System Prompt -->
                             <div class="tv-prompt-inject-block" style="margin-bottom: 12px;">
                                 <label class="tv-checkbox-row" style="margin-bottom: 6px;">
                                     <input id="tv_mandatory_tools" type="checkbox" />
-                                    <span><strong>Mandatory Tool Calls</strong></span>
+                                    <span><strong>Memory System Prompt</strong></span>
                                 </label>
                                 <div class="tv-help-text" style="margin-bottom: 6px;">
-                                    Injects an instruction telling the AI it MUST use TunnelVision tools every generation.
+                                    Injects instructions explaining the memory system to the AI — when to use tools vs. rely on auto-injected context. Customize the text below to match your workflow.
                                 </div>
                                 <div id="tv_mandatory_prompt_options" style="display:none;">
                                     <div class="tv-prompt-inject-controls" style="display: flex; gap: 8px; align-items: center; margin-bottom: 6px;">
@@ -595,7 +595,7 @@
                                 <code>/tv-merge [description]</code> — Merge two entries<br/>
                                 <code>/tv-split [name or UID]</code> — Split an entry<br/>
                                 <code>/tv-ingest [lorebook]</code> — Ingest chat into lorebook<br/>
-                                <code>/tv-counter [value]</code> — View or set auto-summary counter<br/>
+                                <code>/tv-counter [value]</code> — View or set scene archive counter<br/>
                                 <code>/tv-worldstate [action]</code> — View, refresh, or clear rolling world state<br/>
                                 <code>/tv-maintain</code> — Run memory lifecycle maintenance now
                             </div>
@@ -603,25 +603,28 @@
 
                         <hr class="tv-adv-divider" />
 
-                        <!-- ═══ Auto-Summary ═══ -->
+                        <!-- ═══ Scene Archiver (formerly Auto-Summary) ═══ -->
                         <div class="tv-adv-section">
-                            <div class="tv-adv-section-title">Auto-Summary</div>
+                            <div class="tv-adv-section-title">Scene Archiver</div>
                             <div class="tv-help-text" style="margin-bottom: 8px;">
-                                Automatically summarize recent events every N messages. Runs in the background after the AI's response — does not interrupt or hijack the conversation.
+                                Creates historical summary entries when narrative transitions occur — scene changes, time skips, major shifts. When the Post-Turn Processor is enabled, scene changes are detected automatically and archived at narratively appropriate moments. The interval below acts as a safety-net fallback if scene detection is off or misses a transition.
                             </div>
                             <label class="tv-toggle">
                                 <input id="tv_auto_summary_enabled" type="checkbox" />
                                 <span class="tv-toggle-slider"></span>
-                                <span class="tv-toggle-label">Enable auto-summary</span>
+                                <span class="tv-toggle-label">Enable scene archiver</span>
                             </label>
                             <div id="tv_auto_summary_options" style="display: none; margin-top: 8px;">
                                 <div class="tv-number-row">
-                                    <label class="tv-number-label" for="tv_auto_summary_interval">Interval:</label>
-                                    <input id="tv_auto_summary_interval" type="number" class="tv-number-input" min="5" max="200" step="5" value="20" />
+                                    <label class="tv-number-label" for="tv_auto_summary_interval">Fallback interval:</label>
+                                    <input id="tv_auto_summary_interval" type="number" class="tv-number-input" min="5" max="200" step="5" value="50" />
                                     <span class="tv-number-label">messages</span>
                                 </div>
-                                <div id="tv_auto_summary_counter" class="tv-help-text" style="margin-top: 4px; display: flex; align-items: center; gap: 6px;">
-                                    Messages since last summary:
+                                <div class="tv-help-text" style="margin-top: 2px;">
+                                    If no scene change is detected for this many messages, a summary is created anyway to prevent gaps in the archive.
+                                </div>
+                                <div id="tv_auto_summary_counter" class="tv-help-text" style="margin-top: 6px; display: flex; align-items: center; gap: 6px;">
+                                    Messages since last archive:
                                     <input id="tv_auto_summary_count" type="number" class="tv-number-input" min="0" max="9999" step="1" value="0" style="width: 55px;" />
                                     <button id="tv_auto_summary_reset" class="tv-btn tv-btn-secondary tv-btn-sm" title="Reset counter to 0">Reset</button>
                                 </div>
@@ -629,10 +632,10 @@
                             <label class="tv-toggle" style="margin-top: 8px;">
                                 <input id="tv_auto_hide_summarized" type="checkbox" />
                                 <span class="tv-toggle-slider"></span>
-                                <span class="tv-toggle-label">Auto-hide summarized messages</span>
+                                <span class="tv-toggle-label">Auto-hide archived messages</span>
                             </label>
                             <div class="tv-help-text" style="margin-top: 4px;">
-                                When enabled, messages covered by a summary are hidden from chat to save tokens. Hidden messages can be restored with /unhide.
+                                When enabled, messages covered by an archive summary are hidden from chat to save tokens. Hidden messages can be restored with /unhide.
                             </div>
                         </div>
 
@@ -693,7 +696,7 @@
                         <div class="tv-adv-section">
                             <div class="tv-adv-section-title">Post-Turn Processor</div>
                             <div class="tv-help-text" style="margin-bottom: 8px;">
-                                An intelligent background agent that runs after each AI response. Analyzes what happened and automatically extracts new facts into the lorebook and updates tracker entries — so the AI doesn't have to manage its own memory while writing creatively.
+                                An intelligent background agent that runs after each AI response. Analyzes what happened and automatically extracts new facts, updates tracker entries, and detects scene transitions for archiving — so the AI can focus on creative writing instead of memory bookkeeping.
                             </div>
                             <label class="tv-toggle">
                                 <input id="tv_post_turn_enabled" type="checkbox" />
@@ -729,6 +732,17 @@
                                     </label>
                                     <div class="tv-help-text" style="margin-top: 2px;">
                                         Automatically update tracker entries (mood, inventory, relationships, etc.) when their tracked state changes in conversation.
+                                    </div>
+                                </div>
+
+                                <div style="margin-top: 8px;">
+                                    <label class="tv-toggle">
+                                        <input id="tv_post_turn_scene_archive" type="checkbox" checked />
+                                        <span class="tv-toggle-slider"></span>
+                                        <span class="tv-toggle-label">Detect &amp; archive scene changes</span>
+                                    </label>
+                                    <div class="tv-help-text" style="margin-top: 2px;">
+                                        Automatically detect when a scene ends (location change, time skip, narrative shift) and create a historical summary entry. This replaces timer-based auto-summary with narratively-aware archiving.
                                     </div>
                                 </div>
 

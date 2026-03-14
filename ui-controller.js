@@ -171,6 +171,7 @@ export function bindUIEvents() {
     $('#tv_post_turn_cooldown').on('change', onPostTurnCooldownChange);
     $('#tv_post_turn_extract_facts').on('change', onPostTurnOptionChange);
     $('#tv_post_turn_update_trackers').on('change', onPostTurnOptionChange);
+    $('#tv_post_turn_scene_archive').on('change', onPostTurnOptionChange);
 
     // Lifecycle manager settings
     $('#tv_lifecycle_enabled').on('change', onLifecycleToggle);
@@ -314,6 +315,7 @@ export function refreshUI() {
     $('#tv_post_turn_cooldown').val(settings.postTurnCooldown ?? 1);
     $('#tv_post_turn_extract_facts').prop('checked', settings.postTurnExtractFacts !== false);
     $('#tv_post_turn_update_trackers').prop('checked', settings.postTurnUpdateTrackers !== false);
+    $('#tv_post_turn_scene_archive').prop('checked', settings.postTurnSceneArchive !== false);
     refreshPostTurnStatus();
 
     // Sync lifecycle manager settings
@@ -1033,6 +1035,7 @@ function onPostTurnOptionChange() {
     const settings = getSettings();
     settings.postTurnExtractFacts = $('#tv_post_turn_extract_facts').prop('checked');
     settings.postTurnUpdateTrackers = $('#tv_post_turn_update_trackers').prop('checked');
+    settings.postTurnSceneArchive = $('#tv_post_turn_scene_archive').prop('checked');
     saveSettingsDebounced();
 }
 
@@ -1043,6 +1046,7 @@ function refreshPostTurnStatus() {
     if (lastResult) {
         const parts = [];
         if (lastResult.factsCreated > 0) parts.push(`${lastResult.factsCreated} fact(s)`);
+        if (lastResult.sceneArchived) parts.push('scene archived');
         if (lastResult.trackersUpdated > 0) parts.push(`${lastResult.trackersUpdated} tracker(s)`);
         const summary = parts.length > 0 ? parts.join(', ') : 'no changes';
         $('#tv_post_turn_status_text').text(`Last run at message #${lastIdx + 1}: ${summary}`);

@@ -1118,6 +1118,11 @@
     background: rgba(255, 255, 255, 0.08);
 }
 
+.tv-float-panel-btn.tv-ws-active {
+    color: #6c5ce7;
+    background: rgba(108, 92, 231, 0.15);
+}
+
 /* Book Picker (dropdown from tree editor button) */
 .tv-book-picker {
     position: absolute;

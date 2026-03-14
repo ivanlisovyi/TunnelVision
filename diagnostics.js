@@ -1130,10 +1130,15 @@ function checkPostTurnConfig() {
         settings.postTurnCooldown = 1;
         results.push(warn('Post-turn cooldown was invalid. Auto-reset to 1.'));
     }
-    if (settings.postTurnExtractFacts === false && settings.postTurnUpdateTrackers === false) {
-        results.push(warn('Post-turn processor is enabled but both fact extraction and tracker updates are disabled. Enable at least one for the processor to have effect.'));
+    if (settings.postTurnExtractFacts === false && settings.postTurnUpdateTrackers === false && settings.postTurnSceneArchive === false) {
+        results.push(warn('Post-turn processor is enabled but all sub-tasks are disabled. Enable at least one for the processor to have effect.'));
     }
-    results.push(pass(`Post-turn processor: enabled (every ${settings.postTurnCooldown} turn(s), facts: ${settings.postTurnExtractFacts !== false ? 'on' : 'off'}, trackers: ${settings.postTurnUpdateTrackers !== false ? 'on' : 'off'})`));
+    const features = [
+        settings.postTurnExtractFacts !== false ? 'facts' : null,
+        settings.postTurnSceneArchive !== false ? 'scenes' : null,
+        settings.postTurnUpdateTrackers !== false ? 'trackers' : null,
+    ].filter(Boolean).join('+');
+    results.push(pass(`Post-turn processor: enabled (every ${settings.postTurnCooldown} turn(s), ${features})`));
     return results;
 }
 

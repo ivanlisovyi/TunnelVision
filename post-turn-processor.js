@@ -7,9 +7,11 @@
  * this processor analyzes what happened and takes action.
  *
  * Pipeline (each step is optional and configurable):
- *   1. Fact Extraction — Identify new facts from the latest exchange, create entries
- *   2. Tracker Updates — Find tracker entries for mentioned entities, update their state
- *   3. Staleness Detection — Flag/update entries that contradict what just happened
+ *   1. Fact Extraction + Scene Detection — Identify new facts AND detect narrative
+ *      transitions (scene changes, day changes, major shifts) in one LLM call
+ *   2. Scene Archiving — When a scene change is detected, create a historical
+ *      summary entry for the scene that just ended (replaces timer-based auto-summary)
+ *   3. Tracker Updates — Find tracker entries for mentioned entities, update their state
  *
  * Runs via generateQuietPrompt after MESSAGE_RECEIVED, respecting a configurable
  * cooldown to avoid firing on every single message (default: every turn).
@@ -22,6 +24,7 @@ import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { createEntry, updateEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
+import { markAutoSummaryComplete } from './auto-summary.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -163,6 +166,7 @@ export async function runPostTurnProcessor(force = false) {
     const result = {
         factsCreated: 0,
         trackersUpdated: 0,
+        sceneArchived: false,
         errors: 0,
     };
 
@@ -170,16 +174,29 @@ export async function runPostTurnProcessor(force = false) {
         // Abort if chat changed
         if (getChatId() !== chatId) return null;
 
-        // ── Step 1: Fact Extraction ──────────────────────────────
+        // ── Step 1: Fact Extraction + Scene Detection ────────────
+        // Single LLM call handles both to minimize API usage
+        let sceneChange = null;
         if (settings.postTurnExtractFacts !== false) {
-            const factResult = await extractFacts(targetBook, recentExcerpt, chatId);
-            result.factsCreated = factResult.created;
-            result.errors += factResult.errors;
+            const analysisResult = await analyzeExchange(targetBook, recentExcerpt, chatId);
+            result.factsCreated = analysisResult.factsCreated;
+            result.errors += analysisResult.errors;
+            sceneChange = analysisResult.sceneChange;
         }
 
         if (getChatId() !== chatId) return null;
 
-        // ── Step 2: Tracker Updates ──────────────────────────────
+        // ── Step 2: Scene Archiving ──────────────────────────────
+        // When a scene change is detected, create a historical summary
+        if (sceneChange?.detected && settings.postTurnSceneArchive !== false) {
+            const archiveResult = await archiveScene(targetBook, chat, sceneChange, chatId);
+            result.sceneArchived = archiveResult.archived;
+            result.errors += archiveResult.errors;
+        }
+
+        if (getChatId() !== chatId) return null;
+
+        // ── Step 3: Tracker Updates ──────────────────────────────
         if (settings.postTurnUpdateTrackers !== false) {
             const trackers = await loadTrackerEntries(activeBooks);
             if (trackers.length > 0) {
@@ -198,6 +215,7 @@ export async function runPostTurnProcessor(force = false) {
 
         const parts = [];
         if (result.factsCreated > 0) parts.push(`${result.factsCreated} fact(s) saved`);
+        if (result.sceneArchived) parts.push('scene archived');
         if (result.trackersUpdated > 0) parts.push(`${result.trackersUpdated} tracker(s) updated`);
         if (parts.length > 0) {
             console.log(`[TunnelVision] Post-turn complete: ${parts.join(', ')}`);
@@ -214,29 +232,48 @@ export async function runPostTurnProcessor(force = false) {
     }
 }
 
-// ── Step 1: Fact Extraction ──────────────────────────────────────
+// ── Step 1: Combined Analysis (Facts + Scene Detection) ──────────
 
-async function extractFacts(targetBook, recentExcerpt, chatId) {
-    const result = { created: 0, errors: 0 };
+/**
+ * Single LLM call that extracts facts AND detects scene changes.
+ * Returns facts created count and scene change info.
+ */
+async function analyzeExchange(targetBook, recentExcerpt, chatId) {
+    const result = { factsCreated: 0, errors: 0, sceneChange: null };
 
     const quietPrompt = [
-        'You are a knowledge extraction assistant for a roleplay lorebook.',
-        'Analyze the following recent conversation exchange and extract any NEW, important facts that emerged.',
+        'You are an analysis assistant for a roleplay lorebook. Perform TWO tasks on this exchange:',
         '',
-        'Extract ONLY genuinely new information — things that were revealed, decided, discovered, or changed. Skip:',
-        '- Information that was already established in prior conversation',
-        '- Trivial dialogue or filler (greetings, acknowledgments)',
-        '- The user\'s OOC instructions or meta-commentary',
-        '- Information that is speculative or uncertain',
+        'TASK 1 — FACT EXTRACTION:',
+        'Extract any NEW, important facts that emerged. Only genuinely new information — things revealed, decided, discovered, or changed. Skip:',
+        '- Information already established earlier',
+        '- Trivial dialogue or filler',
+        '- OOC instructions or meta-commentary',
+        '- Speculative or uncertain information',
+        '',
+        'TASK 2 — SCENE CHANGE DETECTION:',
+        'Determine if a NARRATIVE TRANSITION just occurred. A scene change means:',
+        '- Location change (characters moved to a new place)',
+        '- Significant time skip (hours passed, next day, etc.)',
+        '- Major narrative shift (new chapter, flashback, dream sequence)',
+        '- Scene resolution (a confrontation ended, characters parted ways)',
+        'Normal conversation flow within the same scene is NOT a scene change.',
         '',
         '[Recent Exchange]',
         recentExcerpt,
         '',
-        'If there are new facts worth saving, respond with a JSON array. If nothing noteworthy emerged, respond with an empty array [].',
+        'Respond with ONLY a JSON object:',
+        '{',
+        '  "facts": [{"title": "short title", "content": "third-person description", "keys": ["keyword1"]}],',
+        '  "sceneChange": {',
+        '    "detected": true/false,',
+        '    "type": "location|time_skip|narrative_shift|resolution|null",',
+        '    "description": "brief description of what changed (only if detected)"',
+        '  }',
+        '}',
         '',
-        'Format: [{"title": "short descriptive title", "content": "factual description in third person", "keys": ["keyword1", "keyword2"]}]',
-        '',
-        'Respond with ONLY the JSON array. No commentary, no code fences.',
+        'If no facts, use empty array. If no scene change, set detected to false.',
+        'Respond with ONLY the JSON. No commentary, no code fences.',
     ].join('\n');
 
     try {
@@ -244,9 +281,11 @@ async function extractFacts(targetBook, recentExcerpt, chatId) {
 
         if (getChatId() !== chatId) return result;
 
-        const facts = parseJsonFromLLM(response, { type: 'array' });
-        if (!Array.isArray(facts) || facts.length === 0) return result;
+        const parsed = parseJsonFromLLM(response);
+        if (!parsed || typeof parsed !== 'object') return result;
 
+        // Process facts
+        const facts = Array.isArray(parsed.facts) ? parsed.facts : [];
         for (const fact of facts) {
             if (!fact?.title || !fact?.content) continue;
             try {
@@ -256,14 +295,62 @@ async function extractFacts(targetBook, recentExcerpt, chatId) {
                     keys: Array.isArray(fact.keys) ? fact.keys.map(k => String(k).trim()).filter(Boolean) : [],
                     nodeId: null,
                 });
-                result.created++;
+                result.factsCreated++;
             } catch (e) {
                 console.warn(`[TunnelVision] Post-turn fact creation failed for "${fact.title}":`, e);
                 result.errors++;
             }
         }
+
+        // Extract scene change info
+        if (parsed.sceneChange && parsed.sceneChange.detected === true) {
+            result.sceneChange = {
+                detected: true,
+                type: parsed.sceneChange.type || 'unknown',
+                description: parsed.sceneChange.description || '',
+            };
+            console.log(`[TunnelVision] Scene change detected: ${result.sceneChange.type} — ${result.sceneChange.description}`);
+        }
     } catch (e) {
-        console.error('[TunnelVision] Post-turn fact extraction LLM call failed:', e);
+        console.error('[TunnelVision] Post-turn analysis LLM call failed:', e);
+        result.errors++;
+    }
+
+    return result;
+}
+
+// ── Step 2: Scene Archiving ──────────────────────────────────────
+
+/**
+ * When a scene change is detected, create a historical summary entry
+ * for the scene that just ended. Uses the existing runQuietSummarize pipeline.
+ */
+async function archiveScene(targetBook, chat, sceneChange, chatId) {
+    const result = { archived: false, errors: 0 };
+
+    const state = getProcessorState();
+    const lastProcessedIdx = state?.lastProcessedMsgIdx ?? -1;
+    const messagesSinceLastArchive = Math.max(chat.length - 1 - lastProcessedIdx, 0);
+
+    // Need at least a few messages to make a meaningful summary
+    if (messagesSinceLastArchive < 3) return result;
+
+    const archiveCount = Math.min(messagesSinceLastArchive + 2, chat.length, 40);
+
+    try {
+        const { runQuietSummarize } = await import('./commands.js');
+
+        if (getChatId() !== chatId) return result;
+
+        const titleHint = sceneChange.description || '';
+        const summaryResult = await runQuietSummarize(targetBook, chat, archiveCount, titleHint);
+
+        if (summaryResult?.title) {
+            result.archived = true;
+            console.log(`[TunnelVision] Scene archived: "${summaryResult.title}" (${sceneChange.type})`);
+        }
+    } catch (e) {
+        console.warn('[TunnelVision] Scene archiving failed:', e);
         result.errors++;
     }
 
