@@ -70,11 +70,11 @@ function registerSlashCommands() {
         aliases: ['tvsummarize'],
         unnamedArgumentList: [
             SlashCommandArgument.fromProps({
-                description: 'Summary title (optional — AI generates one if omitted)',
+                description: 'Message range (e.g. "27-47") and/or title. Range summarizes those specific messages; title is optional.',
                 typeList: [ARGUMENT_TYPE.STRING],
             }),
         ],
-        helpString: 'Summarize recent events into a TunnelVision lorebook entry. Runs in the background without interrupting the conversation.',
+        helpString: 'Summarize events into a TunnelVision lorebook entry. Use /tv-summarize 27-47 to summarize a specific message range, or /tv-summarize to summarize recent messages. Optionally add a title after the range: /tv-summarize 27-47 The Big Battle',
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
@@ -211,14 +211,42 @@ async function handleSummarizeCommand(_namedArgs, unnamedArgs) {
     const chat = context.chat;
     if (!chat || chat.length < 3) return showWarning('Not enough chat messages to summarize.');
 
-    const title = String(unnamedArgs || '').trim();
-    const settings = getSettings();
-    const messageCount = Math.min(chat.length, settings.autoSummaryInterval || 50);
+    const rawArg = String(unnamedArgs || '').trim();
 
-    toastr.info('Summarizing in background...', 'TunnelVision');
+    // Parse optional range (e.g. "27-47" or "27-47 The Big Battle")
+    const rangeMatch = rawArg.match(/^(\d+)\s*-\s*(\d+)(?:\s+(.*))?$/);
+
+    let targetChat, messageCount, title;
+
+    if (rangeMatch) {
+        const rangeStart = parseInt(rangeMatch[1], 10);
+        const rangeEnd = parseInt(rangeMatch[2], 10);
+        title = (rangeMatch[3] || '').trim();
+
+        if (rangeStart >= rangeEnd) return showWarning('Invalid range: start must be less than end.');
+        if (rangeEnd >= chat.length) return showWarning(`Range end ${rangeEnd} exceeds chat length (${chat.length - 1} is the last message).`);
+        if (rangeStart < 0) return showWarning('Range start cannot be negative.');
+
+        targetChat = chat.slice(rangeStart, rangeEnd + 1);
+        messageCount = targetChat.length;
+
+        const nonSystem = targetChat.filter(m => !m.is_system).length;
+        if (nonSystem < 2) return showWarning('Not enough non-system messages in that range to summarize.');
+
+        toastr.info(`Summarizing messages ${rangeStart}-${rangeEnd} in background...`, 'TunnelVision');
+    } else {
+        title = rawArg;
+        targetChat = chat;
+        const settings = getSettings();
+        messageCount = Math.min(chat.length, settings.autoSummaryInterval || 50);
+
+        toastr.info('Summarizing in background...', 'TunnelVision');
+    }
 
     try {
-        const result = await runQuietSummarize(lorebook, chat, messageCount, title);
+        const result = await runQuietSummarize(lorebook, targetChat, messageCount, title, {
+            skipAutoHide: !!rangeMatch,
+        });
         const factsMsg = result.factsCreated > 0 ? ` + ${result.factsCreated} fact(s) saved` : '';
         toastr.success(`Summary saved: "${result.title}"${factsMsg}`, 'TunnelVision');
     } catch (e) {
