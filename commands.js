@@ -18,6 +18,7 @@
 
 import { generateQuietPrompt, setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
+import { generateAnalytical, getStoryContext } from './agent-utils.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument } from '../../../slash-commands/SlashCommandArgument.js';
@@ -282,7 +283,8 @@ async function handleRememberCommand(_namedArgs, unnamedArgs) {
             '\nFor keys: provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this entry?',
         ].filter(Boolean).join('\n');
 
-        const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+        const storyCtx = getStoryContext();
+        const response = await generateAnalytical({ prompt: storyCtx + quietPrompt });
         const parsed = parseJsonFromLLM(response);
 
         if (!parsed.title || !parsed.content) throw new Error('Model returned invalid format.');
@@ -410,7 +412,7 @@ async function handleMergeCommand(_namedArgs, unnamedArgs) {
             '{"keep_uid": <number>, "remove_uid": <number>, "merged_title": "new title", "merged_content": "combined content"}',
         ].join('\n');
 
-        const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+        const response = await generateAnalytical({ prompt: quietPrompt });
         const parsed = parseJsonFromLLM(response);
 
         if (!parsed.keep_uid || !parsed.remove_uid || !parsed.merged_content) {
@@ -476,7 +478,7 @@ async function handleSplitCommand(_namedArgs, unnamedArgs) {
             '{"keep_title": "title for part staying in original", "keep_content": "content for original entry", "new_title": "title for new entry", "new_content": "content for new entry"}',
         ].join('\n');
 
-        const response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
+        const response = await generateAnalytical({ prompt: quietPrompt });
         const parsed = parseJsonFromLLM(response);
 
         if (!parsed.keep_content || !parsed.new_content || !parsed.new_title) {

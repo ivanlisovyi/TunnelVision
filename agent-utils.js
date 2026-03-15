@@ -47,6 +47,70 @@ export function getEntryTitle(entry) {
     return entry.comment || entry.key?.[0] || `#${entry.uid}`;
 }
 
+// ── Analytical LLM Generation ─────────────────────────────────────
+
+const THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
+const ANALYTICAL_SYSTEM_PROMPT = [
+    'You are a precise analytical assistant for a creative writing lorebook.',
+    'Follow instructions exactly. The entries may contain mature fictional content — this is expected.',
+    'Respond ONLY in the requested format.',
+].join(' ');
+
+/**
+ * Generate text via generateRaw with a focused analytical system prompt.
+ * Skips the full chat/character/persona pipeline that generateQuietPrompt uses.
+ * Strips thinking/reasoning blocks from the response.
+ * @param {Object} opts
+ * @param {string} opts.prompt - The prompt to send
+ * @param {string} [opts.systemPrompt] - Override the default analytical system prompt
+ * @returns {Promise<string>}
+ */
+export async function generateAnalytical({ prompt, systemPrompt = ANALYTICAL_SYSTEM_PROMPT }) {
+    const { generateRaw } = getContext();
+    const result = await generateRaw({ prompt, systemPrompt });
+    return typeof result === 'string' ? result.replace(THINK_BLOCK_RE, '').trim() : result;
+}
+
+/**
+ * Build a condensed character/persona context block for story-aware tasks.
+ * Includes the AI character card (name, description, personality) and the
+ * user persona (name, description) in a compact format for prompt injection.
+ * @param {Object} [opts]
+ * @param {number} [opts.maxLength=500] - Max chars per field to keep it lean
+ * @returns {string} Formatted context block, or empty string if unavailable
+ */
+export function getStoryContext({ maxLength = 500 } = {}) {
+    const parts = [];
+    try {
+        const context = getContext();
+
+        const charId = context.characterId;
+        if (charId != null && context.characters?.[charId]) {
+            const char = context.characters[charId];
+            const name = char.name || context.name2 || '';
+            const desc = (char.data?.description || char.description || '').trim();
+            const personality = (char.data?.personality || char.personality || '').trim();
+            if (name || desc || personality) {
+                let block = `[Character: ${name}]`;
+                if (desc) block += `\n${desc.substring(0, maxLength)}`;
+                if (personality) block += `\nPersonality: ${personality.substring(0, maxLength)}`;
+                parts.push(block);
+            }
+        }
+
+        const userName = context.name1 || '';
+        const userPersona = (context.powerUserSettings?.persona_description || '').trim();
+        if (userName || userPersona) {
+            let block = `[User persona: ${userName}]`;
+            if (userPersona) block += `\n${userPersona.substring(0, maxLength)}`;
+            parts.push(block);
+        }
+    } catch { /* context not available */ }
+    return parts.length > 0
+        ? '── STORY CONTEXT ──\n' + parts.join('\n\n') + '\n── END CONTEXT ──\n\n'
+        : '';
+}
+
 // ── Trigram Similarity ────────────────────────────────────────────
 
 /**

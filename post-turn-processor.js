@@ -13,20 +13,20 @@
  *      summary entry for the scene that just ended (replaces timer-based auto-summary)
  *   3. Tracker Updates — Find tracker entries for mentioned entities, update their state
  *
- * Runs via generateQuietPrompt after MESSAGE_RECEIVED, respecting a configurable
+ * Runs via generateAnalytical after MESSAGE_RECEIVED, respecting a configurable
  * cooldown to avoid firing on every single message (default: every turn).
  *
  * Data: processing state in chat_metadata.tunnelvision_postturn
  */
 
-import { eventSource, event_types, generateQuietPrompt } from '../../../../script.js';
+import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids, isTrackerTitle, isSummaryTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
-import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry } from './agent-utils.js';
+import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry, generateAnalytical, getStoryContext } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
 import { requestPriorityUpdate, getWorldStateText } from './world-state.js';
 import { processArcUpdates, buildArcsContextBlock } from './arc-tracker.js';
@@ -453,8 +453,9 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
     ].join('\n');
 
     try {
+        const storyCtx = getStoryContext();
         const response = await callWithRetry(
-            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            () => generateAnalytical({ prompt: storyCtx + quietPrompt }),
             { label: 'Post-turn analysis' },
         );
 
@@ -648,8 +649,9 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
     ].join('\n');
 
     try {
+        const storyCtx = getStoryContext();
         const response = await callWithRetry(
-            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            () => generateAnalytical({ prompt: storyCtx + quietPrompt }),
             { label: 'Post-turn trackers' },
         );
 
@@ -849,8 +851,51 @@ async function checkTrackerSuggestions(activeBooks) {
 // ── Tracker Creation from Suggestion ─────────────────────────────
 
 /**
+ * Resolve character context for tracker creation. Checks in order:
+ *   1. User persona (name1 match) → persona description
+ *   2. Current AI character (name2 match) → character card
+ *   3. Other characters in the list (group chat members) → character card
+ *   4. Lorebook-only character → empty string (facts are the sole source)
+ */
+function getCharacterCardContext(characterName) {
+    try {
+        const context = getContext();
+        const target = characterName.toLowerCase();
+
+        const userName = (context.name1 || '').toLowerCase();
+        if (userName && namesOverlap(userName, target)) {
+            const persona = (context.powerUserSettings?.persona_description || '').trim();
+            return persona ? `User persona: ${persona}` : '';
+        }
+
+        const charName = (context.name2 || '').toLowerCase();
+        const charId = context.characterId;
+        if (charName && namesOverlap(charName, target) && context.characters?.[charId]) {
+            return formatCharCard(context.characters[charId]);
+        }
+
+        if (Array.isArray(context.characters)) {
+            const match = context.characters.find(c =>
+                namesOverlap((c?.name || '').toLowerCase(), target),
+            );
+            if (match) return formatCharCard(match);
+        }
+    } catch { /* context not available */ }
+    return '';
+}
+
+function formatCharCard(char) {
+    const desc = (char.data?.description || char.description || '').trim();
+    const personality = (char.data?.personality || char.personality || '').trim();
+    const parts = [];
+    if (desc) parts.push(`Description: ${desc}`);
+    if (personality) parts.push(`Personality: ${personality}`);
+    return parts.join('\n\n');
+}
+
+/**
  * Create a tracker entry for a character by gathering existing facts and
- * synthesizing them into a structured document via LLM.
+ * synthesizing them into a concise state-tracking document via LLM.
  * @param {string} characterName - Display name of the character
  * @returns {Promise<{uid: number, comment: string, nodeLabel: string, bookName: string}>}
  */
@@ -880,25 +925,51 @@ export async function createTrackerForCharacter(characterName) {
 
     let trackerContent;
     if (facts.length > 0) {
-        const prompt = [
-            'Create a character tracker entry for a roleplay lorebook.',
-            `Character name: ${characterName}`,
+        const charContext = getCharacterCardContext(characterName);
+
+        const promptParts = [
+            'Create a concise CHARACTER STATE TRACKER for a roleplay lorebook.',
+            `Character: ${characterName}`,
             '',
-            'Existing facts about this character:',
+        ];
+
+        if (charContext) {
+            promptParts.push(
+                '── CHARACTER CARD (already known to the AI — do NOT repeat this) ──',
+                charContext,
+                '',
+            );
+        }
+
+        promptParts.push(
+            '── EXISTING FACTS (already stored separately — do NOT repeat these) ──',
             ...facts.map((f, i) => `${i + 1}. ${f}`),
             '',
-            'Synthesize ALL the facts above into a structured tracker document.',
-            'Use clear sections with markdown headers (## Appearance, ## Personality, ## Relationships, ## Status, etc.).',
-            'Use key: value pairs where appropriate.',
-            'Include every piece of information from the facts — do not omit anything.',
-            'Only include sections that have known information.',
+            '── YOUR TASK ──',
+            'Read the character card and facts above to understand this character, then produce a TRACKER — a short, at-a-glance reference of their CURRENT MUTABLE STATE.',
+            '',
+            'A tracker is NOT a summary of facts. Facts are already stored in their own entries. The tracker captures only information that:',
+            '- Changes over time and needs to be tracked (current location, relationship status, emotional state, ongoing plans)',
+            '- Represents the current snapshot rather than historical events',
+            '- Would cause a continuity error if the AI lost track of it',
+            '',
+            'GUIDELINES:',
+            '- Use ## headers for sections (e.g. ## Current Status, ## Relationships, ## Active Situations)',
+            '- Use terse key: value pairs — not full sentences or narratives',
+            '- Omit anything static that the character card already covers (name, base personality, appearance basics)',
+            '- Omit detailed event history — facts already handle that',
+            '- Focus on: where they are NOW, who they\'re with, active conflicts/goals, unresolved issues, current relationship dynamics, possessions that matter, commitments/plans ahead',
+            '- A good tracker is typically 15-40 lines, not 100+',
+            '- If a relationship exists, track its CURRENT state (e.g. "Kate Fuchs: cohabiting, exclusive, rapidly escalating") not its full history',
             '',
             'Respond with ONLY the tracker content. No code fences, no preamble, no commentary.',
-        ].join('\n');
+        );
+
+        const prompt = promptParts.join('\n');
 
         try {
             trackerContent = await callWithRetry(
-                () => generateQuietPrompt(prompt, false, false),
+                () => generateAnalytical({ prompt }),
                 { label: 'Tracker creation', maxRetries: 1 },
             );
         } catch (e) {

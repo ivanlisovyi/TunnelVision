@@ -16,13 +16,13 @@
  * Data: lifecycle state in chat_metadata.tunnelvision_lifecycle
  */
 
-import { eventSource, event_types, generateQuietPrompt } from '../../../../script.js';
+import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTree, saveTree, createTreeNode, addEntryToNode, removeEntryFromTree, getAllEntryUids, isSummaryTitle, isTrackerTitle, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid, updateEntry, forgetEntry, recordEntryVersion } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
-import { getChatId, shouldSkipAiMessage, callWithRetry } from './agent-utils.js';
+import { getChatId, shouldSkipAiMessage, callWithRetry, generateAnalytical } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
 
 const METADATA_KEY = 'tunnelvision_lifecycle';
@@ -234,7 +234,7 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
 
     try {
         const response = await callWithRetry(
-            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            () => generateAnalytical({ prompt: quietPrompt }),
             { label: 'Lifecycle consolidation' },
         );
         if (getChatId() !== chatId) return result;
@@ -390,7 +390,7 @@ async function compressVerboseEntries(bookName, bookData, chatId) {
 
         try {
             const response = await callWithRetry(
-                () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+                () => generateAnalytical({ prompt: quietPrompt }),
                 { label: 'Lifecycle compress', maxRetries: 1 },
             );
             if (getChatId() !== chatId) return result;
@@ -508,7 +508,7 @@ async function reorganizeTree(bookName, bookData, chatId) {
 
     try {
         const response = await callWithRetry(
-            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            () => generateAnalytical({ prompt: quietPrompt }),
             { label: 'Lifecycle reorganize', maxRetries: 1 },
         );
         if (getChatId() !== chatId) return result;
