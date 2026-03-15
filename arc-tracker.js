@@ -14,6 +14,7 @@ import { getContext } from '../../../st-context.js';
 const ARCS_KEY = 'tunnelvision_arcs';
 const VALID_STATUSES = new Set(['active', 'stalled', 'resolved', 'abandoned']);
 const MAX_HISTORY = 10;
+const RECENT_RESOLVED_ARC_TURNS = 5;
 
 // ── Persistence ──────────────────────────────────────────────────
 
@@ -40,6 +41,24 @@ function setArcsState(state) {
     } catch { /* metadata not available */ }
 }
 
+// ── Helpers ──────────────────────────────────────────────────────
+
+/**
+ * Whether an arc should be included in prompt injection.
+ * Active/stalled arcs are always included. Resolved/abandoned arcs are
+ * included only if they were resolved within the last N turns.
+ */
+function isPromptRelevant(arc) {
+    if (arc.status !== 'resolved' && arc.status !== 'abandoned') return true;
+    if (arc.resolvedAtMsgIdx == null) return true;
+    try {
+        const chatLength = getContext().chat?.length || 0;
+        return (chatLength - arc.resolvedAtMsgIdx) <= RECENT_RESOLVED_ARC_TURNS;
+    } catch {
+        return true;
+    }
+}
+
 // ── Queries ──────────────────────────────────────────────────────
 
 /**
@@ -64,7 +83,7 @@ export function getAllArcs() {
  * @returns {string}
  */
 export function buildArcsSummary() {
-    const arcs = getArcsState().arcs;
+    const arcs = getArcsState().arcs.filter(isPromptRelevant);
     if (arcs.length === 0) return '';
 
     const lines = arcs.map(a => {
@@ -80,7 +99,7 @@ export function buildArcsSummary() {
  * @returns {string}
  */
 export function buildArcsContextBlock() {
-    const arcs = getArcsState().arcs;
+    const arcs = getArcsState().arcs.filter(isPromptRelevant);
     if (arcs.length === 0) return '';
 
     const arcLines = arcs.map(a => `  - [${a.id}] "${a.title}" (${a.status}): ${a.progression || 'N/A'}`);
@@ -125,6 +144,9 @@ export function processArcUpdates(arcUpdates) {
             existing.status = status;
             existing.progression = String(update.progression || '').trim();
             existing.updatedAt = now;
+            if (status === 'resolved' || status === 'abandoned') {
+                try { existing.resolvedAtMsgIdx = getContext().chat?.length || 0; } catch { /* */ }
+            }
             result.updated++;
             if (status === 'resolved' || status === 'abandoned') result.resolved++;
         } else {
@@ -137,6 +159,9 @@ export function processArcUpdates(arcUpdates) {
                 updatedAt: now,
                 history: [],
             };
+            if (status === 'resolved' || status === 'abandoned') {
+                try { newArc.resolvedAtMsgIdx = getContext().chat?.length || 0; } catch { /* */ }
+            }
             arcs.push(newArc);
             arcMap.set(newArc.id, newArc);
             result.created++;

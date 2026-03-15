@@ -53,6 +53,8 @@ let turnToolCalls = [];
  * @property {string[]} [keys]
  * @property {RetrievedEntry[]} [retrievedEntries]
  * @property {string[]} [details] - Extra detail lines for background items
+ * @property {number} [completedAt] - Timestamp when an actionable suggestion was fulfilled
+ * @property {number} [dismissedAt] - Timestamp when a suggestion was dismissed by the user
  */
 
 /** @type {FeedItem[]} */
@@ -117,6 +119,7 @@ export function initActivityFeed() {
             triggerEl.classList.toggle('tv-bg-active', active);
         },
         refreshTasksUI: refreshActiveTasksInPanel,
+        getFeedItems: () => feedItems,
     });
 
     // Listen for WI activations (primary — shows what entries triggered)
@@ -738,9 +741,10 @@ function buildItemElement(item) {
         rowClasses.push('tv-float-item-entry');
         rowClasses.push(item.source === 'native' ? 'tv-float-item-entry-native' : 'tv-float-item-entry-tv');
     } else if (item.type === 'wi') {
-        // Legacy feed items from before the type rename
         rowClasses.push('tv-float-item-wi');
     }
+    if (item.completedAt) rowClasses.push('tv-float-item--completed');
+    if (item.dismissedAt) rowClasses.push('tv-float-item--dismissed');
 
     const row = el('div', rowClasses.join(' '));
 
@@ -748,6 +752,11 @@ function buildItemElement(item) {
     const iconWrap = el('div', 'tv-float-item-icon');
     iconWrap.style.color = item.color;
     iconWrap.appendChild(icon(item.icon));
+    if (item.completedAt) {
+        const badge = el('span', 'tv-float-item-badge');
+        badge.appendChild(icon('fa-check'));
+        iconWrap.appendChild(badge);
+    }
     row.appendChild(iconWrap);
 
     // Body
@@ -971,25 +980,54 @@ function toggleBackgroundExpand(row, item) {
 
     row.classList.add('expanded');
     const expandDiv = el('div', 'tv-feed-expand tv-feed-expand-bg');
-
     const actionsDiv = el('div', 'tv-feed-expand-actions');
-    const actionBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
-    actionBtn.appendChild(icon(item.action.icon || 'fa-arrow-right'));
-    actionBtn.append(` ${item.action.label}`);
-    actionBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        handleBackgroundAction(item.action, actionBtn);
-    });
-    actionsDiv.appendChild(actionBtn);
-    expandDiv.appendChild(actionsDiv);
 
+    if (item.completedAt) {
+        const doneLabel = el('span', 'tv-feed-completed-label');
+        doneLabel.appendChild(icon('fa-circle-check'));
+        doneLabel.append(' Completed');
+        actionsDiv.appendChild(doneLabel);
+    } else if (item.dismissedAt) {
+        const undoBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
+        undoBtn.appendChild(icon('fa-rotate-left'));
+        undoBtn.append(' Undo dismiss');
+        undoBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            delete item.dismissedAt;
+            saveFeed();
+            renderAllItems();
+        });
+        actionsDiv.appendChild(undoBtn);
+    } else {
+        const actionBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
+        actionBtn.appendChild(icon(item.action.icon || 'fa-arrow-right'));
+        actionBtn.append(` ${item.action.label}`);
+        actionBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleBackgroundAction(item.action, actionBtn, item);
+        });
+        actionsDiv.appendChild(actionBtn);
+
+        const dismissBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary tv-btn-dismiss');
+        dismissBtn.appendChild(icon('fa-xmark'));
+        dismissBtn.append(' Dismiss');
+        dismissBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            item.dismissedAt = Date.now();
+            saveFeed();
+            renderAllItems();
+        });
+        actionsDiv.appendChild(dismissBtn);
+    }
+
+    expandDiv.appendChild(actionsDiv);
     row.after(expandDiv);
 }
 
-async function handleBackgroundAction(action, btn) {
+async function handleBackgroundAction(action, btn, item) {
     switch (action.type) {
         case 'create-tracker':
-            await handleCreateTrackerAction(action, btn);
+            await handleCreateTrackerAction(action, btn, item);
             break;
         case 'open-tree-editor':
             openTreeEditorFromFeed();
@@ -997,7 +1035,7 @@ async function handleBackgroundAction(action, btn) {
     }
 }
 
-async function handleCreateTrackerAction(action, btn) {
+async function handleCreateTrackerAction(action, btn, item) {
     if (!action.characterName) return;
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
@@ -1009,6 +1047,11 @@ async function handleCreateTrackerAction(action, btn) {
         btn.replaceChildren(icon('fa-check'));
         btn.append(` Created (UID ${result.uid})`);
         btn.classList.add('tv-btn-success');
+
+        if (item) {
+            item.completedAt = Date.now();
+            saveFeed();
+        }
 
         addBackgroundEvent({
             icon: 'fa-address-card',
@@ -1026,7 +1069,7 @@ async function handleCreateTrackerAction(action, btn) {
             e.stopPropagation();
             btn.innerHTML = originalHtml;
             btn.classList.remove('tv-btn-error');
-            handleCreateTrackerAction(action, btn);
+            handleCreateTrackerAction(action, btn, item);
         }, { once: true });
     }
 }

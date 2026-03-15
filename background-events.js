@@ -20,15 +20,18 @@ let _addFeedItems = null;
 let _setTriggerActive = null;
 /** @type {(() => void) | null} */
 let _refreshTasksUI = null;
+/** @type {(() => Object[]) | null} */
+let _getFeedItems = null;
 
 /**
  * Called once by activity-feed.js during initActivityFeed().
- * @param {{ addFeedItems: Function, setTriggerActive: Function, refreshTasksUI: Function }} cbs
+ * @param {{ addFeedItems: Function, setTriggerActive: Function, refreshTasksUI: Function, getFeedItems?: Function }} cbs
  */
-export function _registerFeedCallbacks({ addFeedItems, setTriggerActive, refreshTasksUI }) {
+export function _registerFeedCallbacks({ addFeedItems, setTriggerActive, refreshTasksUI, getFeedItems }) {
     _addFeedItems = addFeedItems;
     _setTriggerActive = setTriggerActive;
     _refreshTasksUI = refreshTasksUI;
+    if (getFeedItems) _getFeedItems = getFeedItems;
 }
 
 // ── Background Active Count ──────────────────────────────────────
@@ -231,4 +234,23 @@ export async function retryFailedTask(failedId) {
 export function dismissFailedTask(failedId) {
     _failedTasks.delete(failedId);
     _refreshTasksUI?.();
+}
+
+// ── Feed Query Helpers ───────────────────────────────────────────
+
+/**
+ * Return lowercased character names for which a tracker suggestion already
+ * exists in the feed (pending, completed, or dismissed). Used by
+ * post-turn-processor to suppress duplicate suggestions.
+ * @returns {string[]}
+ */
+export function getTrackerSuggestionNames() {
+    const items = _getFeedItems?.() || [];
+    return items
+        .filter(item =>
+            item.type === 'background' &&
+            item.action?.type === 'create-tracker' &&
+            item.action.characterName,
+        )
+        .map(item => item.action.characterName.toLowerCase());
 }

@@ -2,9 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock the context so arc state is stored in a local object
 const mockMetadata = {};
+const mockChat = [];
 vi.mock('../../../st-context.js', () => ({
     getContext: () => ({
         chatMetadata: mockMetadata,
+        chat: mockChat,
         saveMetadataDebounced: vi.fn(),
     }),
 }));
@@ -12,8 +14,8 @@ vi.mock('../../../st-context.js', () => ({
 import { processArcUpdates, getActiveArcs, getAllArcs, buildArcsSummary, buildArcsContextBlock } from '../arc-tracker.js';
 
 beforeEach(() => {
-    // Reset arc state before each test
     delete mockMetadata.tunnelvision_arcs;
+    mockChat.length = 0;
 });
 
 // ── processArcUpdates ────────────────────────────────────────────
@@ -206,5 +208,131 @@ describe('buildArcsContextBlock', () => {
         expect(block).toContain(arcId);
         expect(block).toContain('"The Quest"');
         expect(block).toContain('(active)');
+    });
+});
+
+// ── Arc pruning from prompt injection ────────────────────────────
+
+describe('resolvedAtMsgIdx tracking', () => {
+    it('sets resolvedAtMsgIdx when an arc is resolved', () => {
+        mockChat.length = 42;
+        processArcUpdates([
+            { id: null, title: 'Quest', status: 'active', progression: 'going' },
+        ]);
+        const arcId = getAllArcs()[0].id;
+
+        mockChat.length = 50;
+        processArcUpdates([
+            { id: arcId, title: 'Quest', status: 'resolved', progression: 'done' },
+        ]);
+
+        expect(getAllArcs()[0].resolvedAtMsgIdx).toBe(50);
+    });
+
+    it('sets resolvedAtMsgIdx when an arc is abandoned', () => {
+        mockChat.length = 30;
+        processArcUpdates([
+            { id: null, title: 'Side Plot', status: 'active', progression: 'started' },
+        ]);
+        const arcId = getAllArcs()[0].id;
+
+        mockChat.length = 40;
+        processArcUpdates([
+            { id: arcId, title: 'Side Plot', status: 'abandoned', progression: 'dropped' },
+        ]);
+
+        expect(getAllArcs()[0].resolvedAtMsgIdx).toBe(40);
+    });
+
+    it('does not set resolvedAtMsgIdx for active or stalled updates', () => {
+        mockChat.length = 10;
+        processArcUpdates([
+            { id: null, title: 'Arc', status: 'active', progression: 'v1' },
+        ]);
+        expect(getAllArcs()[0].resolvedAtMsgIdx).toBeUndefined();
+
+        const arcId = getAllArcs()[0].id;
+        processArcUpdates([
+            { id: arcId, title: 'Arc', status: 'stalled', progression: 'v2' },
+        ]);
+        expect(getAllArcs()[0].resolvedAtMsgIdx).toBeUndefined();
+    });
+
+    it('sets resolvedAtMsgIdx on newly-created resolved arcs', () => {
+        mockChat.length = 77;
+        processArcUpdates([
+            { id: null, title: 'Flash', status: 'resolved', progression: 'instant resolution' },
+        ]);
+        expect(getAllArcs()[0].resolvedAtMsgIdx).toBe(77);
+    });
+});
+
+describe('prompt injection pruning', () => {
+    it('excludes resolved arcs older than 5 turns from buildArcsSummary', () => {
+        mockChat.length = 10;
+        processArcUpdates([
+            { id: null, title: 'Old Arc', status: 'active', progression: 'going' },
+        ]);
+        const arcId = getAllArcs()[0].id;
+        processArcUpdates([
+            { id: arcId, title: 'Old Arc', status: 'resolved', progression: 'done' },
+        ]);
+
+        // 6 turns later — should be excluded
+        mockChat.length = 16;
+        expect(buildArcsSummary()).toBe('');
+    });
+
+    it('includes resolved arcs within 5 turns in buildArcsSummary', () => {
+        mockChat.length = 10;
+        processArcUpdates([
+            { id: null, title: 'Recent Arc', status: 'active', progression: 'going' },
+        ]);
+        const arcId = getAllArcs()[0].id;
+        processArcUpdates([
+            { id: arcId, title: 'Recent Arc', status: 'resolved', progression: 'done' },
+        ]);
+
+        // 5 turns later — should still be included
+        mockChat.length = 15;
+        const summary = buildArcsSummary();
+        expect(summary).toContain('Recent Arc');
+        expect(summary).toContain('[resolved]');
+    });
+
+    it('excludes old abandoned arcs from buildArcsContextBlock', () => {
+        mockChat.length = 20;
+        processArcUpdates([
+            { id: null, title: 'Dropped Plot', status: 'abandoned', progression: 'nope' },
+        ]);
+
+        mockChat.length = 30;
+        expect(buildArcsContextBlock()).toBe('');
+    });
+
+    it('always includes active and stalled arcs regardless of age', () => {
+        mockChat.length = 5;
+        processArcUpdates([
+            { id: null, title: 'Active', status: 'active', progression: 'going' },
+            { id: null, title: 'Stalled', status: 'stalled', progression: 'stuck' },
+        ]);
+
+        mockChat.length = 500;
+        const summary = buildArcsSummary();
+        expect(summary).toContain('Active');
+        expect(summary).toContain('Stalled');
+    });
+
+    it('getAllArcs still returns pruned arcs (for arcs panel)', () => {
+        mockChat.length = 10;
+        processArcUpdates([
+            { id: null, title: 'Old', status: 'resolved', progression: 'done' },
+            { id: null, title: 'Current', status: 'active', progression: 'going' },
+        ]);
+
+        mockChat.length = 100;
+        expect(getAllArcs()).toHaveLength(2);
+        expect(buildArcsSummary()).not.toContain('Old');
+        expect(buildArcsSummary()).toContain('Current');
     });
 });

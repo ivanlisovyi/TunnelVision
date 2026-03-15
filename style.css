@@ -1637,6 +1637,7 @@
 }
 
 .tv-float-item-icon {
+    position: relative;
     flex-shrink: 0;
     width: 18px;
     text-align: center;
@@ -2598,6 +2599,50 @@
 
 .tv-history-btn {
     margin-top: 6px;
+}
+
+/* ===== Completed / Dismissed Suggestions ===== */
+.tv-float-item--completed,
+.tv-float-item--dismissed {
+    opacity: 0.55;
+}
+
+.tv-float-item--completed:hover,
+.tv-float-item--dismissed:hover {
+    opacity: 0.75;
+}
+
+.tv-float-item-badge {
+    position: absolute;
+    bottom: -3px;
+    right: -4px;
+    font-size: 8px;
+    color: #00b894;
+    background: var(--SmartThemeBlurTintColor, #1a1a2e);
+    border-radius: 50%;
+    width: 13px;
+    height: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tv-feed-completed-label {
+    font-size: 11px;
+    color: #00b894;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.8;
+}
+
+.tv-btn-dismiss {
+    opacity: 0.6;
+}
+
+.tv-btn-dismiss:hover {
+    opacity: 1;
+    color: #d63031;
 }
 
 /* ===== Failed Task / Retry ===== */
