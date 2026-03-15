@@ -10,6 +10,7 @@ vi.mock('../tool-registry.js', () => ({
 }));
 vi.mock('../entry-manager.js', () => ({
     getCachedWorldInfoSync: vi.fn(() => null),
+    getCachedWorldInfo: vi.fn(async () => null),
 }));
 vi.mock('../world-state.js', () => ({
     getWorldStateSections: vi.fn(() => ({})),
@@ -24,7 +25,7 @@ vi.mock('../../../st-context.js', () => ({
     }),
 }));
 
-import { scoreEntry, getFeedbackMap, processRelevanceFeedback } from '../smart-context.js';
+import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache } from '../smart-context.js';
 
 beforeEach(() => {
     // Reset state between tests
@@ -105,5 +106,19 @@ describe('processRelevanceFeedback', () => {
 
         processRelevanceFeedback();
         expect(getFeedbackMap()).toEqual({});
+    });
+});
+
+// ── invalidatePreWarmCache ───────────────────────────────────────
+
+describe('invalidatePreWarmCache', () => {
+    it('is callable and does not throw', () => {
+        expect(() => invalidatePreWarmCache()).not.toThrow();
+    });
+
+    it('can be called multiple times without error', () => {
+        invalidatePreWarmCache();
+        invalidatePreWarmCache();
+        invalidatePreWarmCache();
     });
 });

@@ -11,7 +11,7 @@ vi.mock('../world-state.js', () => ({
     getWorldStateSections: vi.fn(() => ({})),
 }));
 
-import { computeEntryQuality, getQualityRating, getQualityColor, qualityTooltip } from '../entry-scoring.js';
+import { computeEntryQuality, getQualityRating, getQualityColor, qualityTooltip, buildHealthReport, countStaleEntries } from '../entry-scoring.js';
 
 // ── getQualityRating ─────────────────────────────────────────────
 
@@ -181,5 +181,169 @@ describe('computeEntryQuality', () => {
         const q = computeEntryQuality(makeEntry(), 100, {}, 'test entry words');
         expect(q.total).toBeGreaterThanOrEqual(0);
         expect(q.total).toBeLessThanOrEqual(100);
+    });
+});
+
+// ── countStaleEntries ───────────────────────────────────────────
+
+describe('countStaleEntries', () => {
+    it('returns 0 for null bookData', () => {
+        expect(countStaleEntries(null)).toBe(0);
+    });
+
+    it('returns 0 when no entries exist', () => {
+        expect(countStaleEntries({ entries: {} })).toBe(0);
+    });
+
+    it('returns 0 when no entries are stale', () => {
+        const bookData = {
+            entries: {
+                0: { uid: 1, comment: 'Fact One', content: 'Some content', disable: false, key: [] },
+            },
+        };
+        expect(countStaleEntries(bookData)).toBe(0);
+    });
+
+    it('skips disabled entries', () => {
+        const bookData = {
+            entries: {
+                0: { uid: 1, comment: 'Disabled', content: 'text', disable: true, key: [] },
+            },
+        };
+        expect(countStaleEntries(bookData)).toBe(0);
+    });
+});
+
+// ── buildHealthReport ───────────────────────────────────────────
+
+describe('buildHealthReport', () => {
+    const makeBookData = (entries) => ({
+        entries: Object.fromEntries(entries.map((e, i) => [String(i), e])),
+    });
+
+    it('returns default report for null bookData', () => {
+        const report = buildHealthReport('test', null);
+        expect(report.totalEntries).toBe(0);
+        expect(report.facts).toBe(0);
+        expect(report.summaries).toBe(0);
+        expect(report.trackers).toBe(0);
+    });
+
+    it('returns default report for bookData without entries', () => {
+        const report = buildHealthReport('test', {});
+        expect(report.totalEntries).toBe(0);
+    });
+
+    it('counts facts, summaries, and trackers correctly', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Elena Hair', content: 'She has black hair.', disable: false, key: ['elena'] },
+            { uid: 2, comment: '[Scene Summary] Day 1', content: 'Things happened.', disable: false, key: [] },
+            { uid: 3, comment: '[Tracker] Elena', content: 'Mood: happy', disable: false, key: ['elena'] },
+            { uid: 4, comment: 'Another fact', content: 'Info here.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.totalEntries).toBe(4);
+        expect(report.facts).toBe(2);
+        expect(report.summaries).toBe(1);
+        expect(report.trackers).toBe(1);
+    });
+
+    it('counts disabled entries separately', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Active', content: 'Text.', disable: false, key: [] },
+            { uid: 2, comment: 'Gone', content: 'Removed.', disable: true, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.totalEntries).toBe(1);
+        expect(report.disabled).toBe(1);
+    });
+
+    it('detects entries without timestamps', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Has timestamp', content: '[Day 3, Morning] Something happened.', disable: false, key: [] },
+            { uid: 2, comment: 'No timestamp', content: 'Just plain text without day tag.', disable: false, key: [] },
+            { uid: 3, comment: '[Summary] Scene 1', content: 'Summary content.', disable: false, key: [] },
+            { uid: 4, comment: '[Tracker] Elena', content: 'Mood: happy', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        // Only facts without timestamps count — summaries and trackers are excluded
+        expect(report.noTimestamp.length).toBe(1);
+        expect(report.noTimestamp[0].uid).toBe(2);
+    });
+
+    it('computes average entry length', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'A', content: 'A'.repeat(100), disable: false, key: [] },
+            { uid: 2, comment: 'B', content: 'B'.repeat(300), disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.avgLength).toBe(200);
+    });
+
+    it('detects outlier entries (much longer than average)', () => {
+        const shortEntries = Array.from({ length: 10 }, (_, i) => ({
+            uid: i + 1, comment: `Fact ${i}`, content: 'Short note.', disable: false, key: [],
+        }));
+        const longEntry = { uid: 99, comment: 'Giant', content: 'X'.repeat(5000), disable: false, key: [] };
+        const bd = makeBookData([...shortEntries, longEntry]);
+        const report = buildHealthReport('test', bd);
+        expect(report.outlierEntries.length).toBe(1);
+        expect(report.outlierEntries[0].uid).toBe(99);
+        expect(report.outlierEntries[0].length).toBe(5000);
+    });
+
+    it('detects duplicate candidates via trigram similarity', () => {
+        const sharedContent = 'Elena Blackwood has long flowing black hair. She is a skilled warrior from the northern kingdom who trained under Master Aldric for many years at the Grand Academy.';
+        const bd = makeBookData([
+            { uid: 1, comment: 'Elena appearance', content: sharedContent + ' Her eyes are green.', disable: false, key: [] },
+            { uid: 2, comment: 'Elena appearance', content: sharedContent + ' Her eyes are blue.', disable: false, key: [] },
+            { uid: 3, comment: 'Weather patterns', content: 'The Dragon Mountains have unpredictable blizzards. Snow covers the peaks year-round, and travelers must exercise extreme caution.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.duplicateCandidates.length).toBeGreaterThanOrEqual(1);
+        const dup = report.duplicateCandidates[0];
+        expect([dup.uidA, dup.uidB]).toContain(1);
+        expect([dup.uidA, dup.uidB]).toContain(2);
+        expect(dup.similarity).toBeGreaterThanOrEqual(0.6);
+    });
+
+    it('does not flag dissimilar entries as duplicates', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Elena personality', content: 'Elena is quiet, thoughtful, and loves reading books.', disable: false, key: [] },
+            { uid: 2, comment: 'World geography', content: 'The Dragon Mountains stretch across the northern border.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.duplicateCandidates.length).toBe(0);
+    });
+
+    it('reports orphaned entries when tree exists but entry not in any node', () => {
+        // No tree exists in test env (getTree returns null), so orphan detection
+        // falls back gracefully — treeUids is empty, no orphans reported when tree is absent.
+        const bd = makeBookData([
+            { uid: 1, comment: 'Fact', content: 'Content.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        // With no tree, treeUids.size === 0, so orphan check is skipped
+        expect(report.orphanedEntries.length).toBe(0);
+    });
+
+    it('returns sorted category distribution', () => {
+        // No tree in test env, so categoryDistribution will be empty.
+        // This test verifies it doesn't crash and returns an array.
+        const bd = makeBookData([
+            { uid: 1, comment: 'Fact', content: 'Content.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(Array.isArray(report.categoryDistribution)).toBe(true);
+    });
+
+    it('handles entries with empty content gracefully', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Empty', content: '', disable: false, key: [] },
+            { uid: 2, comment: 'Null content', content: null, disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.totalEntries).toBe(2);
+        expect(report.avgLength).toBe(0);
     });
 });

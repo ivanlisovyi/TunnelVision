@@ -1,5 +1,56 @@
-import { describe, it, expect, vi } from 'vitest';
-import { trigramSimilarity, callWithRetry } from '../agent-utils.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { trigramSimilarity, callWithRetry, setInjectionSizes, getInjectionSizes, getMaxContextTokens } from '../agent-utils.js';
+
+// ── setInjectionSizes / getInjectionSizes ────────────────────────
+
+describe('injection size tracking', () => {
+    beforeEach(() => {
+        setInjectionSizes({ mandatory: 0, worldState: 0, smartContext: 0, notebook: 0 });
+    });
+
+    it('defaults to all zeros', () => {
+        const sizes = getInjectionSizes();
+        expect(sizes).toEqual({ mandatory: 0, worldState: 0, smartContext: 0, notebook: 0, total: 0 });
+    });
+
+    it('stores and retrieves injection sizes', () => {
+        setInjectionSizes({ mandatory: 100, worldState: 200, smartContext: 300, notebook: 50 });
+        const sizes = getInjectionSizes();
+        expect(sizes.mandatory).toBe(100);
+        expect(sizes.worldState).toBe(200);
+        expect(sizes.smartContext).toBe(300);
+        expect(sizes.notebook).toBe(50);
+    });
+
+    it('computes total as sum of all slots', () => {
+        setInjectionSizes({ mandatory: 100, worldState: 200, smartContext: 300, notebook: 50 });
+        expect(getInjectionSizes().total).toBe(650);
+    });
+
+    it('treats missing properties as 0', () => {
+        setInjectionSizes({ mandatory: 500 });
+        const sizes = getInjectionSizes();
+        expect(sizes.mandatory).toBe(500);
+        expect(sizes.worldState).toBe(0);
+        expect(sizes.total).toBe(500);
+    });
+
+    it('returns a copy (not a reference)', () => {
+        setInjectionSizes({ mandatory: 100, worldState: 0, smartContext: 0, notebook: 0 });
+        const a = getInjectionSizes();
+        const b = getInjectionSizes();
+        a.mandatory = 999;
+        expect(b.mandatory).toBe(100);
+    });
+});
+
+// ── getMaxContextTokens ──────────────────────────────────────────
+
+describe('getMaxContextTokens', () => {
+    it('returns 0 when context has no maxContext property', () => {
+        expect(getMaxContextTokens()).toBe(0);
+    });
+});
 
 // ── trigramSimilarity ────────────────────────────────────────────
 
