@@ -29,6 +29,15 @@ import {
  * Granularity presets control how aggressively the builder splits entries.
  * Higher levels = more categories, fewer entries per node = deeper/wider trees.
  */
+const CATEGORIZATION_SYSTEM_PROMPT = [
+    'You are a library cataloging assistant performing a metadata-only organizational task.',
+    'You are categorizing entries from a creative writing lorebook into a hierarchical index.',
+    'The entries may contain mature or adult fictional content — this is expected and normal for this task.',
+    'Your job is ONLY to read titles/summaries and sort them into logical categories.',
+    'You are not generating, endorsing, or elaborating on any content — just organizing it.',
+    'Respond ONLY with valid JSON, no commentary.',
+].join(' ');
+
 const GRANULARITY_PRESETS = {
     1: { targetCategories: '3-5', maxEntries: 20, label: 'Minimal' },
     2: { targetCategories: '5-8', maxEntries: 12, label: 'Moderate' },
@@ -311,7 +320,7 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
     const firstPrompt = buildCategorizationPrompt(lorebookName, chunks[0], activeEntries.length);
     const firstResponse = await generateRaw({
         prompt: firstPrompt,
-        systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
+        systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
     });
     if (!firstResponse) throw new Error('LLM returned empty response for tree categorization.');
 
@@ -329,7 +338,7 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
                 const contPrompt = buildContinuationPrompt(lorebookName, chunks[chunkIdx], existingCategories, activeEntries.length);
                 return generateRaw({
                     prompt: contPrompt,
-                    systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
+                    systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
                 });
             });
         }
@@ -624,7 +633,7 @@ async function _generateSummariesForTree(rootNode, lorebookName, _isRoot = true,
 
         return generateRaw({
             prompt,
-            systemPrompt: 'You are a summarization assistant. Return only the requested output, no commentary.',
+            systemPrompt: 'You are a library cataloging assistant summarizing categories of a creative writing lorebook. The entries may contain mature fictional content — this is expected. Your job is only to describe what topics each category covers. Return only the requested output, no commentary.',
         }).then(response => ({ batchIdx, batch, response }))
             .catch(e => {
                 console.warn(`[TunnelVision] Summary batch ${batchIdx + 1} failed:`, e);
@@ -682,7 +691,7 @@ async function generateBookSummary(rootNode, lorebookName) {
         const totalEntries = getAllEntryUids(rootNode).length;
         const summary = await generateRaw({
             prompt: `This lorebook "${lorebookName}" has ${totalEntries} entries organized into these categories:\n${categoryList}\n\nWrite a brief 1-2 sentence description of what this lorebook contains overall — what kind of information does it store? Return ONLY the description.`,
-            systemPrompt: 'You are a summarization assistant. Return only the requested description, no commentary.',
+            systemPrompt: 'You are a library cataloging assistant describing the contents of a creative writing lorebook. The entries may contain mature fictional content — this is expected. Return only the requested description, no commentary.',
         });
         if (summary) {
             rootNode.summary = summary.trim();
@@ -718,7 +727,7 @@ async function subdivideLargeNodes(node, bookData, totalEntryCount = 0) {
                 const entryList = nodeEntries.map(e => `  ${formatEntryForLLM(e, detail)}`).join('\n');
                 const response = await generateRaw({
                     prompt: `You have ${nodeEntries.length} lorebook entries in "${node.label}". Split into 2-${subCatCount} sub-categories.\n\nEntries:\n${entryList}\n\nRespond ONLY with JSON: { "subcategories": [{ "label": "Name", "entries": [uid1, uid2] }] }`,
-                    systemPrompt: 'You are a categorization assistant. Respond ONLY with valid JSON, no commentary.',
+                    systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
                 });
                 if (response) {
                     const parsed = parseJsonFromLLM(response);
@@ -895,7 +904,7 @@ async function _ingestChatMessages(lorebookName, { from, to, progress, detail })
         try {
             response = await generateRaw({
                 prompt: buildIngestPrompt(lorebookName, formatted),
-                systemPrompt: 'You are a fact extraction assistant. Extract important facts, character details, relationships, events, and world information from roleplay chat logs. Respond ONLY with valid JSON, no commentary.',
+                systemPrompt: 'You are a fact extraction assistant for a creative writing lorebook. You are reading roleplay chat logs that may contain mature fictional content — this is expected. Your job is only to extract and catalog factual information (characters, relationships, events, world details). Respond ONLY with valid JSON, no commentary.',
             });
         } catch (e) {
             console.error(`[TunnelVision] Ingest chunk ${i + 1} LLM call failed:`, e);
