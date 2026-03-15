@@ -14,7 +14,7 @@
 
 import { getContext } from '../../../st-context.js';
 import { generateAnalytical } from './agent-utils.js';
-import { createEntry, getCachedWorldInfo, parseJsonFromLLM, buildSummaryKeys, findEntryByUid, KEYWORD_RULES } from './entry-manager.js';
+import { createEntry, getCachedWorldInfo, parseJsonFromLLM, buildSummaryKeys, findEntryByUid, KEYWORD_RULES, SUMMARY_STYLE_RULES } from './entry-manager.js';
 import {
     getTree, saveTree, createTreeNode, addEntryToNode, findNodeById,
     ensureSummariesNode,
@@ -134,14 +134,9 @@ export async function rollupActSummary(bookName) {
 
     const prompt = [
         `You are a narrative archivist. Below are ${sceneSummaries.length} scene summaries from Act ${actNumber} of an ongoing roleplay.`,
-        'Synthesize them into a single ACT SUMMARY that captures:',
-        '- The major plot beats and turning points',
-        '- Character development and relationship shifts',
-        '- Key decisions and their consequences',
-        '- The emotional arc of this section',
+        'Synthesize them into a single ACT SUMMARY — a condensed narrative that replaces reading all individual scenes.',
         '',
-        'Write in past tense, third person. Be thorough but condensed — this replaces reading all individual scenes.',
-        'Do NOT sanitize or omit any content. This is a private memory document.',
+        SUMMARY_STYLE_RULES,
         '',
         KEYWORD_RULES,
         '',
@@ -310,14 +305,10 @@ export async function rollupStorySummary(bookName) {
         `Below are all act summaries so far (${actSummaries.length} acts):`,
         actTexts,
         '',
-        'Write (or update) a comprehensive STORY SUMMARY that covers:',
-        '- The overall narrative arc from beginning to current point',
-        '- Major character introductions and how relationships evolved',
-        '- Key turning points and plot developments',
-        '- Current story state and unresolved threads',
+        'Write (or update) a comprehensive STORY SUMMARY covering the overall narrative arc, major character introductions and relationship evolution, key turning points, and current unresolved threads.',
+        'Be thorough — this is the only guaranteed narrative context the AI always sees.',
         '',
-        'Write in past tense, third person. Be thorough — this is the only guaranteed narrative context the AI always sees.',
-        'Do NOT sanitize or omit any content. This is a private memory document.',
+        SUMMARY_STYLE_RULES,
         '',
         KEYWORD_RULES,
         '',

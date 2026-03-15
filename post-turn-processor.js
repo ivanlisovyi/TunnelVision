@@ -23,7 +23,7 @@ import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids, isTrackerTitle, isSummaryTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
-import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM, recordEntryTemporal, KEYWORD_RULES } from './entry-manager.js';
+import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM, recordEntryTemporal, KEYWORD_RULES, FACT_EXTRACTION_PROMPT } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, trigrams as computeTrigrams, callWithRetry, generateAnalytical, getStoryContext } from './agent-utils.js';
@@ -426,39 +426,30 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         }
     } catch { /* proceed without temporal context */ }
 
-    // Build current arcs context for TASK 3
+    // Build current arcs context for TASK 2 + 3
     const currentArcsSection = buildArcsContextBlock();
 
+    // Build the fact extraction section using the canonical shared prompt,
+    // then wrap it in the multi-task envelope needed by the post-turn pipeline.
+    const factExtractionBlock = FACT_EXTRACTION_PROMPT
+        .replace('{existingFactsSection}', existingFactsSection)
+        .replace('{temporalContext}', temporalContext)
+        .replace('{inputSection}', `[Recent Exchange]\n${recentExcerpt}`);
+
+    // The post-turn pipeline needs facts + scene detection + arc tracking in one
+    // LLM call. We use the canonical fact prompt for TASK 1, then append TASK 2
+    // and TASK 3 and reformat the expected output as a single JSON object.
     const quietPrompt = [
-        'You are an analysis assistant for a roleplay lorebook. Perform THREE tasks on this exchange:',
+        'You are an analysis assistant for a roleplay lorebook. Perform THREE tasks on this exchange.',
         '',
-        'TASK 1 — FACT EXTRACTION:',
-        'Extract ONLY facts significant enough to matter for long-term story continuity — things that, if forgotten, would create a continuity error or miss something meaningful. Facts are persistent state changes, NOT moment-to-moment narration.',
+        '══ TASK 1 — FACT EXTRACTION ══',
+        // Inline the canonical prompt body (everything except the final JSON instruction
+        // and the input section, which we'll place once at the end)
+        factExtractionBlock
+            // Strip the trailing array-only instruction — we'll use an object wrapper below
+            .replace(/\nRespond with ONLY a JSON array[\s\S]*$/, ''),
         '',
-        'WORTH REMEMBERING (lasting state changes):',
-        '- Relationship shifts: "A confessed feelings to B", "C and D became enemies"',
-        '- Living situations, relocations: "A moved in with B"',
-        '- Status/ability changes: "A lost her powers", "B was promoted"',
-        '- Revelations: "A is secretly B\'s sister", "The artifact is cursed"',
-        '- Consequential decisions: "A accepted the deal", "B refused to return home"',
-        '- World-state changes: "The bridge was destroyed", "War was declared"',
-        '- New character traits or backstory revealed for the first time',
-        '',
-        'NOT WORTH REMEMBERING (skip these):',
-        '- Mundane conversational beats ("asked about a bathrobe", "offered tea")',
-        '- Transient actions with no lasting impact ("poured a drink", "sat down")',
-        '- Fleeting emotional reactions that don\'t shift relationships ("felt nervous")',
-        '- Information already established earlier',
-        '- OOC instructions or meta-commentary',
-        '- Speculative or uncertain information',
-        '',
-        'When in doubt, do NOT extract. Fewer high-quality facts are better than many trivial ones. An empty facts array is perfectly fine.',
-        '',
-        'WHEN: For each fact, provide the approximate in-world time it occurred (e.g. "Day 3, evening", "Day 5, morning", "early January 2025"). Use the Current In-World Time provided above as reference. If the timing is unclear, use "unknown".',
-        '',
-        KEYWORD_RULES,
-        '',
-        'TASK 2 — SCENE CHANGE DETECTION:',
+        '══ TASK 2 — SCENE CHANGE DETECTION ══',
         'Determine if a MAJOR NARRATIVE BOUNDARY just occurred. The bar is HIGH — a scene change means the story has moved to a fundamentally different context, not just a minor shift within the same ongoing situation.',
         '',
         'IS a scene change (archive-worthy):',
@@ -475,9 +466,9 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '- Brief pauses, silences, or small time gaps (minutes, not hours)',
         '- New character joining or leaving an ongoing scene',
         '',
-        'When in doubt, it is NOT a scene change. Err on the side of keeping the scene going — premature archiving fragments coherent scenes into useless pieces.',
+        'When in doubt, it is NOT a scene change. Err on the side of keeping the scene going.',
         '',
-        'TASK 3 — NARRATIVE ARC TRACKING:',
+        '══ TASK 3 — NARRATIVE ARC TRACKING ══',
         'Identify multi-scene story arcs that are being advanced, stalled, or resolved in this exchange.',
         'An arc is a storyline spanning multiple scenes (e.g., "The Search for the Lost Artifact", "Elena\'s Trust Issues").',
         'Only track arcs with real narrative weight — not individual facts or single-scene events.',
@@ -491,12 +482,8 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         'If no arcs were touched, use an empty array. Do NOT invent arcs for minor events.',
         '',
         currentArcsSection,
-        temporalContext,
-        existingFactsSection,
-        '[Recent Exchange]',
-        recentExcerpt,
         '',
-        'Respond with ONLY a JSON object:',
+        'Respond with ONLY a single JSON object — no commentary, no code fences:',
         '{',
         '  "facts": [{"title": "short title", "content": "third-person description", "when": "Day X, time", "keys": ["keyword1"]}],',
         '  "sceneChange": {',
@@ -507,8 +494,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '  "arcs": [{"id": "existing_id or null", "title": "Arc Title", "status": "active|stalled|resolved|abandoned", "progression": "what changed"}]',
         '}',
         '',
-        'If no facts, use empty array. If no scene change, set detected to false. If no arcs, use empty array.',
-        'Respond with ONLY the JSON. No commentary, no code fences.',
+        'If no facts, use an empty array. If no scene change, set detected to false. If no arcs, use an empty array.',
     ].join('\n');
 
     try {

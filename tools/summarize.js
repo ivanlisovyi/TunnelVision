@@ -114,13 +114,11 @@ export function getDefinition() {
         displayName: 'TunnelVision Summarize',
         description: `Create a summary of a significant scene, event, or narrative beat for long-term memory. Use this when something important happens that should be remembered as a discrete event — a major conversation, a battle, a discovery, an emotional turning point, or any scene transition worth recording.
 
-This tool does TWO things at once:
-1. Creates a SUMMARY entry (narrative of what happened) under the Summaries category.
-2. Creates separate FACT entries for any discrete new information that emerged (a character trait revealed, an item acquired, a relationship change, etc.). Facts are independently searchable in the lorebook — do not skip them.
-
-Write the summary in past tense, third person, capturing key actions, outcomes, and emotional beats. Be concise but thorough — this summary replaces the need to re-read the full scene. Put granular details in the "facts" array, not in the summary itself.
+Write the summary as concise narration beats — past tense, third person, like a story outline. Each sentence should carry narrative weight. Capture key actions, decisions, outcomes, emotional turning points, and relationship shifts. Preserve specifics that matter for continuity (names, places, promises, injuries, revelations). Omit filler like greetings, small talk, and moment-to-moment reactions. A good scene summary is 3-8 tight sentences, not a transcript.
 
 Always estimate WHEN the event occurred in-story using the "when" field. Infer from context clues — time of day, how many days have passed, season, calendar references, or relative timing ("the morning after the ambush"). Use whatever granularity the story supports.
+
+To save discrete facts (relationship changes, revelations, status changes, etc.), use TunnelVision_Remember — fact creation is handled separately from summarization.
 
 Available lorebooks:
 ${bookDesc}
@@ -142,7 +140,7 @@ When you notice related events forming a pattern or storyline, group them into "
                 },
                 summary: {
                     type: 'string',
-                    description: 'The scene/event summary. Write in past tense, third person. Include who was involved, what happened, key outcomes, and emotional beats.',
+                    description: 'The scene/event summary as concise narration beats. Past tense, third person. Capture key actions, decisions, outcomes, and turning points — not a transcript. 3-8 tight sentences for a typical scene.',
                 },
                 when: {
                     type: 'string',
@@ -174,19 +172,6 @@ When you notice related events forming a pattern or storyline, group them into "
                 messages_back: {
                     type: 'number',
                     description: 'How many messages back this summary covers (from the current message). E.g. 15 means this summary covers the last 15 messages. Used to hide summarized messages from chat context.',
-                },
-                facts: {
-                    type: 'array',
-                    items: {
-                        type: 'object',
-                        properties: {
-                            title: { type: 'string', description: 'Short fact title.' },
-                            content: { type: 'string', description: 'Factual description in third person.' },
-                            keys: { type: 'array', items: { type: 'string' }, description: KEYWORD_RULES },
-                        },
-                        required: ['title', 'content'],
-                    },
-                    description: 'Only facts significant enough for long-term continuity — persistent state changes that would cause errors if forgotten. Include: relationship shifts, relocations, status/ability changes, revelations, consequential decisions, world-state changes, new character traits. Skip mundane actions, fleeting emotions, and anything the summary already covers. Fewer high-quality facts beat many trivial ones; an empty array is fine.',
                 },
             },
             required: ['lorebook', 'title', 'summary'],
@@ -260,30 +245,6 @@ When you notice related events forming a pattern or storyline, group them into "
                 let response = `Summarized: "${args.title}" (UID ${result.uid}) → "${result.nodeLabel}" in "${lorebook}". Significance: ${significance}.`;
                 if (arcLabel) {
                     response += ` Arc: "${arcLabel}".`;
-                }
-
-                // Create separate entries for extracted facts
-                const factsCreated = [];
-                if (Array.isArray(args.facts)) {
-                    for (const fact of args.facts) {
-                        if (!fact?.title || !fact?.content) continue;
-                        try {
-                            const factKeys = Array.isArray(fact.keys)
-                                ? fact.keys.map(k => String(k).trim()).filter(Boolean)
-                                : [];
-                            const factResult = await createEntry(lorebook, {
-                                content: fact.content.trim(),
-                                comment: fact.title.trim(),
-                                keys: factKeys,
-                            });
-                            factsCreated.push(factResult.uid);
-                        } catch (e) {
-                            console.warn(`[TunnelVision] Failed to create fact entry "${fact.title}":`, e);
-                        }
-                    }
-                    if (factsCreated.length > 0) {
-                        response += ` Created ${factsCreated.length} fact entry/entries.`;
-                    }
                 }
 
                 // Hide summarized messages if enabled

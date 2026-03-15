@@ -36,17 +36,85 @@ const MAX_ENTRIES_PER_TURN = 15;
 
 /**
  * Unified keyword generation instructions, used across all entry creation prompts.
- * Kept here as a single source of truth so all paths (post-turn facts, summaries,
- * remember tool, ingest, etc.) produce consistently styled keywords.
+ * Single source of truth — imported by post-turn processor, remember tool, commands, ingest, etc.
  */
 export const KEYWORD_RULES = [
     'KEYWORD RULES (apply to every "keys" array you produce):',
     '- 6-12 keywords per entry',
-    '- Concrete and scene-specific: locations, objects, proper nouns, unique actions, repeated motifs, important milestones',
+    '- Concrete and specific: character names, locations, objects, proper nouns, unique actions, repeated motifs',
     '- One concept per keyword — do NOT combine multiple ideas into one keyword',
-    '- Each keyword should be useful for retrieval if someone later mentions that noun or action alone, not only in a specific context',
+    '- Each keyword should stand alone for retrieval — useful even if mentioned without full context',
     '- Always include full character names in canonical form ("Elena Blackwood" not "she" or just "Elena")',
     '- Include location/place names when the entry is tied to a specific setting',
+].join('\n');
+
+/**
+ * Canonical fact extraction prompt — single source of truth used by ALL fact creation paths:
+ * post-turn processor, TunnelVision_Remember tool, /tv-remember command.
+ *
+ * Callers inject:
+ *   {existingFactsSection} — "Already Known Facts" block (or empty string)
+ *   {temporalContext}      — "Current In-World Time" block (or empty string)
+ *   {inputSection}         — the raw text to extract facts from (recent exchange, user hint, etc.)
+ *
+ * Returns a JSON array: [{ title, content, when, keys }]
+ */
+/**
+ * Shared summarization style instructions — single source of truth for ALL summary generation paths:
+ * runQuietSummarize (commands.js), act rollup, story rollup (summary-hierarchy.js).
+ *
+ * Focuses on concise narration beats: what happened, who was involved, what changed.
+ * NOT a transcript — a distilled story record that replaces re-reading the scene.
+ */
+export const SUMMARY_STYLE_RULES = [
+    'SUMMARY WRITING RULES (apply to every summary you produce):',
+    '- Write in past tense, third person — like narration beats in a story outline',
+    '- Be concise and precise: each sentence should carry narrative weight',
+    '- Structure as short story beats, not a transcript or blow-by-blow recap',
+    '- Capture: key actions, decisions, outcomes, emotional turning points, relationship shifts',
+    '- Preserve specifics that matter for continuity: names, places, objects, promises, injuries, revelations',
+    '- Include physical and intimate details faithfully — this is a private memory document, not a public text',
+    '- Omit filler: greetings, small talk, repeated actions, and moment-to-moment reactions that don\'t advance the story',
+    '- A good scene summary reads like a tight synopsis: 3-8 sentences for a typical scene, more only if genuinely dense with plot',
+    '- Do NOT sanitize, censor, or editorialize — accuracy over comfort',
+].join('\n');
+
+export const FACT_EXTRACTION_PROMPT = [
+    'You are a long-term memory assistant for a roleplay lorebook.',
+    'Extract facts that are significant enough to matter for story continuity — things that, if forgotten, would create a continuity error or miss something meaningful.',
+    'A fact is a PERSISTENT STATE CHANGE, not a moment-to-moment narrative beat.',
+    '',
+    'EXTRACT (lasting state changes worth storing):',
+    '- Relationship shifts: confessions, betrayals, alliances formed or broken',
+    '- Living situations or relocations: "A moved in with B", "they left the city"',
+    '- Status or ability changes: "A lost her powers", "B was promoted", "C was injured"',
+    '- Revelations: hidden identities, secrets exposed, true natures discovered',
+    '- Consequential decisions: agreements made, deals accepted, refusals with lasting impact',
+    '- World-state changes: places destroyed, wars declared, factions shifting',
+    '- New character traits or backstory revealed for the first time',
+    '',
+    'SKIP (do not extract these):',
+    '- Mundane conversational beats ("asked about X", "offered tea", "said hello")',
+    '- Transient actions with no lasting impact ("sat down", "poured a drink")',
+    '- Fleeting emotional reactions that do not shift a relationship ("felt nervous", "smiled")',
+    '- Information already established or implied earlier',
+    '- OOC instructions, meta-commentary, or speculative/uncertain information',
+    '',
+    'Quality over quantity. An empty array is the correct answer when nothing significant happened.',
+    'Write each fact in third person, past tense, factual style.',
+    '',
+    'WHEN: Provide the approximate in-world time for each fact (e.g. "Day 3, evening", "early January 2025"). Use the Current In-World Time block below if available. Write "unknown" if there are no time cues.',
+    '',
+    KEYWORD_RULES,
+    '',
+    '{existingFactsSection}',
+    '{temporalContext}',
+    '{inputSection}',
+    '',
+    'Respond with ONLY a JSON array — no commentary, no code fences:',
+    '[{"title": "short title", "content": "third-person description", "when": "Day X, time", "keys": ["keyword1", "keyword2"]}]',
+    '',
+    'If there is nothing worth extracting, respond with an empty array: []',
 ].join('\n');
 
 // ── Turn-Scoped WorldInfo Cache ──────────────────────────────────

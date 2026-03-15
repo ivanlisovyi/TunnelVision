@@ -20,6 +20,7 @@ vi.mock('../entry-manager.js', () => ({
     buildSummaryKeys: vi.fn(() => ['key1', 'key2']),
     findEntryByUid: vi.fn(() => null),
     KEYWORD_RULES: 'KEYWORD RULES (test stub)',
+    SUMMARY_STYLE_RULES: 'SUMMARY STYLE RULES (test stub)',
 }));
 vi.mock('../tree-store.js', () => ({
     getTree: vi.fn(() => ({ root: { id: 'root', children: [{ id: 'summ', label: 'Summaries', children: [], entryUids: [] }], entryUids: [] } })),

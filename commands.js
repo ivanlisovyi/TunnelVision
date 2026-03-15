@@ -25,7 +25,7 @@ import { ARGUMENT_TYPE, SlashCommandArgument } from '../../../slash-commands/Sla
 import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNodeById, createTreeNode, saveTree } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
-import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo, buildSummaryKeys, KEYWORD_RULES } from './entry-manager.js';
+import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo, buildSummaryKeys, KEYWORD_RULES, SUMMARY_STYLE_RULES, FACT_EXTRACTION_PROMPT } from './entry-manager.js';
 import { getWorldStateText, updateWorldState, clearWorldState } from './world-state.js';
 import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
@@ -270,33 +270,67 @@ async function handleRememberCommand(_namedArgs, unnamedArgs) {
     toastr.info('Saving to memory...', 'TunnelVision');
 
     try {
+        // Build a small dedup context from existing entries
+        let existingFactsSection = '';
+        try {
+            const bookData = await getCachedWorldInfo(lorebook);
+            if (bookData?.entries) {
+                const titles = Object.values(bookData.entries)
+                    .filter(e => !e.disable && e.comment)
+                    .map(e => (e.comment || '').trim())
+                    .filter(t => t && !t.toLowerCase().startsWith('[tracker') && !t.toLowerCase().startsWith('[summary'))
+                    .slice(0, 30);
+                if (titles.length > 0) {
+                    existingFactsSection = '[Already Known Facts — do NOT re-extract these]\n' + titles.map(t => `- ${t}`).join('\n') + '\n';
+                }
+            }
+        } catch { /* proceed without dedup context */ }
+
+        // Recent chat for temporal context
         const context = getContext();
         const chat = context.chat || [];
-        const recentContext = formatChatExcerpt(chat, 10);
-
-        const quietPrompt = [
-            'You are a knowledge extraction assistant for a roleplay lorebook.',
-            `The user wants to save the following to memory:\n"${content}"`,
-            recentContext ? `\nRecent conversation for context:\n${recentContext}` : '',
-            '\nCreate a structured lorebook entry. Respond with ONLY a JSON object (no markdown, no code fences):',
-            '{"title": "short descriptive title", "content": "the entry content, well-formatted and organized", "keys": ["keyword1", "keyword2"]}',
-            '',
-            KEYWORD_RULES,
+        const recentContext = formatChatExcerpt(chat, 6);
+        const inputSection = [
+            '[User-provided information to save]',
+            content,
+            recentContext ? `\n[Recent conversation for context]\n${recentContext}` : '',
         ].filter(Boolean).join('\n');
 
+        const prompt = FACT_EXTRACTION_PROMPT
+            .replace('{existingFactsSection}', existingFactsSection)
+            .replace('{temporalContext}', '')
+            .replace('{inputSection}', inputSection);
+
         const storyCtx = getStoryContext();
-        const response = await generateAnalytical({ prompt: storyCtx + quietPrompt });
-        const parsed = parseJsonFromLLM(response);
+        const response = await generateAnalytical({ prompt: storyCtx + prompt });
+        const facts = parseJsonFromLLM(response, { type: 'array' });
 
-        if (!parsed.title || !parsed.content) throw new Error('Model returned invalid format.');
+        if (!Array.isArray(facts) || facts.length === 0) {
+            throw new Error('Nothing significant to save — the content may not meet the threshold for long-term memory. Try being more specific about what changed or was revealed.');
+        }
 
-        const result = await createEntry(lorebook, {
-            content: parsed.content,
-            comment: parsed.title,
-            keys: parsed.keys || [],
-        });
+        const created = [];
+        for (const fact of facts) {
+            if (!fact?.title || !fact?.content) continue;
+            let factContent = String(fact.content).trim();
+            const when = fact.when ? String(fact.when).trim() : '';
+            if (when && when.toLowerCase() !== 'unknown') {
+                factContent = `[${when}] ${factContent}`;
+            }
+            const result = await createEntry(lorebook, {
+                content: factContent,
+                comment: String(fact.title).trim(),
+                keys: Array.isArray(fact.keys) ? fact.keys.map(k => String(k).trim()).filter(Boolean) : [],
+            });
+            created.push(result);
+        }
 
-        toastr.success(`Remembered: "${parsed.title}" (UID ${result.uid})`, 'TunnelVision');
+        if (created.length === 0) throw new Error('No entries were created.');
+
+        const msg = created.length === 1
+            ? `Remembered: "${created[0].comment}" (UID ${created[0].uid})`
+            : `Remembered ${created.length} facts: ${created.map(r => `"${r.comment}"`).join(', ')}`;
+        toastr.success(msg, 'TunnelVision');
     } catch (e) {
         console.error('[TunnelVision] /tv-remember failed:', e);
         toastr.error(`Remember failed: ${e.message}`, 'TunnelVision');
@@ -659,19 +693,16 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
 
     const quietPrompt = [
         'You are a summarization assistant for a roleplay lorebook. This is a PRIVATE memory document for story continuity, not a public-facing text.',
-        'Analyze the following conversation excerpt and produce TWO things:',
-        '1. A concise SUMMARY of the scene (what happened, narrative arc)',
-        '2. A list of discrete FACTS that emerged (new information, state changes, relationship shifts, decisions made)',
         '',
         titleInstruction,
-        'For the summary: write in past tense, third person. Capture ALL important actions, outcomes, emotional beats, physical interactions, intimate moments, conflicts, and character dynamics faithfully and without sanitizing or omitting anything. This summary replaces re-reading the scene — if you skip or censor what happened, continuity is lost. Be concise but thorough.',
+        '',
+        SUMMARY_STYLE_RULES,
+        '',
         'For "when": estimate the in-world date/time from story context (e.g. "Late evening, Day 3", "Morning after the festival"). Use whatever granularity the story supports. If no time cues exist, write "unspecified".',
-        'For significance: "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
-        'For facts: extract ONLY facts significant enough to matter for long-term story continuity. Facts are persistent state changes — relationship shifts, relocations, status changes, revelations, consequential decisions, world-state changes, new character traits. Skip mundane actions ("asked about X", "poured tea"), fleeting emotions, and anything the summary already covers narratively. Fewer high-quality facts are better than many trivial ones.',
+        'For "significance": "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
+        'For "arc": if the events belong to an ongoing storyline or narrative thread, provide a short arc name (e.g. "The Curse Investigation", "Elena & Ren\'s Romance"). If this is a standalone scene with no clear thread, omit the field or set it to null.',
         '',
         KEYWORD_RULES,
-        '',
-        'For arc: if the events belong to an ongoing storyline or narrative thread, provide a short arc name (e.g. "The Curse Investigation", "Elena & Ren\'s Romance"). If this is a standalone scene with no clear thread, omit the field or set it to null.',
         '',
         'Respond with ONLY a JSON object (no markdown, no code fences):',
         '{',
@@ -681,10 +712,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         '  "participants": ["name1", "name2"],',
         '  "keys": ["keyword1", "keyword2", "location", "theme", "event"],',
         '  "significance": "minor|moderate|major|critical",',
-        '  "arc": "narrative thread name or null",',
-        '  "facts": [',
-        '    {"title": "short fact title", "content": "factual description in third person", "keys": ["keyword1", "keyword2"]}',
-        '  ]',
+        '  "arc": "narrative thread name or null"',
         '}',
         worldStateSection,
         `Conversation to summarize:\n${recentContext}`,
@@ -698,7 +726,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         console.warn('[TunnelVision] Summary parse failed, retrying with simplified prompt. Raw response:', response?.substring?.(0, 300));
         const retryPrompt = [
             'Summarize this roleplay excerpt as JSON. Respond with ONLY valid JSON, no other text.',
-            '{"title": "short title", "summary": "what happened", "participants": ["name1"], "significance": "moderate", "facts": []}',
+            '{"title": "short title", "summary": "what happened", "participants": ["name1"], "significance": "moderate"}',
             `\n${recentContext}`,
         ].join('\n');
         response = await generateQuietPrompt({ quietPrompt: retryPrompt, skipWIAN: true });
@@ -753,28 +781,6 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         background,
     });
 
-    // Create separate Remember entries for extracted facts
-    const factsCreated = [];
-    if (Array.isArray(parsed.facts)) {
-        for (const fact of parsed.facts) {
-            if (!fact?.title || !fact?.content) continue;
-            try {
-                const factKeys = Array.isArray(fact.keys)
-                    ? fact.keys.map(k => String(k).trim()).filter(Boolean)
-                    : [];
-                const factResult = await createEntry(lorebook, {
-                    content: fact.content.trim(),
-                    comment: fact.title.trim(),
-                    keys: factKeys,
-                    background,
-                });
-                factsCreated.push(factResult.uid);
-            } catch (e) {
-                console.warn(`[TunnelVision] Failed to create fact entry "${fact.title}":`, e);
-            }
-        }
-    }
-
     markAutoSummaryComplete();
 
     if (!skipAutoHide) {
@@ -794,9 +800,8 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         }
     }
 
-    const factsMsg = factsCreated.length > 0 ? ` + ${factsCreated.length} fact(s)` : '';
-    console.log(`[TunnelVision] Background summary created: "${parsed.title}" (UID ${result.uid})${factsMsg}`);
-    return { title: parsed.title, uid: result.uid, factsCreated: factsCreated.length };
+    console.log(`[TunnelVision] Background summary created: "${parsed.title}" (UID ${result.uid})`);
+    return { title: parsed.title, uid: result.uid, factsCreated: 0 };
 }
 
 // ---------------------------------------------------------------------------
