@@ -181,8 +181,29 @@ function loadFeed() {
         if (data && Array.isArray(data.items)) {
             feedItems = data.items;
             nextId = typeof data.nextId === 'number' ? data.nextId : feedItems.length;
+            migrateFeedItems(feedItems);
         }
     } catch { /* no active chat */ }
+}
+
+const TRACKER_SUGGESTION_NAME_RE = /^"([^"]+)"/;
+
+/**
+ * Backfill missing properties on old feed items so they gain
+ * UI affordances that were added after they were originally persisted.
+ */
+function migrateFeedItems(items) {
+    let mutated = false;
+    for (const item of items) {
+        if (item.type === 'background' && item.verb === 'Tracker suggested' && !item.action && item.summary) {
+            const m = item.summary.match(TRACKER_SUGGESTION_NAME_RE);
+            if (m) {
+                item.action = { type: 'create-tracker', label: 'Create Tracker', icon: 'fa-address-card', characterName: m[1] };
+                mutated = true;
+            }
+        }
+    }
+    if (mutated) saveFeed();
 }
 
 // ── DOM Helpers ──
@@ -733,8 +754,8 @@ function buildItemElement(item) {
         row.addEventListener('click', () => toggleToolItemExpand(row, item));
     }
 
-    // Clickable background expansion (full summary + action)
-    if (item.type === 'background' && item.summary) {
+    // Clickable background expansion (action button)
+    if (item.type === 'background' && item.action) {
         row.classList.add('tv-feed-clickable');
         row.addEventListener('click', () => toggleBackgroundExpand(row, item));
     }
@@ -863,24 +884,16 @@ function toggleBackgroundExpand(row, item) {
     row.classList.add('expanded');
     const expandDiv = el('div', 'tv-feed-expand tv-feed-expand-bg');
 
-    if (item.summary) {
-        const contentDiv = el('div', 'tv-feed-expand-content');
-        contentDiv.textContent = item.summary;
-        expandDiv.appendChild(contentDiv);
-    }
-
-    if (item.action) {
-        const actionsDiv = el('div', 'tv-feed-expand-actions');
-        const actionBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
-        actionBtn.appendChild(icon(item.action.icon || 'fa-arrow-right'));
-        actionBtn.append(` ${item.action.label}`);
-        actionBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            handleBackgroundAction(item.action, actionBtn);
-        });
-        actionsDiv.appendChild(actionBtn);
-        expandDiv.appendChild(actionsDiv);
-    }
+    const actionsDiv = el('div', 'tv-feed-expand-actions');
+    const actionBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
+    actionBtn.appendChild(icon(item.action.icon || 'fa-arrow-right'));
+    actionBtn.append(` ${item.action.label}`);
+    actionBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleBackgroundAction(item.action, actionBtn);
+    });
+    actionsDiv.appendChild(actionBtn);
+    expandDiv.appendChild(actionsDiv);
 
     row.after(expandDiv);
 }
