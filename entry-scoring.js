@@ -207,6 +207,11 @@ const TIMESTAMP_RE = /^\[([^\]]*Day\s+\d+[^\]]*)\]/i;
  * @property {number} avgLength
  * @property {{ uid: number, title: string, bookName: string, length: number }[]} outlierEntries
  * @property {{ uidA: number, uidB: number, titleA: string, titleB: string, bookName: string, similarity: number }[]} duplicateCandidates
+ * @property {number} growthRate - Entries per 100 turns (estimated)
+ * @property {number} duplicateDensity - Fraction of entries with >0.7 similarity to another (0-1)
+ * @property {number} compressionRatio - Average current length / average initial length (version-based)
+ * @property {number} neverReferencedCount - Entries never referenced in last 50 turns
+ * @property {{ key: string, size: number }[]} metadataSizes - Size breakdown of metadata stores
  */
 
 /**
@@ -329,6 +334,81 @@ export function buildHealthReport(bookName, bookData) {
         if (report.duplicateCandidates.length >= 20) break;
     }
     report.duplicateCandidates.sort((a, b) => b.similarity - a.similarity);
+
+    // ── Growth rate (entries per 100 chat turns) ──
+    try {
+        const chatLength = getContext().chat?.length || 0;
+        if (chatLength > 0 && report.totalEntries > 0) {
+            report.growthRate = Math.round((report.totalEntries / chatLength) * 100 * 10) / 10;
+        } else {
+            report.growthRate = 0;
+        }
+    } catch { report.growthRate = 0; }
+
+    // ── Duplicate density (fraction of entries with >0.7 similarity to at least one other) ──
+    const dupUids = new Set();
+    for (const d of report.duplicateCandidates) {
+        if (d.similarity >= 0.7) {
+            dupUids.add(d.uidA);
+            dupUids.add(d.uidB);
+        }
+    }
+    report.duplicateDensity = report.totalEntries > 0
+        ? Math.round((dupUids.size / report.totalEntries) * 100) / 100
+        : 0;
+
+    // ── Compression ratio: avg current length vs avg first-known length ──
+    try {
+        const versionStore = getContext().chatMetadata?.['tunnelvision_entry_history'] || {};
+        let totalInitial = 0, initialCount = 0;
+        for (const key of Object.keys(versionStore)) {
+            const versions = versionStore[key];
+            if (Array.isArray(versions) && versions.length > 0 && versions[0].previousContent) {
+                totalInitial += versions[0].previousContent.length;
+                initialCount++;
+            }
+        }
+        if (initialCount > 0 && report.avgLength > 0) {
+            const avgInitial = totalInitial / initialCount;
+            report.compressionRatio = Math.round((report.avgLength / avgInitial) * 100) / 100;
+        } else {
+            report.compressionRatio = 1.0;
+        }
+    } catch { report.compressionRatio = 1.0; }
+
+    // ── Never-referenced entries (feedback exists but references === 0, broader than stale) ──
+    let neverReferenced = 0;
+    for (const key of Object.keys(bookData.entries)) {
+        const entry = bookData.entries[key];
+        if (entry.disable) continue;
+        const title = entry.comment || '';
+        if (isSummaryTitle(title) || isTrackerTitle(title)) continue;
+        const fb = feedbackMap[entry.uid];
+        if (fb && fb.references === 0) neverReferenced++;
+    }
+    report.neverReferencedCount = neverReferenced;
+
+    // ── Metadata size breakdown ──
+    try {
+        const meta = getContext().chatMetadata || {};
+        const metaKeys = [
+            { key: 'tunnelvision_relevance', label: 'Relevance' },
+            { key: 'tunnelvision_feedback', label: 'Feedback' },
+            { key: 'tunnelvision_entry_history', label: 'Entry History' },
+            { key: 'tunnelvision_entry_temporal', label: 'Temporal' },
+            { key: 'tunnelvision_arcs', label: 'Arcs' },
+            { key: 'tunnelvision_worldstate', label: 'World State' },
+            { key: 'tunnelvision_tracker_hashes', label: 'Tracker Hashes' },
+        ];
+        report.metadataSizes = metaKeys
+            .map(({ key, label }) => {
+                const val = meta[key];
+                const size = val ? JSON.stringify(val).length : 0;
+                return { key: label, size };
+            })
+            .filter(m => m.size > 0)
+            .sort((a, b) => b.size - a.size);
+    } catch { report.metadataSizes = []; }
 
     return report;
 }

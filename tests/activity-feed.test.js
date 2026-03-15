@@ -20,7 +20,7 @@ vi.mock('../post-turn-processor.js', () => ({
     createTrackerForCharacter: vi.fn(),
 }));
 
-import { parseTimestamp, parseRetrievedEntryHeader, buildToolSummary } from '../activity-feed.js';
+import { parseTimestamp, parseRetrievedEntryHeader, buildToolSummary, computeLineDiff } from '../activity-feed.js';
 
 // ── parseTimestamp ───────────────────────────────────────────────
 
@@ -235,5 +235,82 @@ describe('buildToolSummary', () => {
         const result = buildToolSummary('TunnelVision_Remember', { title: longTitle }, '');
         expect(result.length).toBeLessThan(60);
         expect(result).toContain('...');
+    });
+});
+
+// ── computeLineDiff ─────────────────────────────────────────────
+
+describe('computeLineDiff', () => {
+    it('returns all "same" for identical texts', () => {
+        const diff = computeLineDiff('A\nB\nC', 'A\nB\nC');
+        expect(diff).toEqual([
+            { type: 'same', text: 'A' },
+            { type: 'same', text: 'B' },
+            { type: 'same', text: 'C' },
+        ]);
+    });
+
+    it('detects added lines', () => {
+        const diff = computeLineDiff('A\nB', 'A\nX\nB');
+        const types = diff.map(d => d.type);
+        expect(types).toContain('add');
+        expect(diff.find(d => d.type === 'add').text).toBe('X');
+    });
+
+    it('detects removed lines', () => {
+        const diff = computeLineDiff('A\nB\nC', 'A\nC');
+        const removed = diff.filter(d => d.type === 'remove');
+        expect(removed.length).toBeGreaterThanOrEqual(1);
+        expect(removed[0].text).toBe('B');
+    });
+
+    it('shows changed lines as remove + add pairs', () => {
+        const diff = computeLineDiff('Mood: happy', 'Mood: sad');
+        expect(diff).toEqual([
+            { type: 'remove', text: 'Mood: happy' },
+            { type: 'add', text: 'Mood: sad' },
+        ]);
+    });
+
+    it('handles empty old text', () => {
+        const diff = computeLineDiff('', 'new\ncontent');
+        expect(diff.length).toBe(3); // empty string splits to [''], plus 'new' and 'content'
+        const adds = diff.filter(d => d.type === 'add');
+        expect(adds.length).toBeGreaterThan(0);
+    });
+
+    it('handles empty new text', () => {
+        const diff = computeLineDiff('old\ncontent', '');
+        const removes = diff.filter(d => d.type === 'remove');
+        expect(removes.length).toBeGreaterThan(0);
+    });
+
+    it('handles both empty', () => {
+        const diff = computeLineDiff('', '');
+        expect(diff).toEqual([{ type: 'same', text: '' }]);
+    });
+
+    it('handles multi-line tracker with one field change', () => {
+        const old = 'Name: Elena\nMood: happy\nLocation: forest\nHealth: good';
+        const now = 'Name: Elena\nMood: sad\nLocation: forest\nHealth: good';
+        const diff = computeLineDiff(old, now);
+
+        const same = diff.filter(d => d.type === 'same');
+        const changed = diff.filter(d => d.type !== 'same');
+        expect(same.length).toBe(3); // Name, Location, Health
+        expect(changed.length).toBe(2); // remove old Mood + add new Mood
+    });
+
+    it('preserves line order', () => {
+        const diff = computeLineDiff('A\nB\nC', 'A\nB\nC\nD');
+        expect(diff[0]).toEqual({ type: 'same', text: 'A' });
+        expect(diff[1]).toEqual({ type: 'same', text: 'B' });
+        expect(diff[2]).toEqual({ type: 'same', text: 'C' });
+        expect(diff[3]).toEqual({ type: 'add', text: 'D' });
+    });
+
+    it('handles null inputs gracefully', () => {
+        const diff = computeLineDiff(null, 'text');
+        expect(diff.length).toBeGreaterThan(0);
     });
 });

@@ -54,6 +54,47 @@ function setLifecycleState(state) {
 
 // ── Decision Logic ───────────────────────────────────────────────
 
+const ADAPTIVE_MIN_INTERVAL = 10;
+const ADAPTIVE_MAX_INTERVAL = 60;
+
+/**
+ * Compute a dynamic lifecycle interval based on recent lorebook activity.
+ * Factors: growth rate, duplicate density from last run, and contradiction recency.
+ * Falls back to the user-configured static interval when adaptive signals are absent.
+ */
+export function computeAdaptiveInterval(settings, state) {
+    const baseInterval = settings.lifecycleInterval || 30;
+
+    if (!state?.lastResult) return baseInterval;
+
+    let factor = 1.0;
+    const last = state.lastResult;
+
+    // Growth pressure: estimate entries added since last run via merged/compressed counts
+    // High lifecycle activity implies rapid lorebook growth
+    const workDone = (last.duplicatesMerged || 0) + (last.entriesCompressed || 0) + (last.entriesReorganized || 0);
+    if (workDone >= 8) factor *= 0.5;
+    else if (workDone >= 4) factor *= 0.7;
+    else if (workDone >= 2) factor *= 0.85;
+
+    // Duplicate pressure: high duplicate findings → run sooner
+    const dupsFound = last.duplicatesFound || 0;
+    if (dupsFound >= 5) factor *= 0.5;
+    else if (dupsFound >= 2) factor *= 0.7;
+
+    // Contradiction pressure
+    const contradictions = (last.contradictionsFound || 0) + (last.crossValidationContradictions || 0);
+    if (contradictions >= 3) factor *= 0.6;
+    else if (contradictions >= 1) factor *= 0.8;
+
+    // Quiet period bonus: no activity → relax interval
+    const totalWork = workDone + dupsFound + contradictions;
+    if (totalWork === 0) factor *= 1.5;
+
+    const adaptive = Math.round(baseInterval * factor);
+    return Math.max(ADAPTIVE_MIN_INTERVAL, Math.min(ADAPTIVE_MAX_INTERVAL, adaptive));
+}
+
 function shouldRunLifecycle() {
     const settings = getSettings();
     if (!settings.lifecycleEnabled || settings.globalEnabled === false) return false;
@@ -65,9 +106,19 @@ function shouldRunLifecycle() {
 
     const state = getLifecycleState();
     const lastRunMsgIdx = state?.lastRunMsgIdx ?? -1;
-    const interval = settings.lifecycleInterval || 30;
+    const interval = computeAdaptiveInterval(settings, state);
 
     return (chatLength - 1 - lastRunMsgIdx) >= interval;
+}
+
+/**
+ * Get the current effective lifecycle interval (for display purposes).
+ * @returns {number}
+ */
+export function getEffectiveLifecycleInterval() {
+    const settings = getSettings();
+    const state = getLifecycleState();
+    return computeAdaptiveInterval(settings, state);
 }
 
 // ── Core Lifecycle Pipeline ──────────────────────────────────────
@@ -160,12 +211,23 @@ export async function runLifecycleMaintenance(force = false) {
                 result.errors += auditResult.errors;
             }
 
+            // Count total entries for adaptive lifecycle tracking
+            let totalEntries = 0;
+            for (const bookName of activeBooks) {
+                const bd = await getCachedWorldInfo(bookName);
+                if (!bd?.entries) continue;
+                for (const key of Object.keys(bd.entries)) {
+                    if (!bd.entries[key].disable) totalEntries++;
+                }
+            }
+
             setLifecycleState({
                 lastRunMsgIdx: (getContext().chat?.length || 1) - 1,
                 lastRunAt: Date.now(),
                 lastResult: result,
                 lastMaxUid: maxUid,
                 runCount,
+                lastEntryCount: totalEntries,
             });
         }
 
@@ -178,6 +240,13 @@ export async function runLifecycleMaintenance(force = false) {
         if (result.entriesReorganized > 0) details.push(`${result.entriesReorganized} reorganized`);
         if (result.crossValidationContradictions > 0) details.push(`${result.crossValidationContradictions} cross-validation issue(s)`);
         console.log(`[TunnelVision] Lifecycle maintenance complete: ${details.length > 0 ? details.join(', ') : 'no changes needed'}`);
+
+        const updatedState = getLifecycleState();
+        const nextInterval = computeAdaptiveInterval(settings, updatedState);
+        const baseInterval = settings.lifecycleInterval || 30;
+        if (nextInterval !== baseInterval) {
+            details.push(`next run in ~${nextInterval} turns (adaptive)`);
+        }
 
         if (details.length > 0) {
             addBackgroundEvent({

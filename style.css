@@ -2597,6 +2597,54 @@
     opacity: 0.8;
 }
 
+.tv-diff-toggle {
+    font-size: 0.75em;
+    padding: 1px 6px;
+    margin-bottom: 3px;
+}
+
+.tv-diff-view {
+    font-size: 11px;
+    line-height: 1.4;
+    font-family: monospace;
+    max-height: 180px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    padding: 4px 6px;
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 4px;
+    word-break: break-word;
+}
+
+.tv-diff-line {
+    white-space: pre-wrap;
+    padding: 0 2px;
+    border-radius: 2px;
+}
+
+.tv-diff-same {
+    color: var(--SmartThemeBodyColor, #ccc);
+    opacity: 0.6;
+}
+
+.tv-diff-add {
+    color: #55efc4;
+    background: rgba(0, 184, 148, 0.1);
+}
+
+.tv-diff-remove {
+    color: #fab1a0;
+    background: rgba(214, 48, 49, 0.1);
+    text-decoration: line-through;
+    opacity: 0.8;
+}
+
+.tv-btn-xs {
+    font-size: 0.72em;
+    padding: 1px 5px;
+    border-radius: 3px;
+}
+
 .tv-history-btn {
     margin-top: 6px;
 }
@@ -3120,15 +3168,17 @@
     border-color: rgba(108, 92, 231, 0.3);
 }
 
-/* ── Context Usage Bar ─────────────────────────────────────────── */
+/* ── Context Budget Visualizer ─────────────────────────────────── */
 
 .tv-context-usage {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    min-width: 80px;
-    flex: 1;
-    max-width: 140px;
+    gap: 3px;
+    width: 100%;
+    grid-column: 1 / -1;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    margin-top: 2px;
 }
 
 .tv-context-usage-label {
@@ -3144,17 +3194,58 @@
     text-overflow: ellipsis;
 }
 
-.tv-context-usage-bar {
-    height: 4px;
-    background: rgba(255, 255, 255, 0.08);
-    border-radius: 2px;
+.tv-budget-bar {
+    display: flex;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
     overflow: hidden;
+    gap: 1px;
 }
 
-.tv-context-usage-fill {
+.tv-budget-seg {
     height: 100%;
-    border-radius: 2px;
     transition: width 0.3s ease;
+    min-width: 2px;
+}
+
+.tv-budget-seg:first-child {
+    border-radius: 4px 0 0 4px;
+}
+
+.tv-budget-seg:last-child {
+    border-radius: 0 4px 4px 0;
+}
+
+.tv-budget-seg:only-child {
+    border-radius: 4px;
+}
+
+.tv-budget-seg-headroom {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.tv-budget-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 0.68em;
+    opacity: 0.75;
+}
+
+.tv-budget-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+}
+
+.tv-budget-legend-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
 }
 
 /* ── Health Dashboard ──────────────────────────────────────────── */

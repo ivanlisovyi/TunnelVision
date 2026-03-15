@@ -346,4 +346,66 @@ describe('buildHealthReport', () => {
         expect(report.totalEntries).toBe(2);
         expect(report.avgLength).toBe(0);
     });
+
+    // ── New scalability metrics ──
+
+    it('computes growthRate based on chat length', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Fact A', content: 'Content.', disable: false, key: [] },
+            { uid: 2, comment: 'Fact B', content: 'Content.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        // With mocked chat length of 0, growthRate should be 0
+        expect(typeof report.growthRate).toBe('number');
+        expect(report.growthRate).toBeGreaterThanOrEqual(0);
+    });
+
+    it('computes duplicateDensity from duplicateCandidates', () => {
+        const sharedContent = 'Elena Blackwood has long flowing black hair. She is a skilled warrior from the northern kingdom who trained under Master Aldric for many years at the Grand Academy.';
+        const bd = makeBookData([
+            { uid: 1, comment: 'Elena v1', content: sharedContent + ' Her eyes are green.', disable: false, key: [] },
+            { uid: 2, comment: 'Elena v2', content: sharedContent + ' Her eyes are blue.', disable: false, key: [] },
+            { uid: 3, comment: 'Weather', content: 'The Dragon Mountains have unpredictable blizzards and heavy snowfall.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(typeof report.duplicateDensity).toBe('number');
+        expect(report.duplicateDensity).toBeGreaterThanOrEqual(0);
+        expect(report.duplicateDensity).toBeLessThanOrEqual(1);
+    });
+
+    it('returns default compressionRatio of 1.0 when no version history exists', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Fact', content: 'Content.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.compressionRatio).toBe(1.0);
+    });
+
+    it('counts never-referenced entries', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Fact A', content: 'Content.', disable: false, key: [] },
+            { uid: 2, comment: 'Fact B', content: 'Content.', disable: false, key: [] },
+            { uid: 3, comment: '[Tracker] X', content: 'Tracker.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(typeof report.neverReferencedCount).toBe('number');
+        expect(report.neverReferencedCount).toBeGreaterThanOrEqual(0);
+    });
+
+    it('includes metadataSizes array', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Fact', content: 'Content.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(Array.isArray(report.metadataSizes)).toBe(true);
+    });
+
+    it('reports zero duplicateDensity for dissimilar entries', () => {
+        const bd = makeBookData([
+            { uid: 1, comment: 'Apples', content: 'Apples grow on trees in orchards during autumn.', disable: false, key: [] },
+            { uid: 2, comment: 'Rockets', content: 'Rockets launch from the Kennedy Space Center in Florida.', disable: false, key: [] },
+        ]);
+        const report = buildHealthReport('test', bd);
+        expect(report.duplicateDensity).toBe(0);
+    });
 });

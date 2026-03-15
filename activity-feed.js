@@ -908,7 +908,7 @@ async function toggleFeedEntryExpand(row, item) {
                     existing.remove();
                     return;
                 }
-                expandDiv.appendChild(buildVersionHistoryPanel(versions));
+                expandDiv.appendChild(buildVersionHistoryPanel(versions, entry.content));
             });
             actions.appendChild(histBtn);
         }
@@ -1162,6 +1162,8 @@ function buildContextUsageBar() {
     const maxChars = maxTokens > 0 ? maxTokens * 4 : 0;
 
     const wrapper = el('div', 'tv-context-usage');
+
+    // Header label
     const labelRow = el('div', 'tv-context-usage-label');
     const labelIcon = icon('fa-microchip');
     labelIcon.style.color = '#a29bfe';
@@ -1171,21 +1173,59 @@ function buildContextUsageBar() {
     let labelText = `TV: ~${tokensUsed.toLocaleString()} tok`;
     if (maxTokens > 0) {
         const pct = ((sizes.total / maxChars) * 100).toFixed(1);
-        labelText += ` (${pct}%)`;
+        labelText += ` / ${maxTokens.toLocaleString()} (${pct}%)`;
     }
     labelRow.appendChild(el('span', 'tv-context-usage-text', labelText));
     wrapper.appendChild(labelRow);
 
-    if (maxChars > 0) {
-        const barOuter = el('div', 'tv-context-usage-bar');
-        const pct = Math.min((sizes.total / maxChars) * 100, 100);
-        const barFill = el('div', 'tv-context-usage-fill');
-        barFill.style.width = `${pct}%`;
-        barFill.style.background = pct > 25 ? '#e17055' : pct > 15 ? '#fdcb6e' : '#00b894';
-        barOuter.appendChild(barFill);
-        wrapper.appendChild(barOuter);
+    // Stacked bar showing each slot's contribution
+    const SLOT_CONFIG = [
+        { key: 'mandatory', label: 'Prompt', color: '#e84393' },
+        { key: 'worldState', label: 'World State', color: '#00b894' },
+        { key: 'smartContext', label: 'Smart Context', color: '#6c5ce7' },
+        { key: 'notebook', label: 'Notebook', color: '#fdcb6e' },
+    ];
+
+    const barBase = maxChars > 0 ? maxChars : sizes.total;
+    const barOuter = el('div', 'tv-budget-bar');
+
+    for (const slot of SLOT_CONFIG) {
+        const val = sizes[slot.key] || 0;
+        if (val === 0) continue;
+        const pct = Math.max((val / barBase) * 100, 0.5);
+        const seg = el('div', 'tv-budget-seg');
+        seg.style.width = `${Math.min(pct, 100)}%`;
+        seg.style.background = slot.color;
+        seg.title = `${slot.label}: ${val.toLocaleString()} chars (~${Math.round(val / 4)} tok)`;
+        barOuter.appendChild(seg);
     }
 
+    // Remaining headroom segment
+    if (maxChars > 0 && sizes.total < maxChars) {
+        const headroom = maxChars - sizes.total;
+        const headPct = (headroom / barBase) * 100;
+        const headSeg = el('div', 'tv-budget-seg tv-budget-seg-headroom');
+        headSeg.style.width = `${headPct}%`;
+        headSeg.title = `Available: ${headroom.toLocaleString()} chars (~${Math.round(headroom / 4)} tok)`;
+        barOuter.appendChild(headSeg);
+    }
+    wrapper.appendChild(barOuter);
+
+    // Legend
+    const legend = el('div', 'tv-budget-legend');
+    for (const slot of SLOT_CONFIG) {
+        const val = sizes[slot.key] || 0;
+        if (val === 0) continue;
+        const item = el('span', 'tv-budget-legend-item');
+        const dot = el('span', 'tv-budget-legend-dot');
+        dot.style.background = slot.color;
+        item.appendChild(dot);
+        item.appendChild(document.createTextNode(`${slot.label} ${Math.round(val / 4)}`));
+        legend.appendChild(item);
+    }
+    wrapper.appendChild(legend);
+
+    // Tooltip
     const parts = [];
     if (sizes.mandatory) parts.push(`Prompt: ${sizes.mandatory}`);
     if (sizes.worldState) parts.push(`WS: ${sizes.worldState}`);
@@ -2045,8 +2085,12 @@ async function renderHealthView() {
             categoryDistribution: [],
             staleEntries: [], orphanedEntries: [], noTimestamp: [],
             avgLength: 0, outlierEntries: [], duplicateCandidates: [],
+            growthRate: 0, duplicateDensity: 0, compressionRatio: 1.0,
+            neverReferencedCount: 0, metadataSizes: [],
         };
         let totalLength = 0;
+        let totalDupUids = 0, totalForDensity = 0;
+        let compressionSum = 0, compressionCount = 0;
 
         for (const bookName of activeBooks) {
             try {
@@ -2065,6 +2109,20 @@ async function renderHealthView() {
                 mergedReport.outlierEntries.push(...report.outlierEntries);
                 mergedReport.duplicateCandidates.push(...report.duplicateCandidates);
                 totalLength += report.avgLength * report.totalEntries;
+                mergedReport.neverReferencedCount += report.neverReferencedCount || 0;
+
+                if (report.growthRate > mergedReport.growthRate) mergedReport.growthRate = report.growthRate;
+                if (report.duplicateDensity > 0) {
+                    totalDupUids += report.duplicateDensity * report.totalEntries;
+                    totalForDensity += report.totalEntries;
+                }
+                if (report.compressionRatio !== 1.0) {
+                    compressionSum += report.compressionRatio;
+                    compressionCount++;
+                }
+                if (report.metadataSizes?.length > 0 && mergedReport.metadataSizes.length === 0) {
+                    mergedReport.metadataSizes = report.metadataSizes;
+                }
             } catch { /* skip unavailable books */ }
         }
 
@@ -2072,6 +2130,8 @@ async function renderHealthView() {
         mergedReport.categoryDistribution.sort((a, b) => b.count - a.count);
         mergedReport.duplicateCandidates.sort((a, b) => b.similarity - a.similarity);
         mergedReport.outlierEntries.sort((a, b) => b.length - a.length);
+        if (totalForDensity > 0) mergedReport.duplicateDensity = Math.round((totalDupUids / totalForDensity) * 100) / 100;
+        if (compressionCount > 0) mergedReport.compressionRatio = Math.round((compressionSum / compressionCount) * 100) / 100;
 
         loadingEl.remove();
 
@@ -2093,6 +2153,71 @@ async function renderHealthView() {
         avgLine.textContent = `Average entry length: ${mergedReport.avgLength} chars`;
         typeSection.appendChild(avgLine);
         body.appendChild(typeSection);
+
+        // ── Scalability Metrics ──
+        const scaleSection = el('div', 'tv-health-section');
+        scaleSection.appendChild(el('div', 'tv-health-section-title', 'Scalability Metrics'));
+        const scaleGrid = el('div', 'tv-health-type-grid');
+
+        addHealthStat(scaleGrid, 'Growth', `${mergedReport.growthRate}`, '#a29bfe');
+        scaleGrid.lastElementChild.title = `${mergedReport.growthRate} entries per 100 chat turns`;
+        scaleGrid.lastElementChild.querySelector('.tv-health-stat-label').textContent = '/100 turns';
+
+        const dupPctNum = mergedReport.duplicateDensity * 100;
+        const dupPct = dupPctNum.toFixed(0);
+        addHealthStat(scaleGrid, 'Dup Density', `${dupPct}%`, dupPctNum > 15 ? '#e17055' : dupPctNum > 5 ? '#fdcb6e' : '#00b894');
+        scaleGrid.lastElementChild.title = `${dupPct}% of entries share >70% similarity with another entry`;
+
+        const compRatio = mergedReport.compressionRatio;
+        const compLabel = `${(compRatio * 100).toFixed(0)}%`;
+        addHealthStat(scaleGrid, 'Compression', compLabel, compRatio < 0.8 ? '#00b894' : compRatio > 1.2 ? '#e17055' : '#fdcb6e');
+        scaleGrid.lastElementChild.title = `Current avg length is ${compLabel} of original avg length`;
+
+        addHealthStat(scaleGrid, 'Never Ref\'d', String(mergedReport.neverReferencedCount),
+            mergedReport.neverReferencedCount > 20 ? '#e17055' : mergedReport.neverReferencedCount > 5 ? '#fdcb6e' : '#636e72');
+        scaleGrid.lastElementChild.title = `${mergedReport.neverReferencedCount} entries have been injected but never referenced by the AI`;
+
+        scaleSection.appendChild(scaleGrid);
+
+        // Metadata size breakdown
+        if (mergedReport.metadataSizes?.length > 0) {
+            const metaRow = el('div', 'tv-health-meta-sizes');
+            const metaLabel = el('div', 'tv-health-avg');
+            const totalMeta = mergedReport.metadataSizes.reduce((s, m) => s + m.size, 0);
+            metaLabel.textContent = `Metadata: ${(totalMeta / 1024).toFixed(1)} KB total`;
+            metaRow.appendChild(metaLabel);
+
+            const metaColors = ['#e84393', '#6c5ce7', '#00b894', '#fdcb6e', '#0984e3', '#e17055', '#a29bfe'];
+
+            const metaBar = el('div', 'tv-budget-bar');
+            metaBar.style.marginTop = '4px';
+            for (let i = 0; i < mergedReport.metadataSizes.length; i++) {
+                const m = mergedReport.metadataSizes[i];
+                const pct = Math.max((m.size / totalMeta) * 100, 2);
+                const seg = el('div', 'tv-budget-seg');
+                seg.style.width = `${pct}%`;
+                seg.style.background = metaColors[i % metaColors.length];
+                seg.title = `${m.key}: ${(m.size / 1024).toFixed(1)} KB`;
+                metaBar.appendChild(seg);
+            }
+            metaRow.appendChild(metaBar);
+
+            const metaLegend = el('div', 'tv-budget-legend');
+            metaLegend.style.marginTop = '2px';
+            for (let i = 0; i < mergedReport.metadataSizes.length; i++) {
+                const m = mergedReport.metadataSizes[i];
+                const item = el('span', 'tv-budget-legend-item');
+                const dot = el('span', 'tv-budget-legend-dot');
+                dot.style.background = metaColors[i % metaColors.length];
+                item.appendChild(dot);
+                item.appendChild(document.createTextNode(`${m.key} ${(m.size / 1024).toFixed(1)}K`));
+                metaLegend.appendChild(item);
+            }
+            metaRow.appendChild(metaLegend);
+            scaleSection.appendChild(metaRow);
+        }
+
+        body.appendChild(scaleSection);
 
         // ── Category distribution ──
         if (mergedReport.categoryDistribution.length > 0) {
@@ -2433,9 +2558,84 @@ export function buildToolSummary(toolName, params, result, retrievedEntries = []
     }
 }
 
+// ── Diff Computation ──────────────────────────────────────────
+
+/**
+ * Compute a simple line-level diff between two texts.
+ * Returns an array of { type: 'same'|'add'|'remove', text } objects.
+ */
+export function computeLineDiff(oldText, newText) {
+    const oldLines = (oldText || '').split('\n');
+    const newLines = (newText || '').split('\n');
+    const result = [];
+
+    // Greedy alignment: match lines exactly, with bounded lookahead
+    let oi = 0, ni = 0;
+    while (oi < oldLines.length && ni < newLines.length) {
+        if (oldLines[oi] === newLines[ni]) {
+            result.push({ type: 'same', text: oldLines[oi] });
+            oi++;
+            ni++;
+        } else {
+            // Look ahead in new for current old line
+            let foundInNew = -1;
+            for (let j = ni + 1; j < Math.min(ni + 5, newLines.length); j++) {
+                if (newLines[j] === oldLines[oi]) { foundInNew = j; break; }
+            }
+            // Look ahead in old for current new line
+            let foundInOld = -1;
+            for (let j = oi + 1; j < Math.min(oi + 5, oldLines.length); j++) {
+                if (oldLines[j] === newLines[ni]) { foundInOld = j; break; }
+            }
+
+            if (foundInNew >= 0 && (foundInOld < 0 || (foundInNew - ni) <= (foundInOld - oi))) {
+                while (ni < foundInNew) {
+                    result.push({ type: 'add', text: newLines[ni] });
+                    ni++;
+                }
+            } else if (foundInOld >= 0) {
+                while (oi < foundInOld) {
+                    result.push({ type: 'remove', text: oldLines[oi] });
+                    oi++;
+                }
+            } else {
+                result.push({ type: 'remove', text: oldLines[oi] });
+                result.push({ type: 'add', text: newLines[ni] });
+                oi++;
+                ni++;
+            }
+        }
+    }
+    while (oi < oldLines.length) {
+        result.push({ type: 'remove', text: oldLines[oi++] });
+    }
+    while (ni < newLines.length) {
+        result.push({ type: 'add', text: newLines[ni++] });
+    }
+
+    return result;
+}
+
+/**
+ * Build a color-coded diff view element from two texts.
+ */
+function buildDiffView(oldText, newText) {
+    const diff = computeLineDiff(oldText, newText);
+    const container = el('div', 'tv-diff-view');
+
+    for (const line of diff) {
+        const lineEl = el('div', `tv-diff-line tv-diff-${line.type}`);
+        const prefix = line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' ';
+        lineEl.textContent = `${prefix} ${line.text}`;
+        container.appendChild(lineEl);
+    }
+
+    return container;
+}
+
 // ── Version History Panel ──────────────────────────────────────
 
-function buildVersionHistoryPanel(versions) {
+function buildVersionHistoryPanel(versions, currentContent) {
     const panel = el('div', 'tv-version-history');
     const header = el('div', 'tv-version-history-header');
     header.appendChild(icon('fa-clock-rotate-left'));
@@ -2443,7 +2643,9 @@ function buildVersionHistoryPanel(versions) {
     panel.appendChild(header);
 
     // Show newest first
-    for (const ver of [...versions].reverse()) {
+    const reversed = [...versions].reverse();
+    for (let i = 0; i < reversed.length; i++) {
+        const ver = reversed[i];
         const item = el('div', 'tv-version-history-item');
 
         const meta = el('div', 'tv-version-history-meta');
@@ -2463,6 +2665,37 @@ function buildVersionHistoryPanel(versions) {
         }
 
         if (ver.previousContent) {
+            // Determine what this version was changed TO:
+            // For the most recent version (i=0), it changed to the current content.
+            // For older versions, it changed to the next version's previousContent.
+            const changedTo = i === 0
+                ? (currentContent || null)
+                : (reversed[i - 1]?.previousContent || null);
+
+            if (changedTo) {
+                // Show diff toggle
+                const diffToggle = el('button', 'tv-btn tv-btn-xs tv-btn-secondary tv-diff-toggle');
+                diffToggle.appendChild(icon('fa-code-compare'));
+                diffToggle.append(' Show diff');
+                diffToggle.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const existing = item.querySelector('.tv-diff-view');
+                    const existingRaw = item.querySelector('.tv-version-history-content');
+                    if (existing) {
+                        existing.remove();
+                        diffToggle.replaceChildren(icon('fa-code-compare'));
+                        diffToggle.append(' Show diff');
+                        if (existingRaw) existingRaw.style.display = '';
+                    } else {
+                        if (existingRaw) existingRaw.style.display = 'none';
+                        diffToggle.replaceChildren(icon('fa-code'));
+                        diffToggle.append(' Show raw');
+                        item.appendChild(buildDiffView(ver.previousContent, changedTo));
+                    }
+                });
+                item.appendChild(diffToggle);
+            }
+
             const contentDiv = el('div', 'tv-version-history-content');
             contentDiv.textContent = ver.previousContent;
             item.appendChild(contentDiv);

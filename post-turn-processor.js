@@ -217,6 +217,26 @@ export async function runPostTurnProcessor(force = false) {
         if (trackerResult) {
             result.trackersUpdated = trackerResult.updated;
             result.errors += trackerResult.errors;
+
+            // Emit feed events for large tracker updates (staleness guard)
+            for (const lu of trackerResult.largeUpdates || []) {
+                addBackgroundEvent({
+                    icon: 'fa-triangle-exclamation',
+                    verb: 'Large tracker update',
+                    color: '#fdcb6e',
+                    summary: `"${lu.title}" changed ${(lu.changeFraction * 100).toFixed(0)}% — check version history to review or rollback`,
+                    details: [`UID ${lu.uid}`, lu.book, `${(lu.changeFraction * 100).toFixed(0)}% changed`],
+                });
+            }
+            for (const skip of trackerResult.staleSkips || []) {
+                addBackgroundEvent({
+                    icon: 'fa-code-branch',
+                    verb: 'Tracker conflict',
+                    color: '#e17055',
+                    summary: `"${skip.title}" was modified externally — post-turn update skipped`,
+                    details: [`UID ${skip.uid}`, skip.book],
+                });
+            }
         }
 
         if (getChatId() !== chatId || task.cancelled) return null;
@@ -692,8 +712,62 @@ async function archiveScene(targetBook, chat, sceneChange, chatId) {
 
 // ── Step 2: Tracker Updates ──────────────────────────────────────
 
+/** djb2 hash for fast content fingerprinting. */
+export function contentHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+    }
+    return hash;
+}
+
+const TRACKER_STALENESS_METADATA_KEY = 'tunnelvision_tracker_hashes';
+const LARGE_UPDATE_THRESHOLD = 0.6;
+
+function getTrackerHashes() {
+    try {
+        const context = getContext();
+        return context.chatMetadata?.[TRACKER_STALENESS_METADATA_KEY] || {};
+    } catch { return {}; }
+}
+
+function setTrackerHash(bookName, uid, hash) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const store = context.chatMetadata[TRACKER_STALENESS_METADATA_KEY] || {};
+        store[`${bookName}:${uid}`] = { hash, timestamp: Date.now() };
+        context.chatMetadata[TRACKER_STALENESS_METADATA_KEY] = store;
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+/**
+ * Compute the fraction of lines that differ between two text blocks.
+ * Returns a value between 0 (identical) and 1 (completely different).
+ */
+export function computeChangeFraction(oldText, newText) {
+    const oldLines = oldText.split('\n').map(l => l.trim()).filter(Boolean);
+    const newLines = newText.split('\n').map(l => l.trim()).filter(Boolean);
+    if (oldLines.length === 0 && newLines.length === 0) return 0;
+    if (oldLines.length === 0 || newLines.length === 0) return 1;
+
+    const oldSet = new Set(oldLines);
+    const newSet = new Set(newLines);
+    let addedCount = 0;
+    for (const line of newLines) {
+        if (!oldSet.has(line)) addedCount++;
+    }
+    let removedCount = 0;
+    for (const line of oldLines) {
+        if (!newSet.has(line)) removedCount++;
+    }
+    const totalLines = oldLines.length + newLines.length;
+    return Math.min(1, (addedCount + removedCount) / totalLines);
+}
+
 async function updateTrackers(trackers, recentExcerpt, chatId) {
-    const result = { updated: 0, errors: 0, reverts: [] };
+    const result = { updated: 0, errors: 0, reverts: [], largeUpdates: [], staleSkips: [] };
 
     const trackerSummaries = trackers.map(t =>
         `[UID ${t.uid} — "${t.title}" in "${t.book}"]\n${t.content}`,
@@ -742,6 +816,7 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
         if (!Array.isArray(updates) || updates.length === 0) return result;
 
         const trackerMap = new Map(trackers.map(t => [t.uid, t]));
+        const hashes = getTrackerHashes();
 
         for (const update of updates) {
             if (!update?.uid || !update?.content) continue;
@@ -749,21 +824,46 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
             const tracker = trackerMap.get(Number(update.uid));
             if (!tracker) continue;
 
-            if (tracker.content.trim() === String(update.content).trim()) continue;
+            const newContent = String(update.content).trim();
+            if (tracker.content.trim() === newContent) continue;
+
+            // Staleness guard: if another source modified the tracker since
+            // we last wrote to it, the stored hash won't match the current
+            // content — skip to avoid overwriting concurrent edits.
+            const hashKey = `${tracker.book}:${tracker.uid}`;
+            const storedEntry = hashes[hashKey];
+            if (storedEntry) {
+                const currentHash = contentHash(tracker.content.trim());
+                if (storedEntry.hash !== currentHash) {
+                    console.warn(`[TunnelVision] Tracker "${tracker.title}" (UID ${tracker.uid}) was modified externally — skipping post-turn update to avoid conflict`);
+                    result.staleSkips.push({ uid: tracker.uid, book: tracker.book, title: tracker.title });
+                    continue;
+                }
+            }
+
+            // Large-update guard: flag updates that change >60% of content
+            const changeFraction = computeChangeFraction(tracker.content.trim(), newContent);
+            const isLargeUpdate = changeFraction >= LARGE_UPDATE_THRESHOLD;
 
             try {
                 const previousContent = tracker.content;
                 await updateEntry(tracker.book, Number(update.uid), {
-                    content: String(update.content).trim(),
+                    content: newContent,
                     _source: 'post-turn',
                 });
+
+                setTrackerHash(tracker.book, tracker.uid, contentHash(newContent));
+
                 result.updated++;
                 result.reverts.push({ uid: tracker.uid, book: tracker.book, previousContent });
+                if (isLargeUpdate) {
+                    result.largeUpdates.push({ uid: tracker.uid, book: tracker.book, title: tracker.title, changeFraction });
+                }
                 if (_liveRollback) {
                     _liveRollback.trackerReverts.push({ uid: tracker.uid, book: tracker.book, previousContent });
                     persistLiveRollback();
                 }
-                console.log(`[TunnelVision] Post-turn updated tracker "${tracker.title}" (UID ${tracker.uid})`);
+                console.log(`[TunnelVision] Post-turn updated tracker "${tracker.title}" (UID ${tracker.uid})${isLargeUpdate ? ` [LARGE UPDATE: ${(changeFraction * 100).toFixed(0)}% changed]` : ''}`);
             } catch (e) {
                 console.warn(`[TunnelVision] Post-turn tracker update failed for UID ${update.uid}:`, e);
                 result.errors++;
