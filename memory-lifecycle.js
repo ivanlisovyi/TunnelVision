@@ -139,10 +139,20 @@ export async function runLifecycleMaintenance(force = false) {
         }
 
         if (!task.cancelled) {
+            let maxUid = 0;
+            for (const bookName of activeBooks) {
+                const bd = await getCachedWorldInfo(bookName);
+                if (!bd?.entries) continue;
+                for (const key of Object.keys(bd.entries)) {
+                    if (bd.entries[key].uid > maxUid) maxUid = bd.entries[key].uid;
+                }
+            }
+
             setLifecycleState({
                 lastRunMsgIdx: (getContext().chat?.length || 1) - 1,
                 lastRunAt: Date.now(),
                 lastResult: result,
+                lastMaxUid: maxUid,
             });
         }
 
@@ -186,6 +196,87 @@ export async function runLifecycleMaintenance(force = false) {
     }
 }
 
+// ── Tiered Batch Strategy (2A) ───────────────────────────────────
+
+const LIFECYCLE_BATCH_LIMIT = 80;
+
+/**
+ * Build a tiered batch of entries for lifecycle consolidation.
+ * Instead of a flat cap, prioritizes:
+ *   1. Entries created since the last lifecycle run (always checked)
+ *   2. Entries with high trigram similarity to new entries (pre-filtered locally)
+ *   3. Random sample from remaining entries (rotating coverage)
+ * @param {Array<{uid: number, title: string, content: string}>} allEntries
+ * @param {string} bookName
+ * @returns {Array<{uid: number, title: string, content: string}>}
+ */
+function buildLifecycleBatch(allEntries, bookName) {
+    if (allEntries.length <= LIFECYCLE_BATCH_LIMIT) return allEntries;
+
+    const state = getLifecycleState();
+    const lastRunUidThreshold = state?.lastMaxUid ?? 0;
+
+    const newEntries = allEntries.filter(e => e.uid > lastRunUidThreshold);
+    const oldEntries = allEntries.filter(e => e.uid <= lastRunUidThreshold);
+
+    const selected = new Set(newEntries.map(e => e.uid));
+    let budget = LIFECYCLE_BATCH_LIMIT - selected.size;
+
+    if (budget > 0 && newEntries.length > 0 && oldEntries.length > 0) {
+        const newTexts = newEntries.map(e => `${e.title} ${e.content}`);
+        const newTrigrams = newTexts.map(t => trigrams(t));
+
+        const scored = oldEntries.map(old => {
+            const oldTri = trigrams(`${old.title} ${old.content}`);
+            let maxSim = 0;
+            for (const nt of newTrigrams) {
+                const sim = trigramSetSimilarity(oldTri, nt);
+                if (sim > maxSim) maxSim = sim;
+            }
+            return { entry: old, similarity: maxSim };
+        });
+        scored.sort((a, b) => b.similarity - a.similarity);
+
+        const similarCount = Math.min(Math.ceil(budget * 0.6), scored.length);
+        for (let i = 0; i < similarCount; i++) {
+            selected.add(scored[i].entry.uid);
+        }
+        budget = LIFECYCLE_BATCH_LIMIT - selected.size;
+
+        if (budget > 0) {
+            const remaining = oldEntries.filter(e => !selected.has(e.uid));
+            for (let i = remaining.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+            }
+            for (let i = 0; i < Math.min(budget, remaining.length); i++) {
+                selected.add(remaining[i].uid);
+            }
+        }
+    }
+
+    return allEntries.filter(e => selected.has(e.uid));
+}
+
+function trigrams(s) {
+    const norm = `  ${s.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim()}  `;
+    const set = new Set();
+    for (let i = 0; i <= norm.length - 3; i++) {
+        set.add(norm.substring(i, i + 3));
+    }
+    return set;
+}
+
+function trigramSetSimilarity(setA, setB) {
+    if (setA.size === 0 && setB.size === 0) return 1;
+    if (setA.size === 0 || setB.size === 0) return 0;
+    let intersection = 0;
+    for (const tri of setA) {
+        if (setB.has(tri)) intersection++;
+    }
+    return intersection / (setA.size + setB.size - intersection);
+}
+
 // ── Step 1: Duplicate Detection ──────────────────────────────────
 
 async function findAndMergeDuplicates(bookName, bookData, chatId) {
@@ -197,7 +288,6 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
         if (entry.disable) continue;
         const title = (entry.comment || '').trim();
         if (!title) continue;
-        // Skip trackers and summaries — they should not be auto-merged
         const lowerTitle = title.toLowerCase();
         if (lowerTitle.startsWith('[tracker') || lowerTitle.startsWith('[summary') || lowerTitle.startsWith('[scene summary')) continue;
         entries.push({ uid: entry.uid, title, content: (entry.content || '').substring(0, 200) });
@@ -205,7 +295,8 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
 
     if (entries.length < 2) return result;
 
-    const entryList = entries.slice(0, 80).map(e =>
+    const batch = buildLifecycleBatch(entries, bookName);
+    const entryList = batch.map(e =>
         `- UID ${e.uid}: "${e.title}" — ${e.content.replace(/\n/g, ' ').substring(0, 100)}...`,
     ).join('\n');
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { trigramSimilarity, callWithRetry, setInjectionSizes, getInjectionSizes, getMaxContextTokens } from '../agent-utils.js';
+import { trigrams, trigramSimilarity, callWithRetry, setInjectionSizes, getInjectionSizes, getMaxContextTokens } from '../agent-utils.js';
 
 // ── setInjectionSizes / getInjectionSizes ────────────────────────
 
@@ -49,6 +49,50 @@ describe('injection size tracking', () => {
 describe('getMaxContextTokens', () => {
     it('returns 0 when context has no maxContext property', () => {
         expect(getMaxContextTokens()).toBe(0);
+    });
+});
+
+// ── trigrams ─────────────────────────────────────────────────────
+
+describe('trigrams', () => {
+    it('returns a Set', () => {
+        expect(trigrams('hello')).toBeInstanceOf(Set);
+    });
+
+    it('returns non-empty set for non-empty string', () => {
+        expect(trigrams('hello').size).toBeGreaterThan(0);
+    });
+
+    it('returns a small set for empty string (padding-only trigrams)', () => {
+        // The normalization pads with spaces, so even "" produces a whitespace trigram
+        expect(trigrams('').size).toBeLessThanOrEqual(2);
+    });
+
+    it('is case-insensitive', () => {
+        const a = trigrams('Hello');
+        const b = trigrams('hello');
+        expect(a.size).toBe(b.size);
+        for (const tri of a) expect(b.has(tri)).toBe(true);
+    });
+
+    it('strips punctuation', () => {
+        const a = trigrams('hello, world!');
+        const b = trigrams('hello world');
+        expect(a.size).toBe(b.size);
+        for (const tri of a) expect(b.has(tri)).toBe(true);
+    });
+
+    it('produces 3-character substrings', () => {
+        for (const tri of trigrams('abc')) {
+            expect(tri.length).toBe(3);
+        }
+    });
+
+    it('identical strings produce identical trigram sets', () => {
+        const a = trigrams('test string');
+        const b = trigrams('test string');
+        expect(a.size).toBe(b.size);
+        for (const tri of a) expect(b.has(tri)).toBe(true);
     });
 });
 

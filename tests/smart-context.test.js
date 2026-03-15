@@ -174,6 +174,59 @@ describe('scoreEntry', () => {
         expect(score1).toBe(score2);
         expect(score1).toBeGreaterThanOrEqual(2);
     });
+
+    // ── presentKeySet fast path (2D perf optimization) ──
+
+    it('produces same score with presentKeySet as without for title match', () => {
+        const entry = { comment: 'Elena', key: [], uid: 20 };
+        const text = 'elena went to the market';
+        const keySet = new Set(['elena']);
+        expect(scoreEntry(entry, text, keySet)).toBe(scoreEntry(entry, text));
+    });
+
+    it('produces same score with presentKeySet as without for key matches', () => {
+        const entry = { comment: '', key: ['sword', 'shield'], uid: 21 };
+        const text = 'she drew her sword and shield';
+        const keySet = new Set(['sword', 'shield']);
+        expect(scoreEntry(entry, text, keySet)).toBe(scoreEntry(entry, text));
+    });
+
+    it('produces same combined score with presentKeySet as without', () => {
+        const entry = { comment: 'Elena', key: ['elena', 'magic'], uid: 22 };
+        const text = 'elena used magic';
+        const keySet = new Set(['elena', 'magic']);
+        expect(scoreEntry(entry, text, keySet)).toBe(scoreEntry(entry, text));
+    });
+
+    it('returns 0 via presentKeySet when keys are absent from the set', () => {
+        const entry = { comment: 'Elena', key: ['sword'], uid: 23 };
+        const emptySet = new Set();
+        expect(scoreEntry(entry, 'elena used a sword', emptySet)).toBe(0);
+    });
+
+    it('scores partial matches correctly via presentKeySet', () => {
+        const entry = { comment: 'Elena', key: ['sword', 'shield'], uid: 24 };
+        const keySet = new Set(['elena', 'sword']);
+        // title match (+10) + sword (+3) but not shield
+        expect(scoreEntry(entry, 'elena sword shield', keySet)).toBe(13);
+    });
+
+    it('handles presentKeySet with derived alias keys', () => {
+        const entry = {
+            comment: '',
+            key: [],
+            uid: 25,
+            content: 'Lord Varen is a reclusive nobleman who rules over Stonereach.',
+        };
+        const text = 'lord varen sent a message';
+        const withoutSet = scoreEntry(entry, text);
+        // Build a set that includes the derived key
+        const keySet = new Set(['lord varen']);
+        const withSet = scoreEntry(entry, text, keySet);
+        // Both should detect "lord varen" as a derived proper noun phrase
+        expect(withoutSet).toBeGreaterThanOrEqual(2);
+        expect(withSet).toBeGreaterThanOrEqual(2);
+    });
 });
 
 // ── getFeedbackMap ───────────────────────────────────────────────

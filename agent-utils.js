@@ -135,7 +135,7 @@ export function getStoryContext({ maxLength = 500 } = {}) {
  * @param {string} s
  * @returns {Set<string>}
  */
-function trigrams(s) {
+export function trigrams(s) {
     const norm = `  ${s.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim()}  `;
     const set = new Set();
     for (let i = 0; i <= norm.length - 3; i++) {

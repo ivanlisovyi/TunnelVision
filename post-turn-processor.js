@@ -26,10 +26,11 @@ import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.j
 import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
-import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry, generateAnalytical, getStoryContext } from './agent-utils.js';
-import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
+import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, trigrams as computeTrigrams, callWithRetry, generateAnalytical, getStoryContext } from './agent-utils.js';
+import { addBackgroundEvent, registerBackgroundTask, getTrackerSuggestionNames } from './background-events.js';
 import { requestPriorityUpdate, getWorldStateText } from './world-state.js';
 import { processArcUpdates, buildArcsContextBlock } from './arc-tracker.js';
+import { getFeedbackMap } from './smart-context.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -328,23 +329,61 @@ export async function runPostTurnProcessor(force = false) {
 async function analyzeExchange(targetBook, recentExcerpt, chatId) {
     const result = { factsCreated: 0, errors: 0, sceneChange: null, createdUids: [] };
 
-    // Build compact list of existing fact titles so the LLM avoids re-extracting them
+    // Build a relevance-weighted sample of existing fact titles so the LLM avoids re-extraction.
+    // Priority 1: facts whose keys appear in the current exchange (most likely to be re-extracted).
+    // Priority 2: random sample from remaining facts, biased toward entries with high feedback scores.
+    // Cap at 50 titles total.
     let existingFactsSection = '';
     try {
         const preBookData = await getCachedWorldInfo(targetBook);
         if (preBookData?.entries) {
-            const titles = [];
+            const recentTextLower = recentExcerpt.toLowerCase();
+            const feedbackMap = getFeedbackMap();
+            const relevantTitles = [];
+            const otherEntries = [];
+
             for (const key of Object.keys(preBookData.entries)) {
                 const e = preBookData.entries[key];
                 if (e.disable) continue;
                 const t = (e.comment || '').trim();
-                if (t && !t.toLowerCase().startsWith('[tracker') && !t.toLowerCase().startsWith('[summary') && !t.toLowerCase().startsWith('[scene summary')) {
-                    titles.push(t);
+                if (!t) continue;
+                const lt = t.toLowerCase();
+                if (lt.startsWith('[tracker') || lt.startsWith('[summary') || lt.startsWith('[scene summary')) continue;
+
+                const entryKeys = (e.key || []).map(k => String(k).trim().toLowerCase()).filter(k => k.length >= 2);
+                const isCurrentlyRelevant = entryKeys.some(k => recentTextLower.includes(k))
+                    || (t.length >= 3 && recentTextLower.includes(lt));
+
+                if (isCurrentlyRelevant) {
+                    relevantTitles.push(t);
+                } else {
+                    const fb = feedbackMap[e.uid];
+                    const score = fb ? (fb.references || 0) - (fb.missStreak || 0) : 0;
+                    otherEntries.push({ title: t, score });
                 }
             }
-            if (titles.length > 0) {
-                const recent = titles.slice(-30);
-                existingFactsSection = '\n[Already Known Facts — do NOT re-extract these]\n' + recent.map(t => `- ${t}`).join('\n') + '\n';
+
+            const MAX_EXISTING_FACTS = 50;
+            const remainingSlots = MAX_EXISTING_FACTS - relevantTitles.length;
+
+            if (remainingSlots > 0 && otherEntries.length > 0) {
+                otherEntries.sort((a, b) => b.score - a.score);
+                const topHalf = Math.ceil(remainingSlots * 0.5);
+                const topEntries = otherEntries.slice(0, topHalf).map(e => e.title);
+
+                const rest = otherEntries.slice(topHalf);
+                for (let i = rest.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [rest[i], rest[j]] = [rest[j], rest[i]];
+                }
+                const randomEntries = rest.slice(0, remainingSlots - topHalf).map(e => e.title);
+
+                relevantTitles.push(...topEntries, ...randomEntries);
+            }
+
+            const selectedTitles = relevantTitles.slice(0, MAX_EXISTING_FACTS);
+            if (selectedTitles.length > 0) {
+                existingFactsSection = '\n[Already Known Facts — do NOT re-extract these]\n' + selectedTitles.map(t => `- ${t}`).join('\n') + '\n';
             }
         }
     } catch { /* proceed without existing facts */ }
@@ -464,18 +503,29 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         const parsed = parseJsonFromLLM(response);
         if (!parsed || typeof parsed !== 'object') return result;
 
-        // Build existing-entry text list for dedup
+        // Build trigram index for O(1)-ish dedup lookups instead of O(entries) per fact
         const bookData = await getCachedWorldInfo(targetBook);
+        const trigramIndex = new Map(); // trigram → Set<entry index>
         const existingTexts = [];
         if (bookData?.entries) {
+            let idx = 0;
             for (const key of Object.keys(bookData.entries)) {
                 const e = bookData.entries[key];
                 if (e.disable) continue;
-                existingTexts.push(`${e.comment || ''} ${e.content || ''}`);
+                const text = `${e.comment || ''} ${e.content || ''}`;
+                existingTexts.push(text);
+                const tris = computeTrigrams(text);
+                for (const tri of tris) {
+                    let set = trigramIndex.get(tri);
+                    if (!set) { set = new Set(); trigramIndex.set(tri, set); }
+                    set.add(idx);
+                }
+                idx++;
             }
         }
 
         const DEDUP_THRESHOLD = 0.7;
+        const TRIGRAM_CANDIDATE_MIN_OVERLAP = 0.3;
 
         // Process facts
         const facts = Array.isArray(parsed.facts) ? parsed.facts : [];
@@ -483,7 +533,30 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
             if (!fact?.title || !fact?.content) continue;
 
             const newText = `${String(fact.title).trim()} ${String(fact.content).trim()}`;
-            const isDuplicate = existingTexts.some(et => trigramSimilarity(newText, et) >= DEDUP_THRESHOLD);
+            const newTrigrams = computeTrigrams(newText);
+
+            // Use the index to find candidate matches — entries sharing enough trigrams
+            const hitCounts = new Map();
+            for (const tri of newTrigrams) {
+                const matches = trigramIndex.get(tri);
+                if (matches) {
+                    for (const entryIdx of matches) {
+                        hitCounts.set(entryIdx, (hitCounts.get(entryIdx) || 0) + 1);
+                    }
+                }
+            }
+
+            const minHits = Math.floor(newTrigrams.size * TRIGRAM_CANDIDATE_MIN_OVERLAP);
+            let isDuplicate = false;
+            for (const [entryIdx, hits] of hitCounts) {
+                if (hits >= minHits) {
+                    if (trigramSimilarity(newText, existingTexts[entryIdx]) >= DEDUP_THRESHOLD) {
+                        isDuplicate = true;
+                        break;
+                    }
+                }
+            }
+
             if (isDuplicate) {
                 console.log(`[TunnelVision] Post-turn skipped duplicate fact: "${fact.title}"`);
                 continue;
@@ -820,6 +893,9 @@ async function checkTrackerSuggestions(activeBooks) {
         // Merge counts for name variants: "john" + "john wald" → "john wald"
         const consolidated = consolidateNameVariants(characterFactCounts);
 
+        // Belt-and-suspenders: also check current feed items for existing suggestions
+        const feedSuggestionNames = getTrackerSuggestionNames();
+
         for (const [name, count] of consolidated) {
             if (count < TRACKER_SUGGESTION_THRESHOLD) continue;
 
@@ -828,6 +904,9 @@ async function checkTrackerSuggestions(activeBooks) {
 
             // Check against already-suggested names with variant awareness
             if ([...alreadySuggested].some(s => namesOverlap(name, s))) continue;
+
+            // Check against existing feed suggestions (pending, completed, or dismissed)
+            if (feedSuggestionNames.some(s => namesOverlap(name, s))) continue;
 
             const displayName = name.replace(/\b\w/g, c => c.toUpperCase());
 

@@ -213,10 +213,14 @@ function phaseBoost(entry, phase) {
 
 // ── Tree Proximity Scoring (2B) ──────────────────────────────────
 
+const TREE_PROXIMITY_TOP_K = 10;
+const TREE_PROXIMITY_SAMPLE_SIZE = 50;
+
 /**
  * Compute proximity boosts for candidates based on tree structure.
  * Entries sharing a tree node with a high-scoring entry get +4,
  * sibling nodes get +2, cousin nodes get +1.
+ * Capped to top-K high scorers and a sampled subset of candidates to avoid O(H*C).
  * @param {Array} candidates - Scored candidate array
  * @param {string[]} activeBooks
  * @returns {Map<number, number>} UID → bonus score
@@ -239,14 +243,33 @@ function computeTreeProximityBoosts(candidates, activeBooks) {
         })(tree.root, null);
 
         const bookCandidates = candidates.filter(c => c.bookName === bookName);
-        const highScorers = bookCandidates.filter(c => c.score >= 10);
+
+        // Cap high scorers to top-K by score
+        const highScorers = bookCandidates
+            .filter(c => c.score >= 10)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, TREE_PROXIMITY_TOP_K);
+
+        if (highScorers.length === 0) continue;
+
+        // Sample candidates if too many, to keep cost bounded
+        let targetCandidates = bookCandidates;
+        if (bookCandidates.length > TREE_PROXIMITY_SAMPLE_SIZE) {
+            const highScorerUids = new Set(highScorers.map(h => h.entry.uid));
+            const rest = bookCandidates.filter(c => !highScorerUids.has(c.entry.uid));
+            for (let i = rest.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [rest[i], rest[j]] = [rest[j], rest[i]];
+            }
+            targetCandidates = [...highScorers, ...rest.slice(0, TREE_PROXIMITY_SAMPLE_SIZE - highScorers.length)];
+        }
 
         for (const hs of highScorers) {
             const nodeId = uidNodeMap.get(hs.entry.uid);
             if (!nodeId) continue;
             const parentId = nodeParentMap.get(nodeId);
 
-            for (const c of bookCandidates) {
+            for (const c of targetCandidates) {
                 if (c.entry.uid === hs.entry.uid) continue;
                 const cNodeId = uidNodeMap.get(c.entry.uid);
                 if (!cNodeId) continue;
@@ -357,11 +380,12 @@ function buildBigramModel() {
  */
 function predictNextEntities(currentMentions) {
     const predicted = new Map();
+    const mentionSet = new Set(currentMentions);
     for (const mention of currentMentions) {
         const followers = _bigramModel.get(mention);
         if (!followers) continue;
         for (const [entity, count] of followers) {
-            if (!currentMentions.includes(entity)) {
+            if (!mentionSet.has(entity)) {
                 predicted.set(entity, (predicted.get(entity) || 0) + count);
             }
         }
@@ -437,34 +461,73 @@ function extractMentionsFromChat(chat, lookback) {
 }
 
 /**
+ * Pre-build a Set of all known entry keys/derived-keys that appear in recentText.
+ * Single O(keys * L) pass, then each scoreEntry call is O(keys) with Set.has().
+ * @param {string[]} activeBooks
+ * @param {string} recentText - Lowercased recent chat text
+ * @returns {Set<string>} All keys present in recentText
+ */
+function buildPresentKeySet(activeBooks, recentText) {
+    const presentKeys = new Set();
+    for (const bookName of activeBooks) {
+        const bookData = getCachedWorldInfoSync(bookName);
+        if (!bookData?.entries) continue;
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable) continue;
+            const title = (entry.comment || '').trim().toLowerCase();
+            if (title && title.length >= 2 && recentText.includes(title)) {
+                presentKeys.add(title);
+            }
+            for (const k of (entry.key || [])) {
+                const kl = String(k).trim().toLowerCase();
+                if (kl.length >= 2 && recentText.includes(kl)) {
+                    presentKeys.add(kl);
+                }
+            }
+            for (const dk of deriveAliasKeys(entry)) {
+                if (dk.length >= 3 && recentText.includes(dk)) {
+                    presentKeys.add(dk);
+                }
+            }
+        }
+    }
+    return presentKeys;
+}
+
+/**
  * Score an entry's relevance based on how well it matches the recent chat text.
  * Includes derived alias key matching (1A).
  * @param {Object} entry - Lorebook entry
  * @param {string} recentText - Lowercased concatenated recent chat text
+ * @param {Set<string>} [presentKeySet] - Pre-built set of keys found in recentText (O(1) lookup)
  * @returns {number} Relevance score (0 = no match, higher = more relevant)
  */
-export function scoreEntry(entry, recentText) {
+export function scoreEntry(entry, recentText, presentKeySet) {
     if (!recentText) return 0;
 
+    const useFastPath = presentKeySet instanceof Set;
     let score = 0;
 
     const title = (entry.comment || '').trim();
-    if (title && recentText.includes(title.toLowerCase())) {
-        score += 10;
+    const titleLower = title.toLowerCase();
+    if (title) {
+        if (useFastPath ? presentKeySet.has(titleLower) : recentText.includes(titleLower)) {
+            score += 10;
+        }
     }
 
     const keys = entry.key || [];
     for (const key of keys) {
         const k = String(key).trim().toLowerCase();
-        if (k.length >= 2 && recentText.includes(k)) {
+        if (k.length >= 2 && (useFastPath ? presentKeySet.has(k) : recentText.includes(k))) {
             score += 3;
         }
     }
 
-    // 1A: Match derived alias keys at lower weight
     const derivedKeys = deriveAliasKeys(entry);
     for (const dk of derivedKeys) {
-        if (dk.length >= 3 && recentText.includes(dk)) {
+        if (dk.length >= 3 && (useFastPath ? presentKeySet.has(dk) : recentText.includes(dk))) {
             score += 2;
         }
     }
@@ -723,9 +786,11 @@ function scoreCandidates(activeBooks, recentText) {
     const phase = detectConversationPhase(recentText);
     _cachedActiveArcs = null;
 
-    // 3B: Build bigram model and predict next entities
     buildBigramModel();
-    const currentMentionKeys = [];
+    const currentMentionKeys = new Set();
+
+    // Pre-build set of all keys/derived-keys present in recentText (one O(keys*L) pass)
+    const presentKeySet = buildPresentKeySet(activeBooks, recentText);
 
     let maxUid = 0;
     for (const bookName of activeBooks) {
@@ -735,6 +800,16 @@ function scoreCandidates(activeBooks, recentText) {
             if (bd.entries[key].uid > maxUid) maxUid = bd.entries[key].uid;
         }
     }
+
+    // Compute the maximum possible bonus from all non-keyword scoring signals.
+    // Used for early exit: if baseScore + maxBonus < threshold, skip the entry.
+    const maxDecayBonus = 5;
+    const maxRecencyBonus = 3;
+    const maxWsBonus = wsSignals ? 13 : 0;
+    const maxFbBonus = 11;
+    const maxPhaseBonus = 9;
+    const maxArcBonus = 10;
+    const maxAllBonus = maxDecayBonus + maxRecencyBonus + maxWsBonus + maxFbBonus + maxPhaseBonus + maxArcBonus;
 
     for (const bookName of activeBooks) {
         const bookData = getCachedWorldInfoSync(bookName);
@@ -750,14 +825,18 @@ function scoreCandidates(activeBooks, recentText) {
             const isTracker = trackerSet.has(entry.uid);
             const lowerComment = (entry.comment || '').toLowerCase();
             const isSummary = lowerComment.startsWith('[summary]') || lowerComment.startsWith('[scene summary');
-            let relevance = scoreEntry(entry, recentText);
 
-            // Track which keys matched for bigram recording (3B)
+            let relevance = scoreEntry(entry, recentText, presentKeySet);
+
+            // Early exit: if max possible score can't reach inclusion threshold, skip
+            const threshold = isTracker ? 1 : isSummary ? 3 : 5;
+            if (relevance + maxAllBonus < threshold) continue;
+
             if (relevance > 0) {
                 const entryKeys = (entry.key || []).map(k => String(k).trim().toLowerCase()).filter(k => k.length >= 2);
                 for (const k of entryKeys) {
-                    if (recentText.includes(k) && !currentMentionKeys.includes(k)) {
-                        currentMentionKeys.push(k);
+                    if (presentKeySet.has(k)) {
+                        currentMentionKeys.add(k);
                     }
                 }
             }
@@ -766,17 +845,9 @@ function scoreCandidates(activeBooks, recentText) {
             if (maxUid > 0 && entry.uid > maxUid * 0.9) relevance += 3;
             relevance += worldStateBoost(entry, wsSignals);
             relevance += feedbackBoost(entry.uid);
-
-            // 1B: Cooldown penalty for recently-injected entries
             relevance += cooldownPenalty(entry.uid);
-
-            // 2A: Phase-based boost
             relevance += phaseBoost(entry, phase);
-
-            // 2C: Negative signal penalty for stale entries
             relevance += negativeSignalPenalty(entry, feedbackMap);
-
-            // 2D: Arc-aware boosting
             relevance += arcBoost(entry);
 
             if (isTracker && relevance > 0) {
@@ -789,7 +860,7 @@ function scoreCandidates(activeBooks, recentText) {
         }
     }
 
-    // 2B: Tree proximity boosts (second pass after initial scoring)
+    // 2B: Tree proximity boosts — cap to top-K high scorers and sample candidates
     const proximityBoosts = computeTreeProximityBoosts(candidates, activeBooks);
     for (const c of candidates) {
         const bonus = proximityBoosts.get(c.entry.uid);
@@ -797,7 +868,8 @@ function scoreCandidates(activeBooks, recentText) {
     }
 
     // 3B: Predictive boost for entities predicted by bigram model
-    const predicted = predictNextEntities(currentMentionKeys);
+    const mentionKeysArray = [...currentMentionKeys];
+    const predicted = predictNextEntities(mentionKeysArray);
     if (predicted.size > 0) {
         for (const c of candidates) {
             const entryKeys = (c.entry.key || []).map(k => String(k).trim().toLowerCase());
@@ -811,9 +883,8 @@ function scoreCandidates(activeBooks, recentText) {
         }
     }
 
-    // Record current mentions for bigram model (3B)
-    if (currentMentionKeys.length > 0) {
-        recordMentions(currentMentionKeys);
+    if (currentMentionKeys.size > 0) {
+        recordMentions(mentionKeysArray);
     }
 
     candidates.sort((a, b) => b.score - a.score);
