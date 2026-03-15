@@ -727,6 +727,7 @@ async function checkTrackerSuggestions(activeBooks) {
                 color: '#a29bfe',
                 summary: `"${displayName}" has ${count} facts but no tracker — consider creating one`,
                 details: [`${count} facts`, 'No tracker found'],
+                action: { type: 'create-tracker', label: 'Create Tracker', icon: 'fa-address-card', characterName: displayName },
             });
 
             markSuggested(name);
@@ -735,6 +736,83 @@ async function checkTrackerSuggestions(activeBooks) {
     } catch (e) {
         console.warn('[TunnelVision] Tracker suggestion check failed:', e);
     }
+}
+
+// ── Tracker Creation from Suggestion ─────────────────────────────
+
+/**
+ * Create a tracker entry for a character by gathering existing facts and
+ * synthesizing them into a structured document via LLM.
+ * @param {string} characterName - Display name of the character
+ * @returns {Promise<{uid: number, comment: string, nodeLabel: string, bookName: string}>}
+ */
+export async function createTrackerForCharacter(characterName) {
+    const activeBooks = getActiveTunnelVisionBooks();
+    if (activeBooks.length === 0) throw new Error('No active lorebooks');
+
+    const { book: targetBook, error } = resolveTargetBook(activeBooks[0]);
+    if (error || !targetBook) throw new Error(error || 'Could not resolve target lorebook');
+
+    const nameLower = characterName.toLowerCase();
+    const facts = [];
+    for (const bookName of activeBooks) {
+        const bookData = await getCachedWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable) continue;
+            const title = (entry.comment || '').trim();
+            if (isTrackerTitle(title) || isSummaryTitle(title)) continue;
+            const keys = (entry.key || []).map(k => String(k).trim().toLowerCase());
+            if (keys.includes(nameLower)) {
+                facts.push((entry.content || title).trim());
+            }
+        }
+    }
+
+    let trackerContent;
+    if (facts.length > 0) {
+        const prompt = [
+            'Create a character tracker entry for a roleplay lorebook.',
+            `Character name: ${characterName}`,
+            '',
+            'Existing facts about this character:',
+            ...facts.map((f, i) => `${i + 1}. ${f}`),
+            '',
+            'Synthesize ALL the facts above into a structured tracker document.',
+            'Use clear sections with markdown headers (## Appearance, ## Personality, ## Relationships, ## Status, etc.).',
+            'Use key: value pairs where appropriate.',
+            'Include every piece of information from the facts — do not omit anything.',
+            'Only include sections that have known information.',
+            '',
+            'Respond with ONLY the tracker content. No code fences, no preamble, no commentary.',
+        ].join('\n');
+
+        try {
+            trackerContent = await callWithRetry(
+                () => generateQuietPrompt(prompt, false, false),
+                { label: 'Tracker creation', maxRetries: 1 },
+            );
+        } catch (e) {
+            console.warn('[TunnelVision] Tracker creation LLM call failed, using fallback:', e);
+        }
+    }
+
+    if (!trackerContent) {
+        trackerContent = facts.length > 0
+            ? `## Known Facts\n${facts.map(f => `- ${f}`).join('\n')}`
+            : `## ${characterName}\n(No facts gathered yet — fill in details as the story progresses)`;
+    }
+
+    const title = `[Tracker: ${characterName}]`;
+    const result = await createEntry(targetBook, {
+        content: trackerContent,
+        comment: title,
+        keys: [nameLower],
+        background: true,
+    });
+
+    return { ...result, bookName: targetBook };
 }
 
 // ── Swipe / Regeneration Rollback ────────────────────────────────

@@ -16,6 +16,9 @@ vi.mock('../world-state.js', () => ({
     hasPreviousWorldState: vi.fn(() => false),
     revertWorldState: vi.fn(),
 }));
+vi.mock('../post-turn-processor.js', () => ({
+    createTrackerForCharacter: vi.fn(),
+}));
 
 import { parseTimestamp, parseRetrievedEntryHeader, buildToolSummary } from '../activity-feed.js';
 

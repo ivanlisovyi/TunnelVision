@@ -11,6 +11,7 @@ import { getSettings, isLorebookEnabled, getTree, isSummaryTitle, isTrackerTitle
 import { findEntry, getCachedWorldInfo } from './entry-manager.js';
 import { openTreeEditorForBook } from './ui-controller.js';
 import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState } from './world-state.js';
+import { createTrackerForCharacter } from './post-turn-processor.js';
 
 const MAX_FEED_ITEMS = 50;
 const MAX_RENDERED_RETRIEVED_ENTRIES = 5;
@@ -702,6 +703,18 @@ function buildItemElement(item) {
         row.addEventListener('click', () => toggleFeedEntryExpand(row, item));
     }
 
+    // Clickable tool expansion (show retrieved entry content)
+    if (item.type === 'tool' && item.retrievedEntries?.length) {
+        row.classList.add('tv-feed-clickable');
+        row.addEventListener('click', () => toggleToolItemExpand(row, item));
+    }
+
+    // Clickable background expansion (full summary + action)
+    if (item.type === 'background' && item.summary) {
+        row.classList.add('tv-feed-clickable');
+        row.addEventListener('click', () => toggleBackgroundExpand(row, item));
+    }
+
     return row;
 }
 
@@ -761,6 +774,135 @@ async function toggleFeedEntryExpand(row, item) {
         expandDiv.appendChild(actions);
     } catch (err) {
         expandDiv.replaceChildren(el('div', 'tv-feed-expand-empty', `Failed to load: ${err.message}`));
+    }
+}
+
+async function toggleToolItemExpand(row, item) {
+    const expandEl = row.nextElementSibling;
+    if (expandEl?.classList.contains('tv-feed-expand')) {
+        expandEl.remove();
+        row.classList.remove('expanded');
+        return;
+    }
+
+    row.classList.add('expanded');
+    const expandDiv = el('div', 'tv-feed-expand tv-feed-expand-tool');
+    expandDiv.textContent = 'Loading…';
+    row.after(expandDiv);
+
+    try {
+        expandDiv.replaceChildren();
+
+        for (const re of item.retrievedEntries.slice(0, MAX_RENDERED_RETRIEVED_ENTRIES)) {
+            const entryBlock = el('div', 'tv-feed-expand-retrieved');
+            const header = el('div', 'tv-feed-expand-entry-header');
+            const titleSpan = el('span', 'tv-feed-expand-entry-title', re.title || `UID ${re.uid ?? '?'}`);
+            header.appendChild(titleSpan);
+            if (re.lorebook) {
+                header.appendChild(el('span', 'tv-feed-expand-entry-book', re.lorebook));
+            }
+            entryBlock.appendChild(header);
+
+            try {
+                const result = await findEntry(re.lorebook, re.uid);
+                if (result?.entry) {
+                    const contentDiv = el('div', 'tv-feed-expand-content');
+                    contentDiv.textContent = result.entry.content || '(empty)';
+                    entryBlock.appendChild(contentDiv);
+                } else {
+                    entryBlock.appendChild(el('div', 'tv-feed-expand-empty', 'Entry not found'));
+                }
+            } catch {
+                entryBlock.appendChild(el('div', 'tv-feed-expand-empty', 'Could not load entry'));
+            }
+
+            expandDiv.appendChild(entryBlock);
+        }
+
+        if (item.retrievedEntries.length > MAX_RENDERED_RETRIEVED_ENTRIES) {
+            const remaining = item.retrievedEntries.length - MAX_RENDERED_RETRIEVED_ENTRIES;
+            expandDiv.appendChild(el('div', 'tv-feed-expand-empty', `+${remaining} more not shown`));
+        }
+    } catch {
+        expandDiv.replaceChildren(el('div', 'tv-feed-expand-empty', 'Failed to load entries'));
+    }
+}
+
+function toggleBackgroundExpand(row, item) {
+    const expandEl = row.nextElementSibling;
+    if (expandEl?.classList.contains('tv-feed-expand')) {
+        expandEl.remove();
+        row.classList.remove('expanded');
+        return;
+    }
+
+    row.classList.add('expanded');
+    const expandDiv = el('div', 'tv-feed-expand tv-feed-expand-bg');
+
+    if (item.summary) {
+        const contentDiv = el('div', 'tv-feed-expand-content');
+        contentDiv.textContent = item.summary;
+        expandDiv.appendChild(contentDiv);
+    }
+
+    if (item.action) {
+        const actionsDiv = el('div', 'tv-feed-expand-actions');
+        const actionBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
+        actionBtn.appendChild(icon(item.action.icon || 'fa-arrow-right'));
+        actionBtn.append(` ${item.action.label}`);
+        actionBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleBackgroundAction(item.action, actionBtn);
+        });
+        actionsDiv.appendChild(actionBtn);
+        expandDiv.appendChild(actionsDiv);
+    }
+
+    row.after(expandDiv);
+}
+
+async function handleBackgroundAction(action, btn) {
+    switch (action.type) {
+        case 'create-tracker':
+            await handleCreateTrackerAction(action, btn);
+            break;
+        case 'open-tree-editor':
+            openTreeEditorFromFeed();
+            break;
+    }
+}
+
+async function handleCreateTrackerAction(action, btn) {
+    if (!action.characterName) return;
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.replaceChildren(icon('fa-spinner fa-spin'));
+    btn.append(' Creating…');
+
+    try {
+        const result = await createTrackerForCharacter(action.characterName);
+        btn.replaceChildren(icon('fa-check'));
+        btn.append(` Created (UID ${result.uid})`);
+        btn.classList.add('tv-btn-success');
+
+        addBackgroundEvent({
+            icon: 'fa-address-card',
+            verb: 'Tracker created',
+            color: '#00b894',
+            summary: `"${result.comment}" in ${result.bookName} → ${result.nodeLabel}`,
+            details: [`UID ${result.uid}`, result.bookName],
+        });
+    } catch (err) {
+        btn.replaceChildren(icon('fa-triangle-exclamation'));
+        btn.append(` Failed: ${err.message}`);
+        btn.classList.add('tv-btn-error');
+        btn.disabled = false;
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            btn.innerHTML = originalHtml;
+            btn.classList.remove('tv-btn-error');
+            handleCreateTrackerAction(action, btn);
+        }, { once: true });
     }
 }
 
@@ -893,7 +1035,7 @@ function setBackgroundActive(active) {
  * @param {string} [opts.summary] - Short description text
  * @param {string[]} [opts.details] - Extra detail tags
  */
-export function addBackgroundEvent({ icon, verb, color, summary = '', details = [] }) {
+export function addBackgroundEvent({ icon, verb, color, summary = '', details = [], action = null }) {
     const item = {
         id: nextId++,
         type: 'background',
@@ -904,6 +1046,7 @@ export function addBackgroundEvent({ icon, verb, color, summary = '', details = 
         timestamp: Date.now(),
         details: details.filter(Boolean),
     };
+    if (action) item.action = action;
     addFeedItems([item]);
 }
 

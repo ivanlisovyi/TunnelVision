@@ -507,6 +507,18 @@
     cursor: not-allowed;
 }
 
+.tv-btn-success {
+    background: rgba(0, 184, 148, 0.2);
+    border-color: rgba(0, 184, 148, 0.4);
+    color: #00b894;
+}
+
+.tv-btn-error {
+    background: rgba(214, 48, 49, 0.15);
+    border-color: rgba(214, 48, 49, 0.3);
+    color: #d63031;
+}
+
 .tv-btn-sm {
     padding: 3px 10px;
     font-size: 0.8em;
@@ -2131,6 +2143,46 @@
     font-size: 11px;
     opacity: 0.6;
     padding: 4px 0;
+}
+
+/* Tool item expand — tinted blue instead of pink */
+.tv-feed-expand-tool {
+    background: rgba(108, 92, 231, 0.04);
+}
+
+/* Background item expand — tinted purple */
+.tv-feed-expand-bg {
+    background: rgba(162, 155, 254, 0.04);
+}
+
+.tv-feed-expand-retrieved {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.tv-feed-expand-retrieved:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.tv-feed-expand-entry-header {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.tv-feed-expand-entry-title {
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--SmartThemeBodyColor);
+}
+
+.tv-feed-expand-entry-book {
+    font-size: 10px;
+    opacity: 0.5;
 }
 
 /* ===== Stats Summary Bar (Feed) ===== */
