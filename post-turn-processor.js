@@ -373,7 +373,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '',
         'WHEN: For each fact, provide the approximate in-world time it occurred (e.g. "Day 3, evening", "Day 5, morning", "early January 2025"). Use the Current In-World Time provided above as reference. If the timing is unclear, use "unknown".',
         '',
-        'KEYS: For each fact, provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this fact?',
+        'KEYS: For each fact, provide 4-10 short keywords for cross-referencing. Always include the FULL name of every character involved — use the most complete name known (e.g. "Elena Blackwood" not just "Elena", "John Wald" not just "John"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this fact?',
         '',
         'TASK 2 — SCENE CHANGE DETECTION:',
         'Determine if a MAJOR NARRATIVE BOUNDARY just occurred. The bar is HIGH — a scene change means the story has moved to a fundamentally different context, not just a minor shift within the same ongoing situation.',
@@ -638,6 +638,57 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
     return result;
 }
 
+// ── Name Variant Helpers ─────────────────────────────────────────
+
+/**
+ * Check if `shorter` is a name variant of `longer` — i.e. every word in
+ * the shorter name appears as a complete word in the longer name.
+ * "john" → "john wald" ✓,  "john" → "johnny" ✗
+ */
+function isNameVariant(shorter, longer) {
+    if (shorter.length >= longer.length) return false;
+    const longerWords = longer.split(/\s+/);
+    const shorterWords = shorter.split(/\s+/);
+    return shorterWords.every(sw => longerWords.includes(sw));
+}
+
+/**
+ * Check if two names refer to the same character (exact match or one is a
+ * word-level subset of the other).
+ */
+function namesOverlap(a, b) {
+    return a === b || isNameVariant(a, b) || isNameVariant(b, a);
+}
+
+/**
+ * Merge fact counts for name variants. "john" (3) + "john wald" (4) → "john wald" (7).
+ * Keeps the longest (most specific) name as the canonical form.
+ * @param {Map<string, number>} nameCountMap
+ * @returns {Map<string, number>}
+ */
+function consolidateNameVariants(nameCountMap) {
+    const names = [...nameCountMap.keys()].sort((a, b) => b.length - a.length);
+    const merged = new Map();
+    const consumed = new Set();
+
+    for (const name of names) {
+        if (consumed.has(name)) continue;
+        let totalCount = nameCountMap.get(name);
+
+        for (const other of names) {
+            if (other === name || consumed.has(other)) continue;
+            if (isNameVariant(other, name)) {
+                totalCount += nameCountMap.get(other);
+                consumed.add(other);
+            }
+        }
+
+        merged.set(name, totalCount);
+    }
+
+    return merged;
+}
+
 // ── Tracker Suggestion ───────────────────────────────────────────
 
 const TRACKER_SUGGESTION_THRESHOLD = 5;
@@ -698,13 +749,9 @@ async function checkTrackerSuggestions(activeBooks) {
 
                 if (isSummaryTitle(title)) continue;
 
-                // Count this fact toward each character name in its keys
                 const keys = entry.key || [];
                 for (const k of keys) {
                     const name = String(k).trim().toLowerCase();
-                    // Heuristic: character names are capitalized single/two words, 2+ chars.
-                    // We rely on the fact that post-turn extraction always includes
-                    // character names in keys with canonical form.
                     if (name.length >= 2) {
                         characterFactCounts.set(name, (characterFactCounts.get(name) || 0) + 1);
                     }
@@ -712,13 +759,18 @@ async function checkTrackerSuggestions(activeBooks) {
             }
         }
 
-        // Find characters with enough facts and no tracker
-        for (const [name, count] of characterFactCounts) {
-            if (count < TRACKER_SUGGESTION_THRESHOLD) continue;
-            if (trackerCharacters.has(name)) continue;
-            if (alreadySuggested.has(name)) continue;
+        // Merge counts for name variants: "john" + "john wald" → "john wald"
+        const consolidated = consolidateNameVariants(characterFactCounts);
 
-            // Capitalize for display
+        for (const [name, count] of consolidated) {
+            if (count < TRACKER_SUGGESTION_THRESHOLD) continue;
+
+            // Check against existing trackers with variant awareness
+            if ([...trackerCharacters].some(tc => namesOverlap(name, tc))) continue;
+
+            // Check against already-suggested names with variant awareness
+            if ([...alreadySuggested].some(s => namesOverlap(name, s))) continue;
+
             const displayName = name.replace(/\b\w/g, c => c.toUpperCase());
 
             addBackgroundEvent({
@@ -764,7 +816,7 @@ export async function createTrackerForCharacter(characterName) {
             const title = (entry.comment || '').trim();
             if (isTrackerTitle(title) || isSummaryTitle(title)) continue;
             const keys = (entry.key || []).map(k => String(k).trim().toLowerCase());
-            if (keys.includes(nameLower)) {
+            if (keys.some(k => namesOverlap(k, nameLower))) {
                 facts.push((entry.content || title).trim());
             }
         }
