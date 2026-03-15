@@ -15,6 +15,7 @@ import {
     createWorldInfoEntry,
     saveWorldInfo,
 } from '../../../world-info.js';
+import { getContext } from '../../../st-context.js';
 import {
     getTree,
     saveTree,
@@ -232,6 +233,64 @@ export function escapeHtml(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// ── Entry Version History ─────────────────────────────────────────
+
+const VERSION_METADATA_KEY = 'tunnelvision_entry_history';
+const MAX_VERSIONS_PER_ENTRY = 5;
+
+/**
+ * Record a version snapshot for an entry before it's mutated.
+ * Stored in chat_metadata keyed by `bookName:uid`.
+ * @param {string} bookName
+ * @param {number} uid
+ * @param {Object} opts
+ * @param {string} opts.source - What triggered the change (e.g. 'tool', 'post-turn', 'lifecycle', 'merge', 'split')
+ * @param {string} [opts.previousContent] - Content before the change
+ * @param {string} [opts.previousTitle] - Title before the change
+ */
+export function recordEntryVersion(bookName, uid, { source, previousContent, previousTitle }) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const store = context.chatMetadata[VERSION_METADATA_KEY] || {};
+        const key = `${bookName}:${uid}`;
+        const versions = store[key] || [];
+
+        versions.push({
+            timestamp: Date.now(),
+            source,
+            previousContent: previousContent ?? null,
+            previousTitle: previousTitle ?? null,
+        });
+
+        // FIFO cap
+        while (versions.length > MAX_VERSIONS_PER_ENTRY) {
+            versions.shift();
+        }
+
+        store[key] = versions;
+        context.chatMetadata[VERSION_METADATA_KEY] = store;
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+/**
+ * Retrieve version history for an entry.
+ * @param {string} bookName
+ * @param {number} uid
+ * @returns {Array<{timestamp: number, source: string, previousContent: string|null, previousTitle: string|null}>}
+ */
+export function getEntryVersions(bookName, uid) {
+    try {
+        const context = getContext();
+        const store = context.chatMetadata?.[VERSION_METADATA_KEY];
+        if (!store) return [];
+        return store[`${bookName}:${uid}`] || [];
+    } catch {
+        return [];
+    }
+}
+
 /**
  * Create a new lorebook entry and assign it to a tree node.
  * @param {string} bookName - Lorebook name
@@ -336,6 +395,13 @@ export async function updateEntry(bookName, uid, updates) {
     if (!entry) {
         throw new Error(`Entry UID ${uid} not found in lorebook "${bookName}".`);
     }
+
+    // Snapshot before mutation
+    recordEntryVersion(bookName, uid, {
+        source: updates._source || 'tool',
+        previousContent: entry.content || '',
+        previousTitle: entry.comment || '',
+    });
 
     const changed = [];
 
@@ -557,6 +623,19 @@ export async function mergeEntries(bookName, keepUid, removeUid, opts = {}) {
 
     const removedComment = removeEntry.comment || `Entry #${removeUid}`;
 
+    // Snapshot both entries before mutation
+    const mergeSource = opts._source || 'merge';
+    recordEntryVersion(bookName, keepUid, {
+        source: mergeSource,
+        previousContent: keepEntry.content || '',
+        previousTitle: keepEntry.comment || '',
+    });
+    recordEntryVersion(bookName, removeUid, {
+        source: mergeSource,
+        previousContent: removeEntry.content || '',
+        previousTitle: removeEntry.comment || '',
+    });
+
     // Merge content
     if (opts.mergedContent && opts.mergedContent.trim()) {
         keepEntry.content = opts.mergedContent.trim();
@@ -644,6 +723,14 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
     if (!original) {
         throw new Error(`Entry UID ${uid} not found in lorebook "${bookName}".`);
     }
+
+    // Snapshot before mutation
+    recordEntryVersion(bookName, uid, {
+        source: 'split',
+        previousContent: original.content || '',
+        previousTitle: original.comment || '',
+    });
+
     const wasTracker = isTrackerUid(bookName, uid) || isTrackerTitle(original.comment);
 
     const tree = getTree(bookName);
@@ -681,6 +768,84 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
         newTitle: newResult.comment,
         nodeLabel: newResult.nodeLabel,
     };
+}
+
+// ── Entry Mutation Transactions ───────────────────────────────────
+
+/**
+ * @typedef {Object} EntrySnapshot
+ * @property {number} uid
+ * @property {string} content
+ * @property {string} comment
+ * @property {string[]} keys
+ * @property {boolean} disable
+ */
+
+/**
+ * Snapshot an entry's mutable fields for rollback.
+ * @param {Object} entry
+ * @returns {EntrySnapshot}
+ */
+function snapshotEntry(entry) {
+    return {
+        uid: entry.uid,
+        content: entry.content || '',
+        comment: entry.comment || '',
+        keys: [...(entry.key || [])],
+        disable: !!entry.disable,
+    };
+}
+
+/**
+ * Run an async operation as a transaction that rolls back on failure.
+ * Captures the state of specified entries before execution, and restores
+ * them if the operation throws.
+ *
+ * @param {string} bookName
+ * @param {number[]} uids - Entry UIDs to snapshot before the operation
+ * @param {(bookData: Object) => Promise<T>} operation - The mutation to perform
+ * @returns {Promise<T>}
+ * @template T
+ */
+export async function withEntryTransaction(bookName, uids, operation) {
+    const bookData = await getCachedWorldInfo(bookName);
+    if (!bookData?.entries) {
+        throw new Error(`Lorebook "${bookName}" not found for transaction.`);
+    }
+
+    // Snapshot entries before mutation
+    const snapshots = [];
+    for (const uid of uids) {
+        const entry = findEntryByUid(bookData.entries, uid);
+        if (entry) snapshots.push(snapshotEntry(entry));
+    }
+
+    try {
+        return await operation(bookData);
+    } catch (err) {
+        // Rollback: restore snapshotted entries
+        console.warn(`[TunnelVision] Transaction failed, rolling back ${snapshots.length} entries:`, err.message);
+        const rollbackData = await getCachedWorldInfo(bookName);
+        if (rollbackData?.entries) {
+            let restored = 0;
+            for (const snap of snapshots) {
+                const entry = findEntryByUid(rollbackData.entries, snap.uid);
+                if (entry) {
+                    entry.content = snap.content;
+                    entry.comment = snap.comment;
+                    entry.key = snap.keys;
+                    entry.disable = snap.disable;
+                    restored++;
+                }
+            }
+            if (restored > 0) {
+                await saveWorldInfo(bookName, rollbackData, true);
+                invalidateWorldInfoCache(bookName);
+                console.log(`[TunnelVision] Rolled back ${restored} entries in "${bookName}"`);
+            }
+        }
+        throw err;
+    }
 }
 
 // --- Shared helpers ---

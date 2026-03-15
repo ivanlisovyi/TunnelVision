@@ -237,9 +237,13 @@ async function runBackgroundSummary(chatId, count) {
             color: '#d63031',
             summary: e.message || 'Unknown error',
         });
-    } finally {
         _backgroundSummaryRunning = false;
-        task.end();
+        task.fail(e, () => runBackgroundSummary(chatId, count));
+    } finally {
+        if (!task._ended) {
+            _backgroundSummaryRunning = false;
+            task.end();
+        }
     }
 }
 

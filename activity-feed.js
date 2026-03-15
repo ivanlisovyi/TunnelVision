@@ -8,13 +8,13 @@ import { chat, eventSource, event_types, saveChatConditional } from '../../../..
 import { getContext } from '../../../st-context.js';
 import { ALL_TOOL_NAMES, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getSettings, isLorebookEnabled, getTree, isSummaryTitle, isTrackerTitle } from './tree-store.js';
-import { findEntry, getCachedWorldInfo } from './entry-manager.js';
+import { findEntry, getCachedWorldInfo, getEntryVersions } from './entry-manager.js';
 import { openTreeEditorForBook } from './ui-controller.js';
 import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState } from './world-state.js';
 import { createTrackerForCharacter } from './post-turn-processor.js';
 import { getAllArcs } from './arc-tracker.js';
 import { countStaleEntries } from './entry-scoring.js';
-import { _registerFeedCallbacks, addBackgroundEvent, markBackgroundStart, registerBackgroundTask, cancelBackgroundTask, getActiveTasks } from './background-events.js';
+import { _registerFeedCallbacks, addBackgroundEvent, markBackgroundStart, registerBackgroundTask, cancelBackgroundTask, getActiveTasks, getFailedTasks, retryFailedTask, dismissFailedTask } from './background-events.js';
 
 const MAX_FEED_ITEMS = 50;
 const MAX_RENDERED_RETRIEVED_ENTRIES = 5;
@@ -602,10 +602,17 @@ function renderAllItems() {
 
     // Active background tasks — shown at top in 'all' and 'bg' tabs
     const activeTasks = getActiveTasks();
+    const failedTasks = getFailedTasks();
     const showActiveTasks = (tab === 'all' || tab === 'bg') && activeTasks.size > 0;
+    const showFailedTasks = (tab === 'all' || tab === 'bg') && failedTasks.size > 0;
     if (showActiveTasks) {
         for (const task of activeTasks.values()) {
             panelBody.appendChild(buildActiveTaskElement(task));
+        }
+    }
+    if (showFailedTasks) {
+        for (const task of failedTasks.values()) {
+            panelBody.appendChild(buildFailedTaskElement(task));
         }
     }
 
@@ -617,7 +624,7 @@ function renderAllItems() {
         return true;
     });
 
-    if (filtered.length === 0 && !showActiveTasks) {
+    if (filtered.length === 0 && !showActiveTasks && !showFailedTasks) {
         renderEmptyState(tab);
         return;
     }
@@ -658,6 +665,58 @@ function buildActiveTaskElement(task) {
         row.appendChild(cancelBtn);
     }
 
+    return row;
+}
+
+function buildFailedTaskElement(task) {
+    const row = el('div', 'tv-float-item tv-failed-task');
+
+    const iconWrap = el('div', 'tv-float-item-icon');
+    iconWrap.style.color = '#d63031';
+    iconWrap.appendChild(icon('fa-triangle-exclamation'));
+    row.appendChild(iconWrap);
+
+    const body = el('div', 'tv-float-item-body');
+    const textRow = el('div', 'tv-float-item-row');
+    const verb = el('span', 'tv-float-item-verb', `${task.label} failed`);
+    verb.style.color = '#d63031';
+    textRow.appendChild(verb);
+    textRow.appendChild(el('span', 'tv-float-item-summary', task.errorMessage));
+    body.appendChild(textRow);
+    row.appendChild(body);
+
+    const btnGroup = el('div', 'tv-feed-expand-actions');
+    btnGroup.style.cssText = 'display:flex;gap:4px;align-items:center;flex-shrink:0;';
+
+    const retryBtn = el('button', 'tv-failed-task-retry');
+    if (task.retrying) {
+        retryBtn.appendChild(icon('fa-spinner fa-spin'));
+        retryBtn.append(' Retrying…');
+        retryBtn.disabled = true;
+    } else {
+        retryBtn.appendChild(icon('fa-rotate-right'));
+        retryBtn.append(' Retry');
+        retryBtn.addEventListener('click', async () => {
+            retryBtn.disabled = true;
+            retryBtn.replaceChildren(icon('fa-spinner fa-spin'));
+            retryBtn.append(' Retrying…');
+            const success = await retryFailedTask(task.id);
+            if (success) {
+                retryBtn.replaceChildren(icon('fa-check'));
+                retryBtn.append(' Done');
+                retryBtn.classList.add('tv-retry-success');
+            }
+        });
+    }
+    btnGroup.appendChild(retryBtn);
+
+    const dismissBtn = el('button', 'tv-failed-task-retry');
+    dismissBtn.title = 'Dismiss';
+    dismissBtn.appendChild(icon('fa-xmark'));
+    dismissBtn.addEventListener('click', () => dismissFailedTask(task.id));
+    btnGroup.appendChild(dismissBtn);
+
+    row.appendChild(btnGroup);
     return row;
 }
 
@@ -815,6 +874,23 @@ async function toggleFeedEntryExpand(row, item) {
             }, 1500);
         });
         actions.appendChild(copyBtn);
+
+        const versions = getEntryVersions(item.lorebook, item.uid);
+        if (versions.length > 0) {
+            const histBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
+            histBtn.appendChild(icon('fa-clock-rotate-left'));
+            histBtn.append(` History (${versions.length})`);
+            histBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const existing = expandDiv.querySelector('.tv-version-history');
+                if (existing) {
+                    existing.remove();
+                    return;
+                }
+                expandDiv.appendChild(buildVersionHistoryPanel(versions));
+            });
+            actions.appendChild(histBtn);
+        }
 
         expandDiv.appendChild(actions);
     } catch (err) {
@@ -1983,6 +2059,47 @@ export function buildToolSummary(toolName, params, result, retrievedEntries = []
         default:
             return '';
     }
+}
+
+// ── Version History Panel ──────────────────────────────────────
+
+function buildVersionHistoryPanel(versions) {
+    const panel = el('div', 'tv-version-history');
+    const header = el('div', 'tv-version-history-header');
+    header.appendChild(icon('fa-clock-rotate-left'));
+    header.append(` Version History (${versions.length})`);
+    panel.appendChild(header);
+
+    // Show newest first
+    for (const ver of [...versions].reverse()) {
+        const item = el('div', 'tv-version-history-item');
+
+        const meta = el('div', 'tv-version-history-meta');
+        const sourceBadge = el('span', 'tv-version-history-source', ver.source || 'unknown');
+        meta.appendChild(sourceBadge);
+        const time = new Date(ver.timestamp);
+        meta.appendChild(el('span', 'tv-version-history-time', time.toLocaleString([], {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+        })));
+        item.appendChild(meta);
+
+        if (ver.previousTitle) {
+            const titleRow = el('div', 'tv-version-history-title');
+            titleRow.appendChild(el('span', 'tv-version-history-label', 'Title: '));
+            titleRow.appendChild(el('span', null, ver.previousTitle));
+            item.appendChild(titleRow);
+        }
+
+        if (ver.previousContent) {
+            const contentDiv = el('div', 'tv-version-history-content');
+            contentDiv.textContent = ver.previousContent;
+            item.appendChild(contentDiv);
+        }
+
+        panel.appendChild(item);
+    }
+
+    return panel;
 }
 
 function truncate(str, max) {

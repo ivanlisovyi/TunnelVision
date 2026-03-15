@@ -549,10 +549,14 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
             color: '#d63031',
             summary: e.message || 'Unknown error',
         });
+        _updateRunning = false;
+        task.fail(e, () => updateWorldState(true));
         return null;
     } finally {
-        _updateRunning = false;
-        task.end();
+        if (!task._ended) {
+            _updateRunning = false;
+            task.end();
+        }
     }
 }
 

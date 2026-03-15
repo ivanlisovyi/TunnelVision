@@ -20,7 +20,7 @@ import { eventSource, event_types, generateQuietPrompt } from '../../../../scrip
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTree, saveTree, createTreeNode, addEntryToNode, removeEntryFromTree, getAllEntryUids, isSummaryTitle, isTrackerTitle, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid, updateEntry, forgetEntry } from './entry-manager.js';
+import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid, updateEntry, forgetEntry, recordEntryVersion } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getChatId, shouldSkipAiMessage, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
@@ -175,10 +175,14 @@ export async function runLifecycleMaintenance(force = false) {
             color: '#d63031',
             summary: e.message || 'Unknown error',
         });
+        _lifecycleRunning = false;
+        task.fail(e, () => runLifecycleMaintenance(true));
         return null;
     } finally {
-        _lifecycleRunning = false;
-        task.end();
+        if (!task._ended) {
+            _lifecycleRunning = false;
+            task.end();
+        }
     }
 }
 
@@ -276,6 +280,7 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
                     await updateEntry(bookName, keepUid, {
                         content: pair.merged_content,
                         ...(pair.merged_title ? { comment: pair.merged_title } : {}),
+                        _source: 'lifecycle',
                     });
                 }
 
@@ -406,6 +411,12 @@ async function compressVerboseEntries(bookName, bookData, chatId) {
             const uidMap = buildUidMap(freshBookData.entries);
             const freshEntry = uidMap.get(entry.uid);
             if (!freshEntry) continue;
+
+            recordEntryVersion(bookName, entry.uid, {
+                source: 'lifecycle',
+                previousContent: freshEntry.content || '',
+                previousTitle: freshEntry.comment || '',
+            });
 
             freshEntry.content = compressed;
             await saveWorldInfo(bookName, freshBookData, true);

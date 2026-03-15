@@ -2201,6 +2201,128 @@
     opacity: 0.5;
 }
 
+/* ===== Version History ===== */
+.tv-version-history {
+    margin-top: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.12);
+    overflow: hidden;
+}
+
+.tv-version-history-header {
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--SmartThemeBodyColor, #ccc);
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tv-version-history-item {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.tv-version-history-item:last-child {
+    border-bottom: none;
+}
+
+.tv-version-history-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.tv-version-history-source {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(108, 92, 231, 0.2);
+    color: #a29bfe;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.tv-version-history-time {
+    font-size: 10px;
+    opacity: 0.5;
+}
+
+.tv-version-history-title {
+    font-size: 11px;
+    margin-bottom: 3px;
+    color: var(--SmartThemeBodyColor, #ccc);
+}
+
+.tv-version-history-label {
+    font-weight: 600;
+    opacity: 0.6;
+    font-size: 10px;
+}
+
+.tv-version-history-content {
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 120px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    padding: 4px 6px;
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 4px;
+    color: var(--SmartThemeBodyColor, #ccc);
+    opacity: 0.8;
+}
+
+.tv-history-btn {
+    margin-top: 6px;
+}
+
+/* ===== Failed Task / Retry ===== */
+.tv-float-item.tv-failed-task {
+    border-left: 2px solid #d63031;
+    background: rgba(214, 48, 49, 0.04);
+}
+
+.tv-failed-task-retry {
+    padding: 2px 8px;
+    font-size: 10px;
+    background: rgba(214, 48, 49, 0.15);
+    border: 1px solid rgba(214, 48, 49, 0.3);
+    border-radius: 4px;
+    color: #ff7675;
+    cursor: pointer;
+    margin-left: auto;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: background 0.15s;
+}
+
+.tv-failed-task-retry:hover {
+    background: rgba(214, 48, 49, 0.25);
+    border-color: rgba(214, 48, 49, 0.5);
+}
+
+.tv-failed-task-retry:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.tv-failed-task-retry.tv-retry-success {
+    background: rgba(0, 184, 148, 0.2);
+    border-color: rgba(0, 184, 148, 0.4);
+    color: #00b894;
+}
+
 /* ===== Stats Summary Bar (Feed) ===== */
 .tv-feed-stats {
     display: flex;

@@ -91,6 +91,10 @@ export function markBackgroundStart() {
 const _activeTasks = new Map();
 let _nextTaskId = 0;
 
+/** @type {Map<number, FailedTask>} */
+const _failedTasks = new Map();
+let _nextFailedTaskId = 0;
+
 /**
  * @typedef {Object} BackgroundTask
  * @property {number} id
@@ -100,6 +104,19 @@ let _nextTaskId = 0;
  * @property {number} startedAt
  * @property {boolean} cancelled - Check this at async boundaries to abort early
  * @property {() => void} end - Call when the task finishes (success, error, or cancel)
+ * @property {(error: Error, retryFn: Function) => void} fail - Transition to failed state with retry
+ */
+
+/**
+ * @typedef {Object} FailedTask
+ * @property {number} id
+ * @property {string} label
+ * @property {string} icon
+ * @property {string} color
+ * @property {number} failedAt
+ * @property {string} errorMessage
+ * @property {Function} retryFn - Closure to re-invoke the operation
+ * @property {boolean} retrying - Whether a retry is currently in progress
  */
 
 /**
@@ -130,6 +147,27 @@ export function registerBackgroundTask({ label, icon: taskIcon = 'fa-gear', colo
             setBackgroundActive(false);
             _refreshTasksUI?.();
         },
+        fail(error, retryFn) {
+            if (task._ended) return;
+            task._ended = true;
+            _activeTasks.delete(id);
+            setBackgroundActive(false);
+
+            if (typeof retryFn === 'function') {
+                const failedId = _nextFailedTaskId++;
+                _failedTasks.set(failedId, {
+                    id: failedId,
+                    label,
+                    icon: taskIcon,
+                    color,
+                    failedAt: Date.now(),
+                    errorMessage: error?.message || 'Unknown error',
+                    retryFn,
+                    retrying: false,
+                });
+            }
+            _refreshTasksUI?.();
+        },
     };
 
     _activeTasks.set(id, task);
@@ -154,4 +192,43 @@ export function cancelBackgroundTask(id) {
 /** @returns {ReadonlyMap<number, BackgroundTask>} */
 export function getActiveTasks() {
     return _activeTasks;
+}
+
+// ── Failed Task Retry ────────────────────────────────────────────
+
+/** @returns {ReadonlyMap<number, FailedTask>} */
+export function getFailedTasks() {
+    return _failedTasks;
+}
+
+/**
+ * Retry a failed background task by its failed-task ID.
+ * @param {number} failedId
+ * @returns {Promise<boolean>} true if retry was initiated
+ */
+export async function retryFailedTask(failedId) {
+    const failedTask = _failedTasks.get(failedId);
+    if (!failedTask || failedTask.retrying) return false;
+
+    failedTask.retrying = true;
+    _refreshTasksUI?.();
+
+    try {
+        await failedTask.retryFn();
+        _failedTasks.delete(failedId);
+        _refreshTasksUI?.();
+        return true;
+    } catch (e) {
+        failedTask.retrying = false;
+        failedTask.failedAt = Date.now();
+        failedTask.errorMessage = e?.message || 'Retry failed';
+        _refreshTasksUI?.();
+        return false;
+    }
+}
+
+/** Dismiss a failed task without retrying. */
+export function dismissFailedTask(failedId) {
+    _failedTasks.delete(failedId);
+    _refreshTasksUI?.();
 }

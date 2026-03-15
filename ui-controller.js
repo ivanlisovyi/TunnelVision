@@ -43,7 +43,7 @@ import { runDiagnostics } from './diagnostics.js';
 import { applyRecurseLimit } from './tool-registry.js';
 import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
-import { escapeHtml } from './entry-manager.js';
+import { escapeHtml, getEntryVersions } from './entry-manager.js';
 import { computeEntryQuality, getQualityRating, getQualityColor, qualityTooltip, buildQualityContext } from './entry-scoring.js';
 
 
@@ -1735,6 +1735,24 @@ async function onOpenTreeEditor() {
                     $expand.append($('<div class="tv-expand-content"></div>').text(entry.content));
                 }
 
+                // Version history button
+                const versions = getEntryVersions(bookName, uid);
+                if (versions.length > 0) {
+                    const $histBtn = $(`<button class="tv-btn tv-btn-sm tv-btn-secondary tv-history-btn"><i class="fa-solid fa-clock-rotate-left"></i> History (${versions.length})</button>`);
+                    $histBtn.on('click', function (e) {
+                        e.stopPropagation();
+                        const $existing = $expand.find('.tv-version-history');
+                        if ($existing.length) {
+                            $existing.slideUp(150, () => $existing.remove());
+                            return;
+                        }
+                        const $histPanel = buildVersionHistoryElement(versions);
+                        $expand.append($histPanel);
+                        $histPanel.slideDown(150);
+                    });
+                    $expand.append($histBtn);
+                }
+
                 $row.after($expand);
                 $expand.slideDown(150);
             });
@@ -1815,6 +1833,42 @@ async function onOpenTreeEditor() {
     // When popup closes, refresh sidebar UI
     loadLorebookUI(bookName);
     populateLorebookDropdown();
+}
+
+// ─── Version History (Tree Editor) ────────────────────────────────
+
+function buildVersionHistoryElement(versions) {
+    const $panel = $('<div class="tv-version-history" style="display:none"></div>');
+    const $header = $('<div class="tv-version-history-header"><i class="fa-solid fa-clock-rotate-left"></i> Version History</div>');
+    $panel.append($header);
+
+    for (const ver of [...versions].reverse()) {
+        const $item = $('<div class="tv-version-history-item"></div>');
+        const time = new Date(ver.timestamp);
+        const timeStr = time.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+        const $meta = $('<div class="tv-version-history-meta"></div>');
+        $meta.append($(`<span class="tv-version-history-source"></span>`).text(ver.source || 'unknown'));
+        $meta.append($(`<span class="tv-version-history-time"></span>`).text(timeStr));
+        $item.append($meta);
+
+        if (ver.previousTitle) {
+            const $titleRow = $('<div class="tv-version-history-title"></div>');
+            $titleRow.append('<span class="tv-version-history-label">Title: </span>');
+            $titleRow.append($('<span></span>').text(ver.previousTitle));
+            $item.append($titleRow);
+        }
+
+        if (ver.previousContent) {
+            const $content = $('<div class="tv-version-history-content"></div>');
+            $content.text(ver.previousContent);
+            $item.append($content);
+        }
+
+        $panel.append($item);
+    }
+
+    return $panel;
 }
 
 // ─── Tree Editor Helpers ─────────────────────────────────────────

@@ -295,12 +295,18 @@ export async function runPostTurnProcessor(force = false) {
             color: '#d63031',
             summary: e.message || 'Unknown error',
         });
-        return null;
-    } finally {
         _liveRollback = null;
         _processorRunning = false;
         _currentTask = null;
-        task.end();
+        task.fail(e, () => runPostTurnProcessor(true));
+        return null;
+    } finally {
+        if (!task._ended) {
+            _liveRollback = null;
+            _processorRunning = false;
+            _currentTask = null;
+            task.end();
+        }
 
         if (_swipePending) {
             _swipePending = false;
@@ -666,6 +672,7 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
                 const previousContent = tracker.content;
                 await updateEntry(tracker.book, Number(update.uid), {
                     content: String(update.content).trim(),
+                    _source: 'post-turn',
                 });
                 result.updated++;
                 result.reverts.push({ uid: tracker.uid, book: tracker.book, previousContent });
