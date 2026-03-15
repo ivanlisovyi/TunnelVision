@@ -60,12 +60,29 @@ const ANALYTICAL_SYSTEM_PROMPT = [
  * Generate text via generateRaw with a focused analytical system prompt.
  * Skips the full chat/character/persona pipeline that generateQuietPrompt uses.
  * Strips thinking/reasoning blocks from the response.
+ *
+ * Enhanced (4B): If a sidecar background model is configured, routes through
+ * the sidecar transport layer instead. Falls back to generateRaw transparently.
+ *
  * @param {Object} opts
  * @param {string} opts.prompt - The prompt to send
  * @param {string} [opts.systemPrompt] - Override the default analytical system prompt
  * @returns {Promise<string>}
  */
 export async function generateAnalytical({ prompt, systemPrompt = ANALYTICAL_SYSTEM_PROMPT }) {
+    // 4B: Try sidecar first if configured
+    try {
+        const { isSidecarConfigured, sidecarGenerate } = await import('./llm-sidecar.js');
+        if (isSidecarConfigured()) {
+            const result = await sidecarGenerate({ prompt, systemPrompt });
+            if (result && typeof result === 'string' && result.trim()) {
+                return result;
+            }
+        }
+    } catch (e) {
+        console.debug('[TunnelVision] Sidecar generation failed, falling back to generateRaw:', e.message);
+    }
+
     const { generateRaw } = getContext();
     const result = await generateRaw({ prompt, systemPrompt });
     return typeof result === 'string' ? result.replace(THINK_BLOCK_RE, '').trim() : result;

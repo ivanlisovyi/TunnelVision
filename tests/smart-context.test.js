@@ -15,6 +15,9 @@ vi.mock('../entry-manager.js', () => ({
 vi.mock('../world-state.js', () => ({
     getWorldStateSections: vi.fn(() => ({})),
 }));
+vi.mock('../arc-tracker.js', () => ({
+    getActiveArcs: vi.fn(() => []),
+}));
 // Override the st-context mock for this file so we can control chatMetadata
 vi.mock('../../../st-context.js', () => ({
     getContext: () => ({
@@ -79,6 +82,97 @@ describe('scoreEntry', () => {
     it('handles entry with missing key array', () => {
         const entry = { comment: 'test' };
         expect(scoreEntry(entry, 'test entry')).toBe(10);
+    });
+
+    // ── 1A: Semantic key expansion (derived alias keys) ──
+
+    it('gives +2 for a proper noun phrase derived from content first sentence', () => {
+        const entry = {
+            comment: 'Elena',
+            key: [],
+            uid: 1,
+            content: 'Elena trained at the Grand Cathedral under Master Aldric.',
+        };
+        // "grand cathedral" is a proper noun phrase derived from the first sentence
+        expect(scoreEntry(entry, 'they arrived at the grand cathedral')).toBeGreaterThanOrEqual(2);
+    });
+
+    it('gives +2 for a role descriptor derived from content first sentence', () => {
+        const entry = {
+            comment: 'Kael',
+            key: [],
+            uid: 2,
+            content: 'Kael is a wandering merchant who travels between villages.',
+        };
+        // "wandering merchant" is a role descriptor ("a wandering merchant who...")
+        expect(scoreEntry(entry, 'a wandering merchant appeared at the gate')).toBeGreaterThanOrEqual(2);
+    });
+
+    it('gives +2 for a capitalized word derived from content (not first word)', () => {
+        const entry = {
+            comment: '',
+            key: [],
+            uid: 3,
+            content: 'The artifact was forged by Aldric in the old forge.',
+        };
+        // "aldric" is a capitalized word in the first sentence (not the first word)
+        expect(scoreEntry(entry, 'aldric appeared from nowhere')).toBeGreaterThanOrEqual(2);
+    });
+
+    it('stacks derived alias score with title and key scores', () => {
+        const entry = {
+            comment: 'Elena',
+            key: ['magic'],
+            uid: 4,
+            content: 'Elena is a powerful sorceress who commands fire.',
+        };
+        // title "elena" => +10, key "magic" => +3, derived "powerful sorceress" => +2
+        const score = scoreEntry(entry, 'elena used magic, the powerful sorceress');
+        expect(score).toBeGreaterThanOrEqual(15);
+    });
+
+    it('does not derive keys from entries with empty content', () => {
+        const entry = { comment: '', key: [], uid: 5, content: '' };
+        expect(scoreEntry(entry, 'anything at all')).toBe(0);
+    });
+
+    it('derives multiple alias keys from a rich first sentence', () => {
+        const entry = {
+            comment: '',
+            key: [],
+            uid: 6,
+            content: 'Lord Varen is a reclusive nobleman who rules over Stonereach Keep.',
+        };
+        // Should derive "lord varen" (proper noun phrase), "varen" (capitalized), "stonereach keep" (proper noun phrase)
+        // and "reclusive nobleman" (role descriptor)
+        const score1 = scoreEntry(entry, 'lord varen was displeased');
+        const score2 = scoreEntry(entry, 'the reclusive nobleman retreated');
+        expect(score1).toBeGreaterThanOrEqual(2);
+        expect(score2).toBeGreaterThanOrEqual(2);
+    });
+
+    it('does not give alias bonus for short derived keys under 3 chars', () => {
+        const entry = {
+            comment: '',
+            key: [],
+            uid: 7,
+            content: 'A. B. Smith is an old man who lives nearby.',
+        };
+        // Single-letter words should not be derived as alias keys
+        expect(scoreEntry(entry, 'a b')).toBe(0);
+    });
+
+    it('caches derived keys across calls (second call uses cache)', () => {
+        const entry = {
+            comment: '',
+            key: [],
+            uid: 8,
+            content: 'Captain Thorne patrols the northern border.',
+        };
+        const score1 = scoreEntry(entry, 'thorne was spotted');
+        const score2 = scoreEntry(entry, 'thorne returned');
+        expect(score1).toBe(score2);
+        expect(score1).toBeGreaterThanOrEqual(2);
     });
 });
 

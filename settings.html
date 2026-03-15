@@ -918,6 +918,115 @@
 
                         <hr class="tv-adv-divider" />
 
+                        <!-- ═══ Background Model (Sidecar) ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Background Model (Sidecar)</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Optional: Configure a separate, typically cheaper LLM for background operations (smart context reranking, embeddings, analytical tasks). When configured, background work is routed through this model instead of the main chat API.
+                            </div>
+
+                            <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                <label class="tv-label" for="tv_sidecar_format">API Format</label>
+                                <select id="tv_sidecar_format" class="tv-select">
+                                    <option value="openai">OpenAI-Compatible</option>
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="google">Google (Gemini)</option>
+                                </select>
+                            </div>
+
+                            <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                <label class="tv-label" for="tv_sidecar_endpoint">API Endpoint</label>
+                                <input id="tv_sidecar_endpoint" type="text" class="tv-input" placeholder="e.g. https://api.openai.com/v1" />
+                            </div>
+
+                            <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                <label class="tv-label" for="tv_sidecar_api_key">API Key</label>
+                                <input id="tv_sidecar_api_key" type="password" class="tv-input" placeholder="sk-..." autocomplete="off" />
+                            </div>
+
+                            <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                <label class="tv-label" for="tv_sidecar_model">Model Name</label>
+                                <input id="tv_sidecar_model" type="text" class="tv-input" placeholder="e.g. gpt-4o-mini, claude-3-haiku, gemini-1.5-flash" />
+                            </div>
+
+                            <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                <label class="tv-label" for="tv_sidecar_max_tokens">Max Tokens</label>
+                                <input id="tv_sidecar_max_tokens" type="number" class="tv-number-input" min="100" max="16000" step="100" value="1000" style="width: 100px;" />
+                                <div class="tv-help-text">Default max output tokens for background model calls.</div>
+                            </div>
+
+                            <div class="tv-button-row" style="margin-top: 8px;">
+                                <button id="tv_sidecar_test" class="tv-btn tv-btn-secondary" title="Send a test request to verify connectivity">
+                                    <i class="fa-solid fa-plug"></i> Test Connection
+                                </button>
+                                <button id="tv_sidecar_clear" class="tv-btn tv-btn-danger-outline" title="Remove sidecar configuration">
+                                    <i class="fa-solid fa-trash"></i> Clear
+                                </button>
+                            </div>
+                            <div id="tv_sidecar_status" class="tv-help-text" style="margin-top: 6px; display: none;"></div>
+
+                            <div class="tv-help-text" style="margin-top: 8px;">
+                                <strong>Cost estimate:</strong> Background operations typically use ~500-2000 tokens per call. With a cheap model (GPT-4o-mini, Gemini Flash, Haiku), expect ~$0.001-0.005 per post-turn cycle.
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
+                        <!-- ═══ Embedding Model ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Embedding Model</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Optional: Configure a separate endpoint for computing text embeddings (used by Smart Context for semantic similarity scoring). This can point to a different proxy or provider than your sidecar or main chat API.
+                            </div>
+
+                            <label class="tv-toggle" style="margin-bottom: 10px;">
+                                <input id="tv_embedding_enabled" type="checkbox" />
+                                <span class="tv-toggle-slider"></span>
+                                <span class="tv-toggle-label">Enable embedding-based similarity</span>
+                            </label>
+
+                            <div id="tv_embedding_fields">
+                                <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                    <label class="tv-label" for="tv_embedding_format">API Format</label>
+                                    <select id="tv_embedding_format" class="tv-select">
+                                        <option value="openai">OpenAI-Compatible</option>
+                                        <option value="google">Google (Gemini)</option>
+                                    </select>
+                                </div>
+
+                                <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                    <label class="tv-label" for="tv_embedding_endpoint">API Endpoint</label>
+                                    <input id="tv_embedding_endpoint" type="text" class="tv-input" placeholder="e.g. https://api.openai.com/v1" />
+                                </div>
+
+                                <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                    <label class="tv-label" for="tv_embedding_api_key">API Key</label>
+                                    <input id="tv_embedding_api_key" type="password" class="tv-input" placeholder="sk-..." autocomplete="off" />
+                                </div>
+
+                                <div class="tv-setting-row" style="margin-bottom: 8px;">
+                                    <label class="tv-label" for="tv_embedding_model">Model Name</label>
+                                    <input id="tv_embedding_model" type="text" class="tv-input" placeholder="e.g. text-embedding-3-small, nomic-embed-text, bge-large-en" />
+                                </div>
+
+                                <div class="tv-button-row" style="margin-top: 8px;">
+                                    <button id="tv_embedding_test" class="tv-btn tv-btn-secondary" title="Send a test embedding request">
+                                        <i class="fa-solid fa-plug"></i> Test Connection
+                                    </button>
+                                    <button id="tv_embedding_clear" class="tv-btn tv-btn-danger-outline" title="Remove embedding configuration">
+                                        <i class="fa-solid fa-trash"></i> Clear
+                                    </button>
+                                </div>
+                                <div id="tv_embedding_status" class="tv-help-text" style="margin-top: 6px; display: none;"></div>
+                            </div>
+
+                            <div class="tv-help-text" style="margin-top: 8px;">
+                                Embeddings are extremely cheap (~$0.02 per million tokens for OpenAI, free for local models). They are cached in memory so each entry is only embedded once per session.
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
                         <!-- ═══ Constant Entry Passthrough ═══ -->
                         <div class="tv-adv-section">
                             <div class="tv-adv-section-title">Constant Entry Passthrough</div>

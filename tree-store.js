@@ -399,6 +399,8 @@ Write naturally. Use tools when they help you stay consistent with established d
     smartContextPosition: 'in_chat',
     smartContextDepth: 3,
     smartContextRole: 'system',
+    sidecarProfile: null,
+    embeddingProfile: null,
     totalInjectionBudget: 0,
     selectiveRetrieval: false,
     ephemeralResults: false,

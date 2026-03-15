@@ -208,6 +208,24 @@ export function bindUIEvents() {
     // Connection profile
     $('#tv_connection_profile').on('change', onConnectionProfileChange);
 
+    // Sidecar background model
+    $('#tv_sidecar_format').on('change', onSidecarSettingChange);
+    $('#tv_sidecar_endpoint').on('change', onSidecarSettingChange);
+    $('#tv_sidecar_api_key').on('change', onSidecarSettingChange);
+    $('#tv_sidecar_model').on('change', onSidecarSettingChange);
+    $('#tv_sidecar_max_tokens').on('change', onSidecarSettingChange);
+    $('#tv_sidecar_test').on('click', onSidecarTest);
+    $('#tv_sidecar_clear').on('click', onSidecarClear);
+
+    // Embedding model
+    $('#tv_embedding_enabled').on('change', onEmbeddingToggle);
+    $('#tv_embedding_format').on('change', onEmbeddingSettingChange);
+    $('#tv_embedding_endpoint').on('change', onEmbeddingSettingChange);
+    $('#tv_embedding_api_key').on('change', onEmbeddingSettingChange);
+    $('#tv_embedding_model').on('change', onEmbeddingSettingChange);
+    $('#tv_embedding_test').on('click', onEmbeddingTest);
+    $('#tv_embedding_clear').on('click', onEmbeddingClear);
+
     // Diagnostics collapsible header
     $('#tv_diagnostics_header').on('click', function () {
         $(this).toggleClass('expanded');
@@ -377,6 +395,12 @@ export function refreshUI() {
 
     // Sync connection profile
     populateConnectionProfiles();
+
+    // Sync sidecar settings
+    loadSidecarSettingsToUI(settings);
+
+    // Sync embedding settings
+    loadEmbeddingSettingsToUI(settings);
 
     populateLorebookDropdown();
     $('#tv_lorebook_controls').toggle(!!currentLorebook);
@@ -1315,6 +1339,147 @@ function populateConnectionProfiles() {
     }
 
     $select.val(currentVal);
+}
+
+// ─── Sidecar Background Model ────────────────────────────────────
+
+function loadSidecarSettingsToUI(settings) {
+    const profile = settings.sidecarProfile || {};
+    $('#tv_sidecar_format').val(profile.format || 'openai');
+    $('#tv_sidecar_endpoint').val(profile.endpoint || '');
+    $('#tv_sidecar_api_key').val(profile.apiKey || '');
+    $('#tv_sidecar_model').val(profile.model || '');
+    $('#tv_sidecar_max_tokens').val(profile.maxTokens || 1000);
+}
+
+function saveSidecarSettings() {
+    const settings = getSettings();
+    const endpoint = $('#tv_sidecar_endpoint').val()?.trim() || '';
+    const apiKey = $('#tv_sidecar_api_key').val()?.trim() || '';
+
+    if (!endpoint && !apiKey) {
+        settings.sidecarProfile = null;
+    } else {
+        settings.sidecarProfile = {
+            format: $('#tv_sidecar_format').val() || 'openai',
+            endpoint,
+            apiKey,
+            model: $('#tv_sidecar_model').val()?.trim() || '',
+            maxTokens: Math.max(100, parseInt($('#tv_sidecar_max_tokens').val(), 10) || 1000),
+        };
+    }
+    saveSettingsDebounced();
+}
+
+function onSidecarSettingChange() {
+    saveSidecarSettings();
+    try {
+        import('./llm-sidecar.js').then(m => m.resetCircuitBreaker());
+    } catch { /* ignore */ }
+}
+
+async function onSidecarTest() {
+    const $btn = $('#tv_sidecar_test');
+    const $status = $('#tv_sidecar_status');
+    $btn.prop('disabled', true).find('i').removeClass('fa-plug').addClass('fa-spinner fa-spin');
+    $status.show().text('Testing connection...');
+
+    try {
+        saveSidecarSettings();
+        const { testSidecarConnectivity } = await import('./llm-sidecar.js');
+        const result = await testSidecarConnectivity();
+        $status.text(result.message).css('color', result.ok ? '#00b894' : '#d63031');
+    } catch (e) {
+        $status.text('Test failed: ' + e.message).css('color', '#d63031');
+    } finally {
+        $btn.prop('disabled', false).find('i').removeClass('fa-spinner fa-spin').addClass('fa-plug');
+    }
+}
+
+function onSidecarClear() {
+    const settings = getSettings();
+    settings.sidecarProfile = null;
+    saveSettingsDebounced();
+    loadSidecarSettingsToUI(settings);
+    $('#tv_sidecar_status').show().text('Sidecar configuration cleared.').css('color', '');
+    try {
+        import('./llm-sidecar.js').then(m => m.resetCircuitBreaker());
+    } catch { /* ignore */ }
+}
+
+// ─── Embedding Model ─────────────────────────────────────────────
+
+function loadEmbeddingSettingsToUI(settings) {
+    const profile = settings.embeddingProfile || {};
+    const enabled = !!profile.enabled;
+    $('#tv_embedding_enabled').prop('checked', enabled);
+    $('#tv_embedding_fields').toggle(enabled);
+    $('#tv_embedding_format').val(profile.format || 'openai');
+    $('#tv_embedding_endpoint').val(profile.endpoint || '');
+    $('#tv_embedding_api_key').val(profile.apiKey || '');
+    $('#tv_embedding_model').val(profile.model || '');
+}
+
+function saveEmbeddingSettings() {
+    const settings = getSettings();
+    const enabled = $('#tv_embedding_enabled').is(':checked');
+
+    if (!enabled) {
+        settings.embeddingProfile = { enabled: false };
+    } else {
+        settings.embeddingProfile = {
+            enabled: true,
+            format: $('#tv_embedding_format').val() || 'openai',
+            endpoint: $('#tv_embedding_endpoint').val()?.trim() || '',
+            apiKey: $('#tv_embedding_api_key').val()?.trim() || '',
+            model: $('#tv_embedding_model').val()?.trim() || '',
+        };
+    }
+    saveSettingsDebounced();
+}
+
+function onEmbeddingToggle() {
+    const enabled = $('#tv_embedding_enabled').is(':checked');
+    $('#tv_embedding_fields').toggle(enabled);
+    saveEmbeddingSettings();
+    if (!enabled) {
+        try {
+            import('./embedding-cache.js').then(m => m.clearEmbeddingCache());
+        } catch { /* ignore */ }
+    }
+}
+
+function onEmbeddingSettingChange() {
+    saveEmbeddingSettings();
+}
+
+async function onEmbeddingTest() {
+    const $btn = $('#tv_embedding_test');
+    const $status = $('#tv_embedding_status');
+    $btn.prop('disabled', true).find('i').removeClass('fa-plug').addClass('fa-spinner fa-spin');
+    $status.show().text('Testing embedding endpoint...');
+
+    try {
+        saveEmbeddingSettings();
+        const { testEmbeddingConnectivity } = await import('./llm-sidecar.js');
+        const result = await testEmbeddingConnectivity();
+        $status.text(result.message).css('color', result.ok ? '#00b894' : '#d63031');
+    } catch (e) {
+        $status.text('Test failed: ' + e.message).css('color', '#d63031');
+    } finally {
+        $btn.prop('disabled', false).find('i').removeClass('fa-spinner fa-spin').addClass('fa-plug');
+    }
+}
+
+function onEmbeddingClear() {
+    const settings = getSettings();
+    settings.embeddingProfile = { enabled: false };
+    saveSettingsDebounced();
+    loadEmbeddingSettingsToUI(settings);
+    $('#tv_embedding_status').show().text('Embedding configuration cleared.').css('color', '');
+    try {
+        import('./embedding-cache.js').then(m => m.clearEmbeddingCache());
+    } catch { /* ignore */ }
 }
 
 // ─── Tree Management ─────────────────────────────────────────────

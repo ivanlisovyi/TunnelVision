@@ -118,6 +118,7 @@ export async function runDiagnostics() {
         collect(checkConstantPassthrough),
         collect(checkBookDescriptions),
         collect(checkTurnSummaryEvent),
+        collect(checkSidecarConfig),
     ]);
 
     try {
@@ -1435,6 +1436,48 @@ function checkBookDescriptions() {
         results.push(warn(`${missing} of ${activeBooks.length} active lorebooks have no description. Without descriptions, the AI may write entries to the wrong lorebook. Set descriptions in each lorebook's settings, or rebuild trees with LLM to auto-generate them.`));
     } else {
         results.push(pass(`All ${activeBooks.length} active lorebooks have descriptions for multi-book disambiguation`));
+    }
+
+    return results;
+}
+
+/** Check sidecar background model configuration and connectivity. */
+async function checkSidecarConfig() {
+    const settings = getSettings();
+    const profile = settings.sidecarProfile;
+
+    if (!profile || typeof profile !== 'object') {
+        return pass('Sidecar background model: not configured (using main API for all LLM work)');
+    }
+
+    const results = [];
+    const endpoint = (profile.endpoint || '').trim();
+    const apiKey = (profile.apiKey || '').trim();
+    const model = (profile.model || '').trim();
+    const format = (profile.format || 'openai').toLowerCase();
+
+    if (!endpoint) {
+        results.push(warn('Sidecar profile has no endpoint URL configured.'));
+        return results;
+    }
+
+    if (!apiKey) {
+        results.push(warn('Sidecar profile has no API key. Background model calls will fail.'));
+        return results;
+    }
+
+    results.push(pass(`Sidecar configured: ${format} format, model "${model || 'default'}", endpoint ${endpoint.substring(0, 40)}...`));
+
+    try {
+        const { testSidecarConnectivity } = await import('./llm-sidecar.js');
+        const test = await testSidecarConnectivity();
+        if (test.ok) {
+            results.push(pass(`Sidecar connectivity: ${test.message}`));
+        } else {
+            results.push(warn(`Sidecar connectivity failed: ${test.message}`));
+        }
+    } catch (e) {
+        results.push(warn(`Sidecar connectivity test error: ${e.message}`));
     }
 
     return results;
