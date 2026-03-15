@@ -86,6 +86,7 @@ describe('getSidecarConfig', () => {
             model: 'gpt-4o-mini',
             format: 'openai',
             maxTokens: 500,
+            temperature: 0.3,
         });
     });
 
@@ -108,6 +109,24 @@ describe('getSidecarConfig', () => {
         mockSidecarProfile = { enabled: true, endpoint: 'https://api.example.com', apiKey: 'key' };
         const config = getSidecarConfig();
         expect(config.maxTokens).toBe(1000);
+    });
+
+    it('defaults temperature to 0.3 when missing', () => {
+        mockSidecarProfile = { enabled: true, endpoint: 'https://api.example.com', apiKey: 'key' };
+        const config = getSidecarConfig();
+        expect(config.temperature).toBe(0.3);
+    });
+
+    it('uses custom temperature when provided', () => {
+        mockSidecarProfile = { ...validProfile, temperature: 0.7 };
+        const config = getSidecarConfig();
+        expect(config.temperature).toBe(0.7);
+    });
+
+    it('allows temperature of 0', () => {
+        mockSidecarProfile = { ...validProfile, temperature: 0 };
+        const config = getSidecarConfig();
+        expect(config.temperature).toBe(0);
     });
 });
 
@@ -193,6 +212,37 @@ describe('sidecarGenerate', () => {
         const body = JSON.parse(opts.body);
         expect(body.model).toBe('gpt-4o-mini');
         expect(body.messages).toEqual([{ role: 'user', content: 'hello' }]);
+
+        vi.unstubAllGlobals();
+    });
+
+    it('uses custom proxy URL as-is without appending /chat/completions', async () => {
+        mockSidecarProfile = { ...validProfile, endpoint: 'https://myproxy.org/abc123' };
+        const mockFetch = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ choices: [{ message: { content: 'ok' } }] }),
+        });
+        vi.stubGlobal('fetch', mockFetch);
+
+        await sidecarGenerate({ prompt: 'test' });
+        const [url] = mockFetch.mock.calls[0];
+        expect(url).toBe('https://myproxy.org/abc123');
+        expect(url).not.toContain('/chat/completions');
+
+        vi.unstubAllGlobals();
+    });
+
+    it('appends /chat/completions to standard /v1 endpoint', async () => {
+        mockSidecarProfile = { ...validProfile, endpoint: 'https://api.openai.com/v1' };
+        const mockFetch = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ choices: [{ message: { content: 'ok' } }] }),
+        });
+        vi.stubGlobal('fetch', mockFetch);
+
+        await sidecarGenerate({ prompt: 'test' });
+        const [url] = mockFetch.mock.calls[0];
+        expect(url).toBe('https://api.openai.com/v1/chat/completions');
 
         vi.unstubAllGlobals();
     });

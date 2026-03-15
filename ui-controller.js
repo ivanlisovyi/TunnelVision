@@ -215,6 +215,7 @@ export function bindUIEvents() {
     $('#tv_sidecar_api_key').on('change', onSidecarSettingChange);
     $('#tv_sidecar_model').on('change', onSidecarSettingChange);
     $('#tv_sidecar_max_tokens').on('change', onSidecarSettingChange);
+    $('#tv_sidecar_temperature').on('change', onSidecarSettingChange);
     $('#tv_sidecar_test').on('click', onSidecarTest);
     $('#tv_sidecar_clear').on('click', onSidecarClear);
 
@@ -1354,6 +1355,7 @@ function loadSidecarSettingsToUI(settings) {
     $('#tv_sidecar_api_key').val(profile.apiKey || '');
     $('#tv_sidecar_model').val(profile.model || '');
     $('#tv_sidecar_max_tokens').val(profile.maxTokens || 1000);
+    $('#tv_sidecar_temperature').val(profile.temperature ?? 0.3);
 }
 
 function saveSidecarSettings() {
@@ -1370,6 +1372,7 @@ function saveSidecarSettings() {
             apiKey: $('#tv_sidecar_api_key').val()?.trim() || '',
             model: $('#tv_sidecar_model').val()?.trim() || '',
             maxTokens: Math.max(100, parseInt($('#tv_sidecar_max_tokens').val(), 10) || 1000),
+            temperature: Math.min(2, Math.max(0, parseFloat($('#tv_sidecar_temperature').val()) || 0.3)),
         };
     }
     saveSettingsDebounced();

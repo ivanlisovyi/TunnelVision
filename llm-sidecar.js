@@ -54,6 +54,7 @@ export function getSidecarConfig() {
         model: (profile.model || '').trim(),
         format: (profile.format || 'openai').trim().toLowerCase(),
         maxTokens: profile.maxTokens || 1000,
+        temperature: profile.temperature ?? 0.3,
     };
 }
 
@@ -89,7 +90,7 @@ function buildOpenAIBody(config, prompt, systemPrompt, maxTokens) {
         model: config.model || 'gpt-4o-mini',
         messages,
         max_tokens: maxTokens || config.maxTokens,
-        temperature: 0.3,
+        temperature: config.temperature,
     };
 }
 
@@ -99,7 +100,7 @@ function buildAnthropicBody(config, prompt, systemPrompt, maxTokens) {
         max_tokens: maxTokens || config.maxTokens,
         system: systemPrompt || '',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.3,
+        temperature: config.temperature,
     };
 }
 
@@ -109,7 +110,7 @@ function buildGoogleBody(config, prompt, systemPrompt, maxTokens) {
         contents,
         generationConfig: {
             maxOutputTokens: maxTokens || config.maxTokens,
-            temperature: 0.3,
+            temperature: config.temperature,
         },
     };
     if (systemPrompt) {
@@ -155,11 +156,13 @@ function buildUrl(config) {
             url += `/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
         }
     } else if (config.format === 'anthropic') {
-        if (!url.endsWith('/messages')) {
+        if (!url.endsWith('/messages') && url.endsWith('/v1')) {
             url = url.replace(/\/?$/, '/messages');
         }
     } else {
-        if (!url.endsWith('/chat/completions')) {
+        // Only append /chat/completions if the URL ends with /v1 or /v1/
+        // (standard OpenAI base URL). Custom proxy paths are used as-is.
+        if (/\/v\d\/?$/.test(url)) {
             url = url.replace(/\/?$/, '/chat/completions');
         }
     }
