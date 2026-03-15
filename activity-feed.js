@@ -1355,7 +1355,7 @@ function exitTimelineView() {
  * Parse a `[Day X, time]` or `[Day X]` prefix from entry content.
  * Returns { day: number|null, timeLabel: string, rest: string }.
  */
-function parseTimestamp(content) {
+export function parseTimestamp(content) {
     if (!content) return { day: null, timeLabel: '', rest: content || '' };
     const match = content.match(/^\[([^\]]+)\]\s*/);
     if (!match) return { day: null, timeLabel: '', rest: content };
@@ -1648,7 +1648,7 @@ function extractRetrievedEntries(result) {
     return entries;
 }
 
-function parseRetrievedEntryHeader(line) {
+export function parseRetrievedEntryHeader(line) {
     if (!line.startsWith('[Lorebook: ') || !line.endsWith(']')) {
         return null;
     }
@@ -1673,7 +1673,7 @@ function parseRetrievedEntryHeader(line) {
 
 // ── Tool Summary Builder ──
 
-function buildToolSummary(toolName, params, result, retrievedEntries = []) {
+export function buildToolSummary(toolName, params, result, retrievedEntries = []) {
     switch (toolName) {
         case 'TunnelVision_Search': {
             const action = params.action || 'retrieve';

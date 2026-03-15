@@ -54,7 +54,7 @@ function extractMentionsFromChat(chat, lookback) {
  * @param {string} recentText - Lowercased concatenated recent chat text
  * @returns {number} Relevance score (0 = no match, higher = more relevant)
  */
-function scoreEntry(entry, recentText) {
+export function scoreEntry(entry, recentText) {
     if (!recentText) return 0;
 
     let score = 0;
