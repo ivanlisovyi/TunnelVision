@@ -45,6 +45,7 @@ import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
 import { escapeHtml, getEntryVersions } from './entry-manager.js';
 import { computeEntryQuality, getQualityRating, getQualityColor, qualityTooltip, buildQualityContext } from './entry-scoring.js';
+import { getMaxContextTokens } from './agent-utils.js';
 
 
 let currentLorebook = null;
@@ -146,6 +147,7 @@ export function bindUIEvents() {
     $('#tv_notebook_depth').on('change', onPromptInjectionChange);
     $('#tv_notebook_role').on('change', onPromptInjectionChange);
     $('#tv_total_injection_budget').on('change', onTotalInjectionBudgetChange);
+    $('#tv_budget_recommend').on('click', onBudgetRecommend);
     $('#tv_stealth_mode').on('change', onStealthModeToggle);
     $('#tv_ephemeral_results').on('change', onEphemeralResultsToggle);
     $('.tv_ephemeral_tool').on('change', onEphemeralToolFilterChange);
@@ -303,6 +305,7 @@ export function refreshUI() {
     $('#tv_notebook_depth_row').toggle((settings.notebookPromptPosition || 'in_chat') === 'in_chat');
 
     $('#tv_total_injection_budget').val(settings.totalInjectionBudget ?? 0);
+    updateBudgetContextInfo(settings.totalInjectionBudget ?? 0);
     $('#tv_stealth_mode').prop('checked', settings.stealthMode === true);
     $('#tv_ephemeral_results').prop('checked', settings.ephemeralResults === true);
     $('#tv_ephemeral_filter_options').toggle(settings.ephemeralResults === true);
@@ -892,6 +895,37 @@ function onTotalInjectionBudgetChange() {
     const settings = getSettings();
     settings.totalInjectionBudget = clamped;
     saveSettingsDebounced();
+    updateBudgetContextInfo(clamped);
+}
+
+function onBudgetRecommend() {
+    const maxTokens = getMaxContextTokens();
+    if (!maxTokens) {
+        toastr.warning('Could not detect context window size. Make sure you have an active API connection.', 'TunnelVision');
+        return;
+    }
+    const maxChars = maxTokens * 4;
+    const recommended = Math.min(Math.round(maxChars * 0.15 / 500) * 500, 8000);
+    $('#tv_total_injection_budget').val(recommended).trigger('change');
+    toastr.info(`Recommended ${recommended} chars (~${Math.round(recommended / 4)} tokens) for a ${maxTokens.toLocaleString()}-token context window`, 'TunnelVision');
+}
+
+function updateBudgetContextInfo(budget) {
+    const infoEl = document.getElementById('tv_budget_context_info');
+    const textEl = document.getElementById('tv_budget_percentage_text');
+    if (!infoEl || !textEl) return;
+
+    const maxTokens = getMaxContextTokens();
+    if (!maxTokens || !budget) {
+        infoEl.style.display = 'none';
+        return;
+    }
+
+    const maxChars = maxTokens * 4;
+    const pct = ((budget / maxChars) * 100).toFixed(1);
+    const tokens = Math.round(budget / 4);
+    textEl.textContent = `≈ ${tokens.toLocaleString()} tokens — ${pct}% of ${maxTokens.toLocaleString()}-token context window`;
+    infoEl.style.display = '';
 }
 
 function onStealthModeToggle() {

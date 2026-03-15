@@ -20,9 +20,32 @@ import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfoSync } from './entry-manager.js';
+import { getCachedWorldInfoSync, getCachedWorldInfo } from './entry-manager.js';
 import { getEntryTitle } from './agent-utils.js';
 import { getWorldStateSections } from './world-state.js';
+
+// ── Pre-Warming Cache ────────────────────────────────────────────
+
+/** @type {Array|null} Pre-computed scored candidates from background pre-warm. */
+let _preWarmedCandidates = null;
+/** @type {string|null} Cache key for validating pre-warmed data freshness. */
+let _preWarmCacheKey = null;
+
+function buildPreWarmCacheKey() {
+    try {
+        const chatLen = getContext().chat?.length || 0;
+        const books = getActiveTunnelVisionBooks().sort().join(',');
+        return `${chatLen}:${books}`;
+    } catch {
+        return null;
+    }
+}
+
+/** Invalidate the pre-warming cache when entries change or books are modified. */
+export function invalidatePreWarmCache() {
+    _preWarmedCandidates = null;
+    _preWarmCacheKey = null;
+}
 
 const RELEVANCE_KEY = 'tunnelvision_relevance';
 const FEEDBACK_KEY = 'tunnelvision_feedback';
@@ -299,12 +322,70 @@ function worldStateBoost(entry, signals) {
     return boost;
 }
 
+// ── Scoring Pipeline ─────────────────────────────────────────────
+
+/**
+ * Score all active entries against recent chat text and sort by relevance.
+ * This is the heavy computation that pre-warming moves off the critical path.
+ * @param {string[]} activeBooks - Active TV-managed lorebook names
+ * @param {string} recentText - Lowercased recent chat text
+ * @returns {Array<{entry: Object, bookName: string, score: number, isTracker: boolean, isSummary: boolean}>}
+ */
+function scoreCandidates(activeBooks, recentText) {
+    const candidates = [];
+    const relevanceMap = getRelevanceMap();
+    const wsSignals = extractWorldStateBoostSignals();
+
+    let maxUid = 0;
+    for (const bookName of activeBooks) {
+        const bd = getCachedWorldInfoSync(bookName);
+        if (!bd?.entries) continue;
+        for (const key of Object.keys(bd.entries)) {
+            if (bd.entries[key].uid > maxUid) maxUid = bd.entries[key].uid;
+        }
+    }
+
+    for (const bookName of activeBooks) {
+        const bookData = getCachedWorldInfoSync(bookName);
+        if (!bookData?.entries) continue;
+
+        const trackerSet = new Set(getTrackerUids(bookName));
+
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable) continue;
+            if (!entry.content || !entry.content.trim()) continue;
+
+            const isTracker = trackerSet.has(entry.uid);
+            const lowerComment = (entry.comment || '').toLowerCase();
+            const isSummary = lowerComment.startsWith('[summary]') || lowerComment.startsWith('[scene summary');
+            let relevance = scoreEntry(entry, recentText);
+
+            relevance += relevanceDecay(entry.uid, relevanceMap);
+            if (maxUid > 0 && entry.uid > maxUid * 0.9) relevance += 3;
+            relevance += worldStateBoost(entry, wsSignals);
+            relevance += feedbackBoost(entry.uid);
+
+            if (isTracker && relevance > 0) {
+                candidates.push({ entry, bookName, score: relevance + 20, isTracker: true, isSummary: false });
+            } else if (isSummary && relevance >= 3) {
+                candidates.push({ entry, bookName, score: relevance + 2, isTracker: false, isSummary: true });
+            } else if (relevance >= 5) {
+                candidates.push({ entry, bookName, score: relevance, isTracker, isSummary });
+            }
+        }
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates;
+}
+
 // ── Core Logic ───────────────────────────────────────────────────
 
 /**
  * Build proactive context from lorebook entries matching recent chat mentions.
  * Called synchronously at GENERATION_STARTED — must be fast (no LLM calls, no awaits).
- * Uses cache-only data access; returns empty on the first turn before cache is warm.
+ * Uses pre-warmed candidates if available; otherwise falls back to synchronous scoring.
  * @returns {string} Formatted context string for injection, or empty string
  */
 export function buildSmartContextPrompt() {
@@ -325,85 +406,18 @@ export function buildSmartContextPrompt() {
     const recentText = extractMentionsFromChat(chat, lookback);
     if (!recentText) return '';
 
-    // Gather and score all active entries across books
-    const candidates = [];
-    const trackerUidSets = new Map();
-    const relevanceMap = getRelevanceMap();
-    const wsSignals = extractWorldStateBoostSignals();
-
-    // Find max UID for recency boost calculation
-    let maxUid = 0;
-    for (const bookName of activeBooks) {
-        const bd = getCachedWorldInfoSync(bookName);
-        if (!bd?.entries) continue;
-        for (const key of Object.keys(bd.entries)) {
-            if (bd.entries[key].uid > maxUid) maxUid = bd.entries[key].uid;
-        }
-    }
-
-    for (const bookName of activeBooks) {
-        const bookData = getCachedWorldInfoSync(bookName);
-        if (!bookData?.entries) continue;
-
-        const trackerSet = new Set(getTrackerUids(bookName));
-        trackerUidSets.set(bookName, trackerSet);
-
-        for (const key of Object.keys(bookData.entries)) {
-            const entry = bookData.entries[key];
-            if (entry.disable) continue;
-            if (!entry.content || !entry.content.trim()) continue;
-
-            const isTracker = trackerSet.has(entry.uid);
-            const lowerComment = (entry.comment || '').toLowerCase();
-            const isSummary = lowerComment.startsWith('[summary]') || lowerComment.startsWith('[scene summary');
-            let relevance = scoreEntry(entry, recentText);
-
-            // Relevance decay bonus — recently relevant entries score higher
-            relevance += relevanceDecay(entry.uid, relevanceMap);
-
-            // Recency boost — higher UIDs are newer entries
-            if (maxUid > 0 && entry.uid > maxUid * 0.9) relevance += 3;
-
-            // World state boost — entries matching present characters / active threads
-            relevance += worldStateBoost(entry, wsSignals);
-
-            // Feedback boost — entries the AI actually uses get promoted
-            relevance += feedbackBoost(entry.uid);
-
-            // Tracker entries for mentioned entities get a boost
-            if (isTracker && relevance > 0) {
-                candidates.push({
-                    entry,
-                    bookName,
-                    score: relevance + 20,
-                    isTracker: true,
-                    isSummary: false,
-                });
-            } else if (isSummary && relevance >= 3) {
-                // Lower threshold for summaries — they provide rich scene context
-                candidates.push({
-                    entry,
-                    bookName,
-                    score: relevance + 2,
-                    isTracker: false,
-                    isSummary: true,
-                });
-            } else if (relevance >= 5) {
-                candidates.push({
-                    entry,
-                    bookName,
-                    score: relevance,
-                    isTracker,
-                    isSummary,
-                });
-            }
-        }
+    // Use pre-warmed candidates if cache is fresh, otherwise score synchronously
+    let candidates;
+    const cacheKey = buildPreWarmCacheKey();
+    if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
+        candidates = _preWarmedCandidates;
+        _preWarmedCandidates = null;
+        _preWarmCacheKey = null;
+    } else {
+        candidates = scoreCandidates(activeBooks, recentText);
     }
 
     if (candidates.length === 0) return '';
-
-    // Sort by score descending, take top N within budget
-    candidates.sort((a, b) => b.score - a.score);
 
     const selected = [];
     const selectedUids = [];
@@ -427,10 +441,7 @@ export function buildSmartContextPrompt() {
 
     if (selected.length === 0) return '';
 
-    // Store injected entries for post-response feedback scanning
     _lastInjectedEntries = selectedEntryInfo;
-
-    // Record which entries were selected for relevance decay tracking
     if (selectedUids.length > 0) touchRelevance(selectedUids);
 
     return [
@@ -438,6 +449,39 @@ export function buildSmartContextPrompt() {
         '',
         selected.join('\n\n---\n\n'),
     ].join('\n');
+}
+
+/**
+ * Async background pre-computation of smart context scores.
+ * Called after MESSAGE_RECEIVED so the scoring is ready for the next GENERATION_STARTED.
+ * Ensures world info data is loaded (async) then runs the full scoring pipeline.
+ */
+async function preWarmSmartContext() {
+    const settings = getSettings();
+    if (!settings.smartContextEnabled || settings.globalEnabled === false) return;
+
+    const activeBooks = getActiveTunnelVisionBooks();
+    if (activeBooks.length === 0) return;
+
+    const context = getContext();
+    const chat = context.chat;
+    if (!chat || chat.length < 2) return;
+
+    const cacheKey = buildPreWarmCacheKey();
+    if (!cacheKey) return;
+
+    const lookback = settings.smartContextLookback || 6;
+    const recentText = extractMentionsFromChat(chat, lookback);
+    if (!recentText) return;
+
+    // Ensure world info data is in cache (the async part that saves time later)
+    await Promise.all(activeBooks.map(book => getCachedWorldInfo(book)));
+
+    const candidates = scoreCandidates(activeBooks, recentText);
+
+    _preWarmedCandidates = candidates;
+    _preWarmCacheKey = cacheKey;
+    console.debug(`[TunnelVision] Pre-warmed smart context: ${candidates.length} candidates scored`);
 }
 
 // ── Formatting ───────────────────────────────────────────────────
@@ -457,10 +501,15 @@ function onMessageReceived() {
     } catch { return; }
 
     processRelevanceFeedback();
+
+    // Pre-warm smart context scores in the background for the next generation
+    preWarmSmartContext().catch(err => {
+        console.debug('[TunnelVision] Pre-warm failed (non-critical):', err.message);
+    });
 }
 
 /**
- * Register the MESSAGE_RECEIVED handler for relevance feedback scanning.
+ * Register the MESSAGE_RECEIVED handler for relevance feedback + pre-warming.
  * Called once from index.js init.
  */
 export function initSmartContext() {
@@ -471,5 +520,10 @@ export function initSmartContext() {
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     }
 
-    console.log('[TunnelVision] Smart context feedback loop initialized');
+    // Invalidate pre-warm cache when lorebooks change
+    if (event_types.WORLDINFO_UPDATED) {
+        eventSource.on(event_types.WORLDINFO_UPDATED, invalidatePreWarmCache);
+    }
+
+    console.log('[TunnelVision] Smart context feedback loop + pre-warming initialized');
 }

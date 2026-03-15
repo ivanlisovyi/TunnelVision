@@ -13,7 +13,8 @@
 
 import { getFeedbackMap } from './smart-context.js';
 import { getContext } from '../../../st-context.js';
-import { isSummaryTitle, isTrackerTitle } from './tree-store.js';
+import { isSummaryTitle, isTrackerTitle, getTree, getAllEntryUids } from './tree-store.js';
+import { trigramSimilarity } from './agent-utils.js';
 
 const PROPER_NOUN_RE = /[A-Z][a-z]{2,}/g;
 const NUMBER_RE = /\d+/g;
@@ -186,4 +187,165 @@ export function countStaleEntries(bookData) {
     }
 
     return stale;
+}
+
+// ── Health Dashboard Analysis ────────────────────────────────────
+
+const TIMESTAMP_RE = /^\[([^\]]*Day\s+\d+[^\]]*)\]/i;
+
+/**
+ * @typedef {Object} LorebookHealthReport
+ * @property {number} totalEntries
+ * @property {number} facts
+ * @property {number} summaries
+ * @property {number} trackers
+ * @property {number} disabled
+ * @property {{ label: string, count: number }[]} categoryDistribution
+ * @property {{ uid: number, title: string, bookName: string }[]} staleEntries
+ * @property {{ uid: number, title: string, bookName: string }[]} orphanedEntries
+ * @property {{ uid: number, title: string, bookName: string }[]} noTimestamp
+ * @property {number} avgLength
+ * @property {{ uid: number, title: string, bookName: string, length: number }[]} outlierEntries
+ * @property {{ uidA: number, uidB: number, titleA: string, titleB: string, bookName: string, similarity: number }[]} duplicateCandidates
+ */
+
+/**
+ * Build a comprehensive health report for a lorebook.
+ * All computed locally — no LLM calls.
+ * @param {string} bookName
+ * @param {Object} bookData - Lorebook data with .entries
+ * @returns {LorebookHealthReport}
+ */
+export function buildHealthReport(bookName, bookData) {
+    const report = {
+        totalEntries: 0,
+        facts: 0,
+        summaries: 0,
+        trackers: 0,
+        disabled: 0,
+        categoryDistribution: [],
+        staleEntries: [],
+        orphanedEntries: [],
+        noTimestamp: [],
+        avgLength: 0,
+        outlierEntries: [],
+        duplicateCandidates: [],
+    };
+
+    if (!bookData?.entries) return report;
+    const feedbackMap = getFeedbackMap();
+
+    // Category distribution from tree
+    const tree = getTree(bookName);
+    const treeUids = tree?.root ? new Set(getAllEntryUids(tree.root)) : new Set();
+
+    if (tree?.root) {
+        const distMap = new Map();
+        buildCategoryDist(tree.root, distMap, bookData.entries, true);
+        report.categoryDistribution = [...distMap.entries()]
+            .map(([label, count]) => ({ label, count }))
+            .sort((a, b) => b.count - a.count);
+    }
+
+    // Iterate all entries
+    const factEntries = [];
+    let totalLength = 0;
+
+    for (const key of Object.keys(bookData.entries)) {
+        const entry = bookData.entries[key];
+
+        if (entry.disable) {
+            report.disabled++;
+            continue;
+        }
+
+        report.totalEntries++;
+        const title = entry.comment || '';
+        const content = (entry.content || '').trim();
+        totalLength += content.length;
+
+        if (isSummaryTitle(title)) {
+            report.summaries++;
+        } else if (isTrackerTitle(title)) {
+            report.trackers++;
+        } else {
+            report.facts++;
+            factEntries.push({ entry, title, content });
+        }
+
+        // Stale check
+        const fb = feedbackMap[entry.uid];
+        if (fb && fb.injections >= 3 && fb.references === 0 && !isSummaryTitle(title) && !isTrackerTitle(title)) {
+            report.staleEntries.push({ uid: entry.uid, title: title || `UID ${entry.uid}`, bookName });
+        }
+
+        // Orphan check — entry exists in lorebook but not in any tree node
+        if (treeUids.size > 0 && !treeUids.has(entry.uid)) {
+            report.orphanedEntries.push({ uid: entry.uid, title: title || `UID ${entry.uid}`, bookName });
+        }
+
+        // Timestamp check — facts without [Day X] prefix
+        if (!isSummaryTitle(title) && !isTrackerTitle(title) && content && !TIMESTAMP_RE.test(content)) {
+            report.noTimestamp.push({ uid: entry.uid, title: title || `UID ${entry.uid}`, bookName });
+        }
+    }
+
+    // Average length and outliers (>3x average or >2000 chars)
+    report.avgLength = report.totalEntries > 0 ? Math.round(totalLength / report.totalEntries) : 0;
+    const outlierThreshold = Math.max(report.avgLength * 3, 2000);
+    for (const { entry, title, content } of factEntries) {
+        if (content.length > outlierThreshold) {
+            report.outlierEntries.push({
+                uid: entry.uid,
+                title: title || `UID ${entry.uid}`,
+                bookName,
+                length: content.length,
+            });
+        }
+    }
+    report.outlierEntries.sort((a, b) => b.length - a.length);
+
+    // Duplicate candidates — check trigram similarity between fact entries
+    // Cap comparisons to avoid O(n²) blowup on large lorebooks
+    const dupCheckEntries = factEntries.slice(0, 200);
+    for (let i = 0; i < dupCheckEntries.length; i++) {
+        for (let j = i + 1; j < dupCheckEntries.length; j++) {
+            const a = dupCheckEntries[i];
+            const b = dupCheckEntries[j];
+            const textA = a.title + ' ' + a.content.substring(0, 200);
+            const textB = b.title + ' ' + b.content.substring(0, 200);
+            const sim = trigramSimilarity(textA, textB);
+            if (sim >= 0.6) {
+                report.duplicateCandidates.push({
+                    uidA: a.entry.uid,
+                    uidB: b.entry.uid,
+                    titleA: a.title || `UID ${a.entry.uid}`,
+                    titleB: b.title || `UID ${b.entry.uid}`,
+                    bookName,
+                    similarity: sim,
+                });
+            }
+        }
+        if (report.duplicateCandidates.length >= 20) break;
+    }
+    report.duplicateCandidates.sort((a, b) => b.similarity - a.similarity);
+
+    return report;
+}
+
+function buildCategoryDist(node, distMap, entries, isRoot) {
+    if (!isRoot && node.entryUids?.length > 0) {
+        const activeCount = node.entryUids.filter(uid => {
+            for (const key of Object.keys(entries)) {
+                if (entries[key].uid === uid && !entries[key].disable) return true;
+            }
+            return false;
+        }).length;
+        if (activeCount > 0) {
+            distMap.set(node.label || 'Unnamed', (distMap.get(node.label || 'Unnamed') || 0) + activeCount);
+        }
+    }
+    for (const child of (node.children || [])) {
+        buildCategoryDist(child, distMap, entries, false);
+    }
 }

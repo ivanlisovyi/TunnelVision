@@ -28,10 +28,11 @@ import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
 import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache, applyRecurseLimit } from './tool-registry.js';
 import { resetTurnEntryCount, invalidateWorldInfoCache, invalidateDirtyWorldInfoCache, getCachedWorldInfo } from './entry-manager.js';
+import { setInjectionSizes } from './agent-utils.js';
 import { buildNotebookPrompt } from './tools/notebook.js';
 import { buildWorldStatePrompt, initWorldState } from './world-state.js';
 import { initPostTurnProcessor } from './post-turn-processor.js';
-import { buildSmartContextPrompt, initSmartContext } from './smart-context.js';
+import { buildSmartContextPrompt, initSmartContext, invalidatePreWarmCache } from './smart-context.js';
 import { initMemoryLifecycle } from './memory-lifecycle.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
@@ -121,6 +122,7 @@ async function init() {
 async function onChatChanged() {
     invalidateActiveBookCache();
     invalidateWorldInfoCache();
+    invalidatePreWarmCache();
     refreshUI();
     await registerTools();
 }
@@ -128,6 +130,7 @@ async function onChatChanged() {
 async function onWorldInfoUpdated() {
     invalidateActiveBookCache();
     invalidateWorldInfoCache();
+    invalidatePreWarmCache();
     refreshUI();
     await registerTools();
 }
@@ -352,6 +355,14 @@ async function onGenerationStarted(type, opts) {
                 }
             }
         }
+
+        // ── Track injection sizes for UI display ─────────────────────
+        setInjectionSizes({
+            mandatory: mandatoryPrompt.length,
+            worldState: worldStatePrompt.length,
+            smartContext: smartContextPrompt.length,
+            notebook: notebookPrompt.length,
+        });
 
         // ── Inject all prompts ──────────────────────────────────────
         setExtensionPrompt(TV_PROMPT_KEY, mandatoryPrompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);

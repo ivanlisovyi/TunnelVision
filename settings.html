@@ -341,6 +341,10 @@
                             <div class="tv-number-row">
                                 <input id="tv_total_injection_budget" type="number" class="tv-number-input" min="0" max="50000" step="500" value="0" />
                                 <span class="tv-number-label">characters (0 = unlimited)</span>
+                                <button id="tv_budget_recommend" class="tv-btn tv-btn-secondary tv-btn-sm" title="Auto-calculate a recommended budget based on your model's context window">Recommend</button>
+                            </div>
+                            <div id="tv_budget_context_info" class="tv-help-text" style="margin-top: 4px; display: none;">
+                                <span id="tv_budget_percentage_text"></span>
                             </div>
                             <div class="tv-help-text" style="margin-top: 4px;">
                                 Rough guide: 1000 chars ≈ 250 tokens. A budget of <strong>8000</strong> (~2000 tokens) is a sensible starting point. Priority order when trimming: memory system prompt &gt; world state &gt; smart context &gt; notebook.

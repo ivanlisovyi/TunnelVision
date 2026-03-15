@@ -146,6 +146,43 @@ export function trigramSimilarity(a, b) {
     return intersection / (setA.size + setB.size - intersection);
 }
 
+// ── Injection Size Tracking ───────────────────────────────────────
+
+let _injectionSizes = { mandatory: 0, worldState: 0, smartContext: 0, notebook: 0, total: 0 };
+
+/**
+ * Record the character sizes of the last TunnelVision prompt injections.
+ * Called from onGenerationStarted after computing all prompts.
+ */
+export function setInjectionSizes(sizes) {
+    _injectionSizes = {
+        mandatory: sizes.mandatory || 0,
+        worldState: sizes.worldState || 0,
+        smartContext: sizes.smartContext || 0,
+        notebook: sizes.notebook || 0,
+        total: (sizes.mandatory || 0) + (sizes.worldState || 0) + (sizes.smartContext || 0) + (sizes.notebook || 0),
+    };
+}
+
+/** @returns {{ mandatory: number, worldState: number, smartContext: number, notebook: number, total: number }} */
+export function getInjectionSizes() {
+    return { ..._injectionSizes };
+}
+
+/**
+ * Get the model's max context window size in tokens from SillyTavern.
+ * Returns 0 if unavailable.
+ */
+export function getMaxContextTokens() {
+    try {
+        const context = getContext();
+        const val = context.maxContext || context.powerUserSettings?.max_context || 0;
+        return typeof val === 'number' && val > 0 ? val : 0;
+    } catch {
+        return 0;
+    }
+}
+
 // ── Retry Logic ──────────────────────────────────────────────────
 
 /**
