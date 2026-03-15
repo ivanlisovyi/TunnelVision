@@ -28,7 +28,7 @@ vi.mock('./tree-store.js', () => ({
     setTrackerUid: vi.fn(),
 }));
 
-import { parseJsonFromLLM, cleanupEntryMetadata, recordEntryTemporal, getEntryTemporal, setEntrySupersedes, getEntryTurnIndex } from '../entry-manager.js';
+import { parseJsonFromLLM, cleanupEntryMetadata, recordEntryTemporal, getEntryTemporal, setEntrySupersedes, getEntryTurnIndex, buildSummaryKeys } from '../entry-manager.js';
 
 describe('parseJsonFromLLM', () => {
     // ── Clean inputs ─────────────────────────────────────────────
@@ -280,5 +280,67 @@ describe('getEntryTurnIndex', () => {
             'mybook:42': { turnIndex: 25, when: null, arcId: null, supersedes: null, createdAt: 100 },
         };
         expect(getEntryTurnIndex('mybook', 42)).toBe(25);
+    });
+});
+
+describe('buildSummaryKeys', () => {
+    it('includes LLM-generated keys', () => {
+        const keys = buildSummaryKeys(
+            { keys: ['forest', 'betrayal', 'night'], participants: [], significance: 'moderate' },
+            ['Alice'],
+            'moderate',
+        );
+        expect(keys).toContain('forest');
+        expect(keys).toContain('betrayal');
+        expect(keys).toContain('night');
+    });
+
+    it('includes participant names (lowercased)', () => {
+        const keys = buildSummaryKeys({ keys: [] }, ['Alice', 'Bob'], 'moderate');
+        expect(keys).toContain('alice');
+        expect(keys).toContain('bob');
+    });
+
+    it('includes significance tag', () => {
+        const keys = buildSummaryKeys({ keys: [] }, [], 'major');
+        expect(keys).toContain('summary:major');
+    });
+
+    it('includes arc name as keyword', () => {
+        const keys = buildSummaryKeys({ keys: [], arc: 'The Great War' }, [], 'moderate');
+        expect(keys).toContain('the great war');
+    });
+
+    it('includes when field as keyword', () => {
+        const keys = buildSummaryKeys({ keys: [], when: 'Evening, Day 3' }, [], 'moderate');
+        expect(keys).toContain('evening, day 3');
+    });
+
+    it('deduplicates keys', () => {
+        const keys = buildSummaryKeys(
+            { keys: ['alice', 'Alice', 'ALICE'] },
+            ['Alice'],
+            'moderate',
+        );
+        const aliceCount = keys.filter(k => k === 'alice').length;
+        expect(aliceCount).toBe(1);
+    });
+
+    it('filters out short keys (< 2 chars)', () => {
+        const keys = buildSummaryKeys({ keys: ['a', 'ok', 'x'] }, [], 'moderate');
+        expect(keys).not.toContain('a');
+        expect(keys).not.toContain('x');
+        expect(keys).toContain('ok');
+    });
+
+    it('handles missing/null keys gracefully', () => {
+        const keys = buildSummaryKeys({ keys: null, arc: null, when: null }, [], 'moderate');
+        expect(keys).toContain('summary:moderate');
+        expect(keys.length).toBe(1);
+    });
+
+    it('skips unspecified when', () => {
+        const keys = buildSummaryKeys({ keys: [], when: 'unspecified' }, [], 'moderate');
+        expect(keys).not.toContain('unspecified');
     });
 });

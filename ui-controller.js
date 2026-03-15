@@ -1951,7 +1951,24 @@ async function onOpenTreeEditor() {
                 // Content
                 if (entry.content) {
                     $expand.append($('<div class="tv-expand-label">Content</div>'));
-                    $expand.append($('<div class="tv-expand-content"></div>').text(entry.content));
+                    const $contentWrap = $('<div class="tv-content-copy-wrap"></div>');
+                    const $copyBtn = $('<button class="tv-content-copy-btn" title="Copy to clipboard"><i class="fa-solid fa-copy"></i></button>');
+                    $copyBtn.on('click', function (e) {
+                        e.stopPropagation();
+                        const $btn = $(this);
+                        navigator.clipboard.writeText(entry.content).then(() => {
+                            $btn.html('<i class="fa-solid fa-check"></i>').addClass('tv-content-copy-btn--done');
+                            setTimeout(() => {
+                                $btn.html('<i class="fa-solid fa-copy"></i>').removeClass('tv-content-copy-btn--done');
+                            }, 1500);
+                        }).catch(() => {
+                            $btn.html('<i class="fa-solid fa-xmark"></i>');
+                            setTimeout(() => $btn.html('<i class="fa-solid fa-copy"></i>'), 1500);
+                        });
+                    });
+                    $contentWrap.append($copyBtn);
+                    $contentWrap.append($('<div class="tv-expand-content"></div>').text(entry.content));
+                    $expand.append($contentWrap);
                 }
 
                 // Version history button
@@ -2079,9 +2096,24 @@ function buildVersionHistoryElement(versions) {
         }
 
         if (ver.previousContent) {
-            const $content = $('<div class="tv-version-history-content"></div>');
-            $content.text(ver.previousContent);
-            $item.append($content);
+            const $contentWrap = $('<div class="tv-content-copy-wrap"></div>');
+            const $copyBtn = $('<button class="tv-content-copy-btn" title="Copy to clipboard"><i class="fa-solid fa-copy"></i></button>');
+            $copyBtn.on('click', function (e) {
+                e.stopPropagation();
+                const $btn = $(this);
+                navigator.clipboard.writeText(ver.previousContent).then(() => {
+                    $btn.html('<i class="fa-solid fa-check"></i>').addClass('tv-content-copy-btn--done');
+                    setTimeout(() => {
+                        $btn.html('<i class="fa-solid fa-copy"></i>').removeClass('tv-content-copy-btn--done');
+                    }, 1500);
+                }).catch(() => {
+                    $btn.html('<i class="fa-solid fa-xmark"></i>');
+                    setTimeout(() => $btn.html('<i class="fa-solid fa-copy"></i>'), 1500);
+                });
+            });
+            $contentWrap.append($copyBtn);
+            $contentWrap.append($('<div class="tv-version-history-content"></div>').text(ver.previousContent));
+            $item.append($contentWrap);
         }
 
         $panel.append($item);

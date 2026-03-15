@@ -17,6 +17,14 @@ describe('isSummaryTitle', () => {
         expect(isSummaryTitle('[scene summary ...]')).toBe(true);
     });
 
+    it('matches [Act Summary ...] titles', () => {
+        expect(isSummaryTitle('[Act Summary] Act 1: The Beginning')).toBe(true);
+    });
+
+    it('matches [Story Summary ...] titles', () => {
+        expect(isSummaryTitle('[Story Summary] Story So Far')).toBe(true);
+    });
+
     it('rejects non-summary titles', () => {
         expect(isSummaryTitle('Elena hair color')).toBe(false);
         expect(isSummaryTitle('[Tracker: Elena]')).toBe(false);

@@ -11,7 +11,7 @@ import { trigramSimilarity } from './agent-utils.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const TRACKER_TITLE_PREFIX = /^\[tracker[^\]]*\]/i;
-const SUMMARY_TITLE_PREFIX = /^\[(?:scene\s+)?summary/i;
+const SUMMARY_TITLE_PREFIX = /^\[(?:scene\s+|act\s+|story\s+)?summary/i;
 
 /**
  * @typedef {Object} TreeNode

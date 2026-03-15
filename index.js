@@ -32,7 +32,7 @@ import { setInjectionSizes } from './agent-utils.js';
 import { buildNotebookPrompt, resetNotebookWriteGuard } from './tools/notebook.js';
 import { buildWorldStatePrompt, initWorldState } from './world-state.js';
 import { initPostTurnProcessor } from './post-turn-processor.js';
-import { buildSmartContextPrompt, initSmartContext, invalidatePreWarmCache } from './smart-context.js';
+import { buildSmartContextPrompt, initSmartContext, invalidatePreWarmCache, initHierarchyRefs } from './smart-context.js';
 import { initMemoryLifecycle } from './memory-lifecycle.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
@@ -79,6 +79,14 @@ async function init() {
 
     // Wire up smart context relevance feedback loop
     initSmartContext();
+
+    // 5A: Connect summary hierarchy to smart-context (lazy to avoid circular imports)
+    try {
+        const { getRolledUpSceneUids } = await import('./summary-hierarchy.js');
+        initHierarchyRefs({ getRolledUpSceneUids });
+    } catch (e) {
+        console.warn('[TunnelVision] Summary hierarchy init failed:', e);
+    }
 
     // Clean up legacy auto-summary prompt key from the old injection-based system
     try {

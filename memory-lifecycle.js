@@ -372,7 +372,7 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
         const title = (entry.comment || '').trim();
         if (!title) continue;
         const lowerTitle = title.toLowerCase();
-        if (lowerTitle.startsWith('[tracker') || lowerTitle.startsWith('[summary') || lowerTitle.startsWith('[scene summary')) continue;
+        if (lowerTitle.startsWith('[tracker') || lowerTitle.startsWith('[summary') || lowerTitle.startsWith('[scene summary') || lowerTitle.startsWith('[act summary') || lowerTitle.startsWith('[story summary')) continue;
         entries.push({ uid: entry.uid, title, content: (entry.content || '').substring(0, 200) });
     }
 
@@ -797,7 +797,7 @@ async function runConsistencyAudit(activeBooks, chatId) {
             const entry = bookData.entries[key];
             if (entry.disable) continue;
             const title = (entry.comment || '').trim().toLowerCase();
-            if (title.startsWith('[tracker') || title.startsWith('[summary') || title.startsWith('[scene summary')) continue;
+            if (title.startsWith('[tracker') || title.startsWith('[summary') || title.startsWith('[scene summary') || title.startsWith('[act summary') || title.startsWith('[story summary')) continue;
             allFacts.push({
                 uid: entry.uid,
                 title: entry.comment || '',

@@ -13,7 +13,7 @@
  */
 
 import { getTree, findNodeById, createTreeNode, saveTree, getSettings, ensureSummariesNode } from '../tree-store.js';
-import { createEntry } from '../entry-manager.js';
+import { createEntry, buildSummaryKeys } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
 import { markAutoSummaryComplete } from '../auto-summary.js';
 import { getContext } from '../../../../st-context.js';
@@ -151,7 +151,12 @@ When you notice related events forming a pattern or storyline, group them into "
                 participants: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: 'Names of characters/entities involved in this event. Used as keywords for cross-referencing.',
+                    description: 'Names of characters/entities involved in this event.',
+                },
+                keys: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: '8-15 keywords for retrieval. Include ALL character names (canonical form), locations, significant objects, themes (e.g. "confrontation", "betrayal"), emotional tones (e.g. "tension", "grief"), and arc name. Critical for long-term memory search.',
                 },
                 significance: {
                     type: 'string',
@@ -238,12 +243,11 @@ When you notice related events forming a pattern or storyline, group them into "
 
             const content = `[Scene Summary — ${significance}]\n${whenLine}Participants: ${participantList}\n\n${args.summary.trim()}`;
 
-            // Build keys from participants + significance
-            const keys = [];
-            if (Array.isArray(args.participants)) {
-                keys.push(...args.participants.map(p => String(p).trim()).filter(Boolean));
-            }
-            keys.push(`summary:${significance}`);
+            const participants = Array.isArray(args.participants)
+                ? args.participants.map(p => String(p).trim()).filter(Boolean)
+                : [];
+            const keysInput = { ...args, arc: arcLabel || args.create_arc || null };
+            const keys = buildSummaryKeys(keysInput, participants, significance);
 
             try {
                 const result = await createEntry(lorebook, {

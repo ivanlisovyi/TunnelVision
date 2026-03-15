@@ -228,6 +228,16 @@ async function runBackgroundSummary(chatId, count) {
             color: '#fdcb6e',
             summary: `"${result.title}"${factsMsg}`,
         });
+
+        // 5A: Check if act/story rollup is needed
+        if (result.uid) {
+            try {
+                const { checkAndRollup } = await import('./summary-hierarchy.js');
+                await checkAndRollup(lorebook, result.uid);
+            } catch (e) {
+                console.warn('[TunnelVision] Summary hierarchy rollup failed:', e);
+            }
+        }
     } catch (e) {
         console.error('[TunnelVision] Auto-summary failed:', e);
         toastr.error(`Auto-summary failed: ${e.message}`, 'TunnelVision');

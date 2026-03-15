@@ -368,7 +368,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
                 const t = (e.comment || '').trim();
                 if (!t) continue;
                 const lt = t.toLowerCase();
-                if (lt.startsWith('[tracker') || lt.startsWith('[summary') || lt.startsWith('[scene summary')) continue;
+                if (lt.startsWith('[tracker') || lt.startsWith('[summary') || lt.startsWith('[scene summary') || lt.startsWith('[act summary') || lt.startsWith('[story summary')) continue;
 
                 const entryKeys = (e.key || []).map(k => String(k).trim().toLowerCase()).filter(k => k.length >= 2);
                 const isCurrentlyRelevant = entryKeys.some(k => recentTextLower.includes(k))
@@ -701,6 +701,16 @@ async function archiveScene(targetBook, chat, sceneChange, chatId) {
             setWatermark(sceneEndIdx);
 
             console.log(`[TunnelVision] Scene archived: "${summaryResult.title}" (${sceneChange.type}), messages up to #${sceneEndIdx}`);
+
+            // 5A: Check if act/story rollup is needed
+            if (summaryResult.uid) {
+                try {
+                    const { checkAndRollup } = await import('./summary-hierarchy.js');
+                    await checkAndRollup(targetBook, summaryResult.uid);
+                } catch (e) {
+                    console.warn('[TunnelVision] Summary hierarchy rollup failed:', e);
+                }
+            }
         }
     } catch (e) {
         console.warn('[TunnelVision] Scene archiving failed:', e);
@@ -784,6 +794,7 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
         '- Relationships: update when a relationship meaningfully changes (alliance formed, trust broken), NOT for routine interactions',
         '- Location: update when a character relocates or travels, NOT for moving within the same area',
         '- Status: update for injuries, power changes, role changes — NOT for trivial physical actions',
+        '- Appearance/outfit: update when a character changes clothes, puts on/removes accessories, or their physical state changes visibly (e.g. disheveled, injured, cleaned up)',
         '',
         'Most of the time, no trackers need updating. An empty array [] is the correct response unless something genuinely changed.',
         '',
@@ -795,6 +806,12 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
         '',
         'For each tracker that needs updating, provide the COMPLETE updated content (preserving its schema/format) with only the changed values modified.',
         'If a tracker does not need changes, do NOT include it.',
+        '',
+        'STRUCTURAL RULES:',
+        '- Never remove required sections (## Current Status, ## Appearance, ## Relationships, ## Active Plans, ## Active Concerns)',
+        '- You may add new ## sections when the narrative introduces a trackable dimension not yet covered',
+        '- Preserve all existing optional sections unless their content is no longer relevant',
+        '- The ## Appearance section should reflect what the character is CURRENTLY wearing/carrying, updated whenever outfit changes occur',
         '',
         'Respond with a JSON array of updates. If no trackers need updating, respond with an empty array [].',
         'Format: [{"uid": 123, "book": "lorebook name", "content": "full updated tracker content"}]',
@@ -1140,12 +1157,30 @@ export async function createTrackerForCharacter(characterName) {
             '- Represents the current snapshot rather than historical events',
             '- Would cause a continuity error if the AI lost track of it',
             '',
+            'REQUIRED SECTIONS — always include these headers, even if sparse at first:',
+            '',
+            '## Current Status',
+            '(Location, timepoint/time of day, who they are with, what they are doing, immediate next steps)',
+            '',
+            '## Appearance',
+            '(What they are currently wearing — top, bottom, shoes, accessories, jewelry, hairstyle if changed from default. Note items that were gifted, borrowed, or have narrative significance. Update when outfit changes.)',
+            '',
+            '## Relationships',
+            '(One line per significant character: current dynamic, status label, recent shift if any)',
+            '',
+            '## Active Plans',
+            '(Near-term commitments, scheduled events, stated intentions)',
+            '',
+            '## Active Concerns',
+            '(Unresolved tensions, risks, things the character is worried about or monitoring)',
+            '',
+            'OPTIONAL SECTIONS — add any of these (or your own) when the narrative warrants them:',
+            '## Internal State, ## Inventory, ## Living Situation, ## Sexual / Intimacy State, ## Relationship Detail, etc.',
+            '',
             'GUIDELINES:',
-            '- Use ## headers for sections (e.g. ## Current Status, ## Relationships, ## Active Situations)',
             '- Use terse key: value pairs — not full sentences or narratives',
-            '- Omit anything static that the character card already covers (name, base personality, appearance basics)',
+            '- Omit anything static that the character card already covers (name, base personality, default appearance)',
             '- Omit detailed event history — facts already handle that',
-            '- Focus on: where they are NOW, who they\'re with, active conflicts/goals, unresolved issues, current relationship dynamics, possessions that matter, commitments/plans ahead',
             '- A good tracker is typically 15-40 lines, not 100+',
             '- If a relationship exists, track its CURRENT state (e.g. "Kate Fuchs: cohabiting, exclusive, rapidly escalating") not its full history',
             '',
@@ -1165,9 +1200,28 @@ export async function createTrackerForCharacter(characterName) {
     }
 
     if (!trackerContent) {
+        const skeleton = [
+            '## Current Status',
+            'Location: unknown',
+            'Timepoint: —',
+            'With: —',
+            '',
+            '## Appearance',
+            'Outfit: (not yet described)',
+            '',
+            '## Relationships',
+            '(none tracked yet)',
+            '',
+            '## Active Plans',
+            '(none)',
+            '',
+            '## Active Concerns',
+            '(none)',
+        ].join('\n');
+
         trackerContent = facts.length > 0
-            ? `## Known Facts\n${facts.map(f => `- ${f}`).join('\n')}`
-            : `## ${characterName}\n(No facts gathered yet — fill in details as the story progresses)`;
+            ? `${skeleton}\n\n## Known Facts\n${facts.map(f => `- ${f}`).join('\n')}`
+            : skeleton;
     }
 
     const title = `[Tracker: ${characterName}]`;

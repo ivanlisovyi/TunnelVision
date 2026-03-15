@@ -994,3 +994,43 @@ function findNodeContainingUid(node, uid) {
     }
     return null;
 }
+
+/**
+ * Build a rich keyword array for a summary entry.
+ * Merges LLM-generated keys with participants, significance, arc, and time reference.
+ * @param {Object} parsed - The parsed LLM response
+ * @param {string[]} participants - Character names involved
+ * @param {string} significance - Significance level
+ * @returns {string[]}
+ */
+export function buildSummaryKeys(parsed, participants, significance) {
+    if (!parsed || typeof parsed !== 'object') parsed = {};
+    if (!Array.isArray(participants)) participants = [];
+
+    const keySet = new Set();
+
+    if (Array.isArray(parsed.keys)) {
+        for (const k of parsed.keys) {
+            if (k == null) continue;
+            const trimmed = String(k).trim().toLowerCase();
+            if (trimmed.length >= 2) keySet.add(trimmed);
+        }
+    }
+
+    for (const p of participants) {
+        const trimmed = String(p).trim();
+        if (trimmed) keySet.add(trimmed.toLowerCase());
+    }
+
+    keySet.add(`summary:${significance || 'moderate'}`);
+
+    if (parsed.arc && typeof parsed.arc === 'string' && parsed.arc.trim()) {
+        keySet.add(parsed.arc.trim().toLowerCase());
+    }
+
+    if (typeof parsed.when === 'string' && parsed.when && parsed.when !== 'unspecified') {
+        keySet.add(parsed.when.trim().toLowerCase());
+    }
+
+    return [...keySet];
+}

@@ -39,6 +39,17 @@ import { getEntryTitle, getMaxContextTokens } from './agent-utils.js';
 import { getWorldStateSections } from './world-state.js';
 import { getActiveArcs } from './arc-tracker.js';
 
+// ── Summary Hierarchy (5A) lazy accessor ─────────────────────────
+
+let _getRolledUpSceneUids = () => new Set();
+
+/**
+ * Initialize hierarchy references. Called once after module load to avoid circular imports.
+ */
+export function initHierarchyRefs(refs) {
+    if (refs.getRolledUpSceneUids) _getRolledUpSceneUids = refs.getRolledUpSceneUids;
+}
+
 // ── Pre-Warming Cache ────────────────────────────────────────────
 
 /** @type {Array|null} Pre-computed scored candidates from background pre-warm. */
@@ -161,6 +172,11 @@ const WARM_RECENCY_MS = 12 * 60 * 60 * 1000;
  */
 export function computeEntryTier(entry, { isTracker, isSummary, feedbackMap, relevanceMap, chatLength, maxUid, arcOverlap = 0 }) {
     if (isTracker) return TIER_HOT;
+
+    // 5A: Story summary is always hot; act summaries are warm
+    const lc = (entry.comment || '').toLowerCase();
+    if (lc.startsWith('[story summary]')) return TIER_HOT;
+    if (lc.startsWith('[act summary]')) return TIER_WARM;
 
     const fb = feedbackMap?.[entry.uid];
     const lastRef = fb?.lastReferenced || 0;
@@ -870,6 +886,12 @@ function scoreCandidates(activeBooks, recentText) {
 
     const chatLength = getContext().chat?.length || 0;
 
+    // 5A: Pre-compute rolled-up scene UIDs for hierarchy-aware scoring
+    let _rolledUpSceneUids;
+    try {
+        _rolledUpSceneUids = _getRolledUpSceneUids();
+    } catch { _rolledUpSceneUids = new Set(); }
+
     for (const bookName of activeBooks) {
         const bookData = getCachedWorldInfoSync(bookName);
         if (!bookData?.entries) continue;
@@ -883,12 +905,28 @@ function scoreCandidates(activeBooks, recentText) {
 
             const isTracker = trackerSet.has(entry.uid);
             const lowerComment = (entry.comment || '').toLowerCase();
-            const isSummary = lowerComment.startsWith('[summary]') || lowerComment.startsWith('[scene summary');
+            const isActSummary = lowerComment.startsWith('[act summary]');
+            const isStorySummary = lowerComment.startsWith('[story summary]');
+            const isSummary = isActSummary || isStorySummary
+                || lowerComment.startsWith('[summary]') || lowerComment.startsWith('[scene summary');
+
+            // 5A: Story summary is always injected with highest priority
+            if (isStorySummary) {
+                candidates.push({ entry, bookName, score: 50, isTracker: false, isSummary: true, tier: TIER_HOT });
+                continue;
+            }
 
             let relevance = scoreEntry(entry, recentText, presentKeySet);
 
+            // 5A: Act summaries get a warm-tier boost; rolled-up scenes get penalized
+            if (isActSummary) {
+                relevance += 5;
+            } else if (isSummary && _rolledUpSceneUids.has(entry.uid)) {
+                relevance -= 10;
+            }
+
             // Early exit: if max possible score can't reach inclusion threshold, skip
-            const threshold = isTracker ? 1 : isSummary ? 3 : 5;
+            const threshold = isTracker ? 1 : (isSummary || isActSummary) ? 3 : 5;
             if (relevance + maxAllBonus < threshold) continue;
 
             if (relevance > 0) {
@@ -1013,9 +1051,11 @@ export function buildSmartContextPrompt() {
     const maxChars = computeDynamicBudget(candidates, settings, phase);
 
     // 1C: Score-density budget allocation
-    // Reserve at least 2 slots for tracker entries, then fill by density
+    // Reserve slots for story summary + trackers, then fill by density
+    const storySummaryCand = candidates.find(c =>
+        c.isSummary && (c.entry.comment || '').toLowerCase().startsWith('[story summary]'));
     const trackerCandidates = candidates.filter(c => c.isTracker);
-    const nonTrackerCandidates = candidates.filter(c => !c.isTracker);
+    const nonTrackerCandidates = candidates.filter(c => !c.isTracker && c !== storySummaryCand);
 
     // Compute density (score per character) for non-tracker entries
     const withDensity = nonTrackerCandidates.map(c => ({
@@ -1030,7 +1070,21 @@ export function buildSmartContextPrompt() {
     let totalChars = 0;
     let trackerSlots = 0;
 
-    // First: include up to 2 tracker entries (reserved slots)
+    // 5A: Story summary always gets first slot (guaranteed injection)
+    if (storySummaryCand) {
+        const entryText = formatEntryForInjection(
+            storySummaryCand.entry, storySummaryCand.bookName, false, true);
+        selected.push(entryText);
+        selectedUids.push(storySummaryCand.entry.uid);
+        selectedEntryInfo.push({
+            uid: storySummaryCand.entry.uid,
+            title: (storySummaryCand.entry.comment || '').trim(),
+            keys: (storySummaryCand.entry.key || []).map(k => String(k).trim()),
+        });
+        totalChars += entryText.length;
+    }
+
+    // Then: include up to 2 tracker entries (reserved slots)
     for (const c of trackerCandidates) {
         if (trackerSlots >= 2 || selected.length >= maxEntries) break;
         const entryText = formatEntryForInjection(c.entry, c.bookName, c.isTracker, c.isSummary);
