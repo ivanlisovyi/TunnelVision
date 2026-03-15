@@ -22,6 +22,7 @@ import {
 } from '../llm-sidecar.js';
 
 const validProfile = {
+    enabled: true,
     endpoint: 'https://api.example.com/v1',
     apiKey: 'sk-test-key-123',
     model: 'gpt-4o-mini',
@@ -56,13 +57,23 @@ describe('getSidecarConfig', () => {
         expect(getSidecarConfig()).toBeNull();
     });
 
+    it('returns null when not enabled', () => {
+        mockSidecarProfile = { ...validProfile, enabled: false };
+        expect(getSidecarConfig()).toBeNull();
+    });
+
+    it('returns null when enabled flag is missing', () => {
+        mockSidecarProfile = { endpoint: 'https://example.com', apiKey: 'key' };
+        expect(getSidecarConfig()).toBeNull();
+    });
+
     it('returns null when endpoint is empty', () => {
-        mockSidecarProfile = { endpoint: '', apiKey: 'key', model: '', format: 'openai' };
+        mockSidecarProfile = { enabled: true, endpoint: '', apiKey: 'key', model: '', format: 'openai' };
         expect(getSidecarConfig()).toBeNull();
     });
 
     it('returns null when apiKey is empty', () => {
-        mockSidecarProfile = { endpoint: 'https://example.com', apiKey: '', model: '', format: 'openai' };
+        mockSidecarProfile = { enabled: true, endpoint: 'https://example.com', apiKey: '', model: '', format: 'openai' };
         expect(getSidecarConfig()).toBeNull();
     });
 
@@ -79,7 +90,7 @@ describe('getSidecarConfig', () => {
     });
 
     it('trims whitespace from config values', () => {
-        mockSidecarProfile = { endpoint: '  https://api.example.com  ', apiKey: ' key ', model: ' model ', format: ' OpenAI ' };
+        mockSidecarProfile = { enabled: true, endpoint: '  https://api.example.com  ', apiKey: ' key ', model: ' model ', format: ' OpenAI ' };
         const config = getSidecarConfig();
         expect(config.endpoint).toBe('https://api.example.com');
         expect(config.apiKey).toBe('key');
@@ -88,13 +99,13 @@ describe('getSidecarConfig', () => {
     });
 
     it('defaults format to openai when missing', () => {
-        mockSidecarProfile = { endpoint: 'https://api.example.com', apiKey: 'key' };
+        mockSidecarProfile = { enabled: true, endpoint: 'https://api.example.com', apiKey: 'key' };
         const config = getSidecarConfig();
         expect(config.format).toBe('openai');
     });
 
     it('defaults maxTokens to 1000 when missing', () => {
-        mockSidecarProfile = { endpoint: 'https://api.example.com', apiKey: 'key' };
+        mockSidecarProfile = { enabled: true, endpoint: 'https://api.example.com', apiKey: 'key' };
         const config = getSidecarConfig();
         expect(config.maxTokens).toBe(1000);
     });
@@ -113,12 +124,17 @@ describe('isSidecarConfigured', () => {
     });
 
     it('returns false when endpoint is missing', () => {
-        mockSidecarProfile = { apiKey: 'key' };
+        mockSidecarProfile = { enabled: true, apiKey: 'key' };
         expect(isSidecarConfigured()).toBe(false);
     });
 
     it('returns false when apiKey is missing', () => {
-        mockSidecarProfile = { endpoint: 'https://example.com' };
+        mockSidecarProfile = { enabled: true, endpoint: 'https://example.com' };
+        expect(isSidecarConfigured()).toBe(false);
+    });
+
+    it('returns false when not enabled', () => {
+        mockSidecarProfile = { ...validProfile, enabled: false };
         expect(isSidecarConfigured()).toBe(false);
     });
 });
@@ -338,8 +354,18 @@ describe('getEmbeddingConfig', () => {
         expect(getEmbeddingConfig()).toBeNull();
     });
 
-    it('returns null when embeddingProfile is not enabled', () => {
-        mockEmbeddingProfile = { enabled: false, endpoint: 'https://example.com', apiKey: 'key' };
+    it('returns null when embeddingProfile is not an object', () => {
+        mockEmbeddingProfile = 'string';
+        expect(getEmbeddingConfig()).toBeNull();
+    });
+
+    it('returns null when not enabled', () => {
+        mockEmbeddingProfile = { ...validEmbeddingProfile, enabled: false };
+        expect(getEmbeddingConfig()).toBeNull();
+    });
+
+    it('returns null when enabled flag is missing', () => {
+        mockEmbeddingProfile = { endpoint: 'https://example.com', apiKey: 'key' };
         expect(getEmbeddingConfig()).toBeNull();
     });
 
@@ -348,7 +374,7 @@ describe('getEmbeddingConfig', () => {
         expect(getEmbeddingConfig()).toBeNull();
     });
 
-    it('returns config when enabled with valid endpoint', () => {
+    it('returns config with valid endpoint', () => {
         mockEmbeddingProfile = { ...validEmbeddingProfile };
         const config = getEmbeddingConfig();
         expect(config).toEqual({
@@ -377,11 +403,6 @@ describe('getEmbeddingConfig', () => {
 
 describe('isEmbeddingSupported', () => {
     it('returns false when embedding is not configured', () => {
-        expect(isEmbeddingSupported()).toBe(false);
-    });
-
-    it('returns false when embedding is disabled', () => {
-        mockEmbeddingProfile = { enabled: false, endpoint: 'https://example.com', apiKey: 'key', format: 'openai' };
         expect(isEmbeddingSupported()).toBe(false);
     });
 

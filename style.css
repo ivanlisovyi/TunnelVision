@@ -546,6 +546,94 @@
     background: rgba(239, 68, 68, 0.1) !important;
 }
 
+.tv-btn-outline-danger {
+    background: transparent;
+    color: var(--SmartThemeQuoteColor, #999);
+    border: 1px solid rgba(214, 48, 49, 0.3);
+}
+
+.tv-btn-outline-danger:hover {
+    background: rgba(214, 48, 49, 0.12);
+    border-color: rgba(214, 48, 49, 0.5);
+    color: #d63031;
+}
+
+/* ===== Text Input (single-line) ===== */
+.tv-text-input {
+    width: 100%;
+    padding: 7px 10px;
+    background: var(--black30a, rgba(0, 0, 0, 0.15));
+    color: var(--SmartThemeBodyColor);
+    border: 1px solid rgba(240, 148, 108, 0.25);
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    transition: all 0.2s ease;
+    box-sizing: border-box;
+}
+
+.tv-text-input:hover {
+    border-color: rgba(240, 148, 108, 0.5);
+    background: var(--black50a, rgba(0, 0, 0, 0.25));
+}
+
+.tv-text-input:focus {
+    outline: none;
+    border-color: #f0946c;
+    box-shadow: 0 0 0 2px rgba(240, 148, 108, 0.15);
+}
+
+.tv-text-input::placeholder {
+    color: var(--SmartThemeQuoteColor, #888);
+    opacity: 0.5;
+}
+
+/* ===== API Config Fields ===== */
+.tv-api-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    background: var(--black30a, rgba(0, 0, 0, 0.12));
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.08));
+    border-radius: 8px;
+}
+
+.tv-field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.tv-field-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--SmartThemeQuoteColor, #999);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.tv-field-row {
+    display: flex;
+    gap: 8px;
+}
+
+.tv-api-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.tv-api-status {
+    font-size: 11px;
+    opacity: 0.8;
+    margin-left: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* ===== Build Help Text ===== */
 .tv-build-help {
     font-size: 11px;

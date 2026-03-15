@@ -209,6 +209,7 @@ export function bindUIEvents() {
     $('#tv_connection_profile').on('change', onConnectionProfileChange);
 
     // Sidecar background model
+    $('#tv_sidecar_enabled').on('change', onSidecarToggle);
     $('#tv_sidecar_format').on('change', onSidecarSettingChange);
     $('#tv_sidecar_endpoint').on('change', onSidecarSettingChange);
     $('#tv_sidecar_api_key').on('change', onSidecarSettingChange);
@@ -1345,6 +1346,9 @@ function populateConnectionProfiles() {
 
 function loadSidecarSettingsToUI(settings) {
     const profile = settings.sidecarProfile || {};
+    const enabled = !!profile.enabled;
+    $('#tv_sidecar_enabled').prop('checked', enabled);
+    $('#tv_sidecar_fields').toggle(enabled);
     $('#tv_sidecar_format').val(profile.format || 'openai');
     $('#tv_sidecar_endpoint').val(profile.endpoint || '');
     $('#tv_sidecar_api_key').val(profile.apiKey || '');
@@ -1354,21 +1358,32 @@ function loadSidecarSettingsToUI(settings) {
 
 function saveSidecarSettings() {
     const settings = getSettings();
-    const endpoint = $('#tv_sidecar_endpoint').val()?.trim() || '';
-    const apiKey = $('#tv_sidecar_api_key').val()?.trim() || '';
+    const enabled = $('#tv_sidecar_enabled').is(':checked');
 
-    if (!endpoint && !apiKey) {
+    if (!enabled) {
         settings.sidecarProfile = null;
     } else {
         settings.sidecarProfile = {
+            enabled: true,
             format: $('#tv_sidecar_format').val() || 'openai',
-            endpoint,
-            apiKey,
+            endpoint: $('#tv_sidecar_endpoint').val()?.trim() || '',
+            apiKey: $('#tv_sidecar_api_key').val()?.trim() || '',
             model: $('#tv_sidecar_model').val()?.trim() || '',
             maxTokens: Math.max(100, parseInt($('#tv_sidecar_max_tokens').val(), 10) || 1000),
         };
     }
     saveSettingsDebounced();
+}
+
+function onSidecarToggle() {
+    const enabled = $('#tv_sidecar_enabled').is(':checked');
+    $('#tv_sidecar_fields').toggle(enabled);
+    saveSidecarSettings();
+    if (!enabled) {
+        try {
+            import('./llm-sidecar.js').then(m => m.resetCircuitBreaker());
+        } catch { /* ignore */ }
+    }
 }
 
 function onSidecarSettingChange() {
@@ -1382,7 +1397,7 @@ async function onSidecarTest() {
     const $btn = $('#tv_sidecar_test');
     const $status = $('#tv_sidecar_status');
     $btn.prop('disabled', true).find('i').removeClass('fa-plug').addClass('fa-spinner fa-spin');
-    $status.show().text('Testing connection...');
+    $status.text('Testing...').css('color', '');
 
     try {
         saveSidecarSettings();
@@ -1390,7 +1405,7 @@ async function onSidecarTest() {
         const result = await testSidecarConnectivity();
         $status.text(result.message).css('color', result.ok ? '#00b894' : '#d63031');
     } catch (e) {
-        $status.text('Test failed: ' + e.message).css('color', '#d63031');
+        $status.text('Failed: ' + e.message).css('color', '#d63031');
     } finally {
         $btn.prop('disabled', false).find('i').removeClass('fa-spinner fa-spin').addClass('fa-plug');
     }
@@ -1400,8 +1415,9 @@ function onSidecarClear() {
     const settings = getSettings();
     settings.sidecarProfile = null;
     saveSettingsDebounced();
+    $('#tv_sidecar_enabled').prop('checked', false);
     loadSidecarSettingsToUI(settings);
-    $('#tv_sidecar_status').show().text('Sidecar configuration cleared.').css('color', '');
+    $('#tv_sidecar_status').text('Cleared.').css('color', '');
     try {
         import('./llm-sidecar.js').then(m => m.resetCircuitBreaker());
     } catch { /* ignore */ }
@@ -1425,7 +1441,7 @@ function saveEmbeddingSettings() {
     const enabled = $('#tv_embedding_enabled').is(':checked');
 
     if (!enabled) {
-        settings.embeddingProfile = { enabled: false };
+        settings.embeddingProfile = null;
     } else {
         settings.embeddingProfile = {
             enabled: true,
@@ -1457,7 +1473,7 @@ async function onEmbeddingTest() {
     const $btn = $('#tv_embedding_test');
     const $status = $('#tv_embedding_status');
     $btn.prop('disabled', true).find('i').removeClass('fa-plug').addClass('fa-spinner fa-spin');
-    $status.show().text('Testing embedding endpoint...');
+    $status.text('Testing...').css('color', '');
 
     try {
         saveEmbeddingSettings();
@@ -1465,7 +1481,7 @@ async function onEmbeddingTest() {
         const result = await testEmbeddingConnectivity();
         $status.text(result.message).css('color', result.ok ? '#00b894' : '#d63031');
     } catch (e) {
-        $status.text('Test failed: ' + e.message).css('color', '#d63031');
+        $status.text('Failed: ' + e.message).css('color', '#d63031');
     } finally {
         $btn.prop('disabled', false).find('i').removeClass('fa-spinner fa-spin').addClass('fa-plug');
     }
@@ -1473,10 +1489,11 @@ async function onEmbeddingTest() {
 
 function onEmbeddingClear() {
     const settings = getSettings();
-    settings.embeddingProfile = { enabled: false };
+    settings.embeddingProfile = null;
     saveSettingsDebounced();
+    $('#tv_embedding_enabled').prop('checked', false);
     loadEmbeddingSettingsToUI(settings);
-    $('#tv_embedding_status').show().text('Embedding configuration cleared.').css('color', '');
+    $('#tv_embedding_status').text('Cleared.').css('color', '');
     try {
         import('./embedding-cache.js').then(m => m.clearEmbeddingCache());
     } catch { /* ignore */ }

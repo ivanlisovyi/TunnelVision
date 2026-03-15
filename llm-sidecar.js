@@ -42,7 +42,7 @@ export function isSidecarConfigured() {
 export function getSidecarConfig() {
     const settings = getSettings();
     const profile = settings.sidecarProfile;
-    if (!profile || typeof profile !== 'object') return null;
+    if (!profile || typeof profile !== 'object' || !profile.enabled) return null;
 
     const endpoint = (profile.endpoint || '').trim();
     const apiKey = (profile.apiKey || '').trim();
@@ -249,12 +249,11 @@ export function getEmbeddingConfig() {
     if (!profile || typeof profile !== 'object' || !profile.enabled) return null;
 
     const endpoint = (profile.endpoint || '').trim();
-    const apiKey = (profile.apiKey || '').trim();
     if (!endpoint) return null;
 
     return {
         endpoint,
-        apiKey,
+        apiKey: (profile.apiKey || '').trim(),
         model: (profile.model || '').trim(),
         format: (profile.format || 'openai').trim().toLowerCase(),
     };
