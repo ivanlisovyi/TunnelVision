@@ -132,6 +132,63 @@ function deriveAliasKeys(entry) {
     return uniqueAliases;
 }
 
+// ── Tiered Memory Architecture (3A) ──────────────────────────────
+
+export const TIER_HOT = 'hot';
+export const TIER_WARM = 'warm';
+export const TIER_COLD = 'cold';
+
+const HOT_RECENCY_MS = 2 * 60 * 60 * 1000;
+const WARM_RECENCY_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Classify an entry into a memory tier based on its role, recency, and engagement.
+ *
+ * - Hot: trackers, entries referenced/injected within ~10 turns, entries linked to active arcs
+ * - Warm: recently created facts (within last ~100 turns by UID), entries with recent feedback
+ * - Cold: everything else (older facts, scene summaries)
+ *
+ * @param {Object} entry
+ * @param {Object} opts
+ * @param {boolean} opts.isTracker
+ * @param {boolean} opts.isSummary
+ * @param {Record<string, Object>} opts.feedbackMap
+ * @param {Record<string, number>} opts.relevanceMap
+ * @param {number} opts.chatLength
+ * @param {number} opts.maxUid
+ * @param {number} [opts.arcOverlap] - Non-zero if entry overlaps an active arc
+ * @returns {'hot'|'warm'|'cold'}
+ */
+export function computeEntryTier(entry, { isTracker, isSummary, feedbackMap, relevanceMap, chatLength, maxUid, arcOverlap = 0 }) {
+    if (isTracker) return TIER_HOT;
+
+    const fb = feedbackMap?.[entry.uid];
+    const lastRef = fb?.lastReferenced || 0;
+    const lastSeen = relevanceMap?.[entry.uid] || 0;
+    const mostRecent = Math.max(lastRef, lastSeen);
+    const elapsed = mostRecent > 0 ? Date.now() - mostRecent : Infinity;
+
+    if (elapsed < HOT_RECENCY_MS) return TIER_HOT;
+    if (arcOverlap > 0 && elapsed < WARM_RECENCY_MS) return TIER_HOT;
+
+    const uidRatio = maxUid > 0 ? entry.uid / maxUid : 1;
+    const warmUidThreshold = chatLength > 0
+        ? Math.max(1 - (100 / chatLength), 0.5)
+        : 0.8;
+
+    if (uidRatio > warmUidThreshold) return TIER_WARM;
+    if (elapsed < WARM_RECENCY_MS) return TIER_WARM;
+    if (fb && fb.references > 0 && fb.injections > 0 && fb.references / fb.injections > 0.3) return TIER_WARM;
+
+    return TIER_COLD;
+}
+
+const TIER_SCORE_ADJUST = {
+    [TIER_HOT]: { thresholdOverride: 1, bonus: 3 },
+    [TIER_WARM]: { thresholdOverride: null, bonus: 0 },
+    [TIER_COLD]: { thresholdOverride: null, bonus: -5 },
+};
+
 // ── Injection Cooldown (1B) ──────────────────────────────────────
 
 const COOLDOWN_WINDOW = 3;
@@ -776,7 +833,7 @@ function worldStateBoost(entry, signals) {
  * Tree proximity (2B) and predictive boost (3B) are applied as a second pass.
  * @param {string[]} activeBooks - Active TV-managed lorebook names
  * @param {string} recentText - Lowercased recent chat text
- * @returns {Array<{entry: Object, bookName: string, score: number, isTracker: boolean, isSummary: boolean}>}
+ * @returns {Array<{entry: Object, bookName: string, score: number, isTracker: boolean, isSummary: boolean, tier: string}>}
  */
 function scoreCandidates(activeBooks, recentText) {
     const candidates = [];
@@ -810,6 +867,8 @@ function scoreCandidates(activeBooks, recentText) {
     const maxPhaseBonus = 9;
     const maxArcBonus = 10;
     const maxAllBonus = maxDecayBonus + maxRecencyBonus + maxWsBonus + maxFbBonus + maxPhaseBonus + maxArcBonus;
+
+    const chatLength = getContext().chat?.length || 0;
 
     for (const bookName of activeBooks) {
         const bookData = getCachedWorldInfoSync(bookName);
@@ -848,14 +907,28 @@ function scoreCandidates(activeBooks, recentText) {
             relevance += cooldownPenalty(entry.uid);
             relevance += phaseBoost(entry, phase);
             relevance += negativeSignalPenalty(entry, feedbackMap);
-            relevance += arcBoost(entry);
+
+            const entryArcBoost = arcBoost(entry);
+            relevance += entryArcBoost;
+
+            // 3A: Tiered memory — classify entry and apply tier-based scoring
+            const tier = computeEntryTier(entry, {
+                isTracker, isSummary, feedbackMap, relevanceMap,
+                chatLength, maxUid, arcOverlap: entryArcBoost,
+            });
+            const tierAdj = TIER_SCORE_ADJUST[tier];
+            relevance += tierAdj.bonus;
+
+            const effectiveThreshold = tierAdj.thresholdOverride != null
+                ? tierAdj.thresholdOverride
+                : threshold;
 
             if (isTracker && relevance > 0) {
-                candidates.push({ entry, bookName, score: relevance + 20, isTracker: true, isSummary: false });
-            } else if (isSummary && relevance >= 3) {
-                candidates.push({ entry, bookName, score: relevance + 2, isTracker: false, isSummary: true });
-            } else if (relevance >= 5) {
-                candidates.push({ entry, bookName, score: relevance, isTracker, isSummary });
+                candidates.push({ entry, bookName, score: relevance + 20, isTracker: true, isSummary: false, tier });
+            } else if (isSummary && relevance >= Math.min(effectiveThreshold, 3)) {
+                candidates.push({ entry, bookName, score: relevance + 2, isTracker: false, isSummary: true, tier });
+            } else if (relevance >= effectiveThreshold) {
+                candidates.push({ entry, bookName, score: relevance, isTracker, isSummary, tier });
             }
         }
     }
@@ -1112,7 +1185,7 @@ function applyRerankResults(allCandidates, topN, response) {
 
 // ── Formatting ───────────────────────────────────────────────────
 
-function formatEntryForInjection(entry, bookName, isTracker, isSummary = false) {
+function formatEntryForInjection(entry, bookName, isTracker, isSummary = false, tier = TIER_WARM) {
     const tag = isTracker ? ' [Tracker]' : isSummary ? ' [Summary]' : '';
     return `[${getEntryTitle(entry)}${tag} — ${bookName}, UID ${entry.uid}]\n${(entry.content || '').trim()}`;
 }

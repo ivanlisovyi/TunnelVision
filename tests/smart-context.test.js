@@ -28,7 +28,7 @@ vi.mock('../../../st-context.js', () => ({
     }),
 }));
 
-import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache } from '../smart-context.js';
+import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD } from '../smart-context.js';
 
 beforeEach(() => {
     // Reset state between tests
@@ -253,6 +253,72 @@ describe('processRelevanceFeedback', () => {
 
         processRelevanceFeedback();
         expect(getFeedbackMap()).toEqual({});
+    });
+});
+
+// ── computeEntryTier ─────────────────────────────────────────────
+
+describe('computeEntryTier', () => {
+    const baseOpts = {
+        isTracker: false,
+        isSummary: false,
+        feedbackMap: {},
+        relevanceMap: {},
+        chatLength: 200,
+        maxUid: 1000,
+        arcOverlap: 0,
+    };
+
+    it('classifies trackers as hot', () => {
+        const entry = { uid: 500 };
+        expect(computeEntryTier(entry, { ...baseOpts, isTracker: true })).toBe(TIER_HOT);
+    });
+
+    it('classifies recently referenced entries as hot', () => {
+        const entry = { uid: 500 };
+        const opts = {
+            ...baseOpts,
+            feedbackMap: { 500: { lastReferenced: Date.now() - 30 * 60 * 1000, injections: 1, references: 1 } },
+        };
+        expect(computeEntryTier(entry, opts)).toBe(TIER_HOT);
+    });
+
+    it('classifies arc-overlapping recently seen entries as hot', () => {
+        const entry = { uid: 500 };
+        const opts = {
+            ...baseOpts,
+            relevanceMap: { 500: Date.now() - 3 * 60 * 60 * 1000 },
+            arcOverlap: 4,
+        };
+        expect(computeEntryTier(entry, opts)).toBe(TIER_HOT);
+    });
+
+    it('classifies recently created entries as warm', () => {
+        const entry = { uid: 950 };
+        expect(computeEntryTier(entry, baseOpts)).toBe(TIER_WARM);
+    });
+
+    it('classifies entries with recent feedback as warm', () => {
+        const entry = { uid: 100 };
+        const opts = {
+            ...baseOpts,
+            feedbackMap: { 100: { lastReferenced: Date.now() - 6 * 60 * 60 * 1000, injections: 5, references: 3 } },
+        };
+        expect(computeEntryTier(entry, opts)).toBe(TIER_WARM);
+    });
+
+    it('classifies old entries with no engagement as cold', () => {
+        const entry = { uid: 50 };
+        expect(computeEntryTier(entry, baseOpts)).toBe(TIER_COLD);
+    });
+
+    it('classifies old entries with poor reference rate as cold', () => {
+        const entry = { uid: 50 };
+        const opts = {
+            ...baseOpts,
+            feedbackMap: { 50: { lastReferenced: Date.now() - 48 * 60 * 60 * 1000, injections: 10, references: 1 } },
+        };
+        expect(computeEntryTier(entry, opts)).toBe(TIER_COLD);
     });
 });
 

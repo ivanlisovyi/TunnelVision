@@ -23,7 +23,7 @@ import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids, isTrackerTitle, isSummaryTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
-import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
+import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM, recordEntryTemporal } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, trigrams as computeTrigrams, callWithRetry, generateAnalytical, getStoryContext } from './agent-utils.js';
@@ -576,6 +576,14 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
                     nodeId: null,
                     background: true,
                 });
+
+                // Record temporal metadata for causal chain support
+                const chatLength = getContext().chat?.length || 0;
+                recordEntryTemporal(targetBook, entryResult.uid, {
+                    turnIndex: chatLength - 1,
+                    when: when && when.toLowerCase() !== 'unknown' ? when : undefined,
+                });
+
                 result.factsCreated++;
                 result.createdUids.push(entryResult.uid);
                 if (_liveRollback) {

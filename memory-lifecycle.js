@@ -20,10 +20,11 @@ import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTree, saveTree, createTreeNode, addEntryToNode, removeEntryFromTree, getAllEntryUids, isSummaryTitle, isTrackerTitle, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid, updateEntry, forgetEntry, recordEntryVersion } from './entry-manager.js';
+import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid, updateEntry, forgetEntry, recordEntryVersion, getEntryTurnIndex, setEntrySupersedes } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getChatId, shouldSkipAiMessage, callWithRetry, generateAnalytical } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
+import { getWorldStateText } from './world-state.js';
 
 const METADATA_KEY = 'tunnelvision_lifecycle';
 
@@ -97,6 +98,7 @@ export async function runLifecycleMaintenance(force = false) {
         contradictionsFound: 0,
         contradictionsResolved: 0,
         entriesReorganized: 0,
+        crossValidationContradictions: 0,
         errors: 0,
     };
 
@@ -148,11 +150,22 @@ export async function runLifecycleMaintenance(force = false) {
                 }
             }
 
+            const prevState = getLifecycleState();
+            const runCount = (prevState?.runCount || 0) + 1;
+
+            // Cross-validation audit: run every Nth lifecycle cycle
+            if (runCount % CROSS_VALIDATION_INTERVAL === 0 && getChatId() === chatId) {
+                const auditResult = await runConsistencyAudit(activeBooks, chatId);
+                result.crossValidationContradictions = auditResult.contradictions;
+                result.errors += auditResult.errors;
+            }
+
             setLifecycleState({
                 lastRunMsgIdx: (getContext().chat?.length || 1) - 1,
                 lastRunAt: Date.now(),
                 lastResult: result,
                 lastMaxUid: maxUid,
+                runCount,
             });
         }
 
@@ -163,6 +176,7 @@ export async function runLifecycleMaintenance(force = false) {
         if (result.contradictionsResolved > 0) details.push(`${result.contradictionsResolved} contradiction(s) resolved`);
         else if (result.contradictionsFound > 0) details.push(`${result.contradictionsFound} contradiction(s) found`);
         if (result.entriesReorganized > 0) details.push(`${result.entriesReorganized} reorganized`);
+        if (result.crossValidationContradictions > 0) details.push(`${result.crossValidationContradictions} cross-validation issue(s)`);
         console.log(`[TunnelVision] Lifecycle maintenance complete: ${details.length > 0 ? details.join(', ') : 'no changes needed'}`);
 
         if (details.length > 0) {
@@ -357,16 +371,24 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
             }
         }
 
-        // Process contradictions — update newer entry with resolved content, disable older
+        // Process contradictions — use temporal turn index to determine precedence,
+        // update the newer entry with resolved content, disable the older, and record causal link
         for (const pair of contradictions) {
             if (!pair?.keep_uid || !pair?.remove_uid) continue;
             if (getChatId() !== chatId) break;
 
             try {
-                const keepUid = Number(pair.keep_uid);
-                const removeUid = Number(pair.remove_uid);
+                let keepUid = Number(pair.keep_uid);
+                let removeUid = Number(pair.remove_uid);
 
-                // Update the newer entry with resolved content
+                // Use temporal turnIndex when available for more accurate
+                // ordering than raw UID (which only reflects creation order)
+                const keepTurn = getEntryTurnIndex(bookName, keepUid);
+                const removeTurn = getEntryTurnIndex(bookName, removeUid);
+                if (keepTurn > 0 && removeTurn > 0 && removeTurn > keepTurn) {
+                    [keepUid, removeUid] = [removeUid, keepUid];
+                }
+
                 if (pair.merged_content) {
                     await updateEntry(bookName, keepUid, {
                         content: pair.merged_content,
@@ -375,11 +397,13 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
                     });
                 }
 
-                // Disable the older (superseded) entry
                 await forgetEntry(bookName, removeUid, false);
 
+                // Record causal chain: the kept entry supersedes the removed one
+                setEntrySupersedes(bookName, keepUid, removeUid);
+
                 result.contradictionsResolved++;
-                console.log(`[TunnelVision] Lifecycle: resolved contradiction — UID ${removeUid} superseded by UID ${keepUid} in "${bookName}" (${pair.reason || 'contradiction'})`);
+                console.log(`[TunnelVision] Lifecycle: resolved contradiction — UID ${removeUid} (turn ${removeTurn}) superseded by UID ${keepUid} (turn ${keepTurn}) in "${bookName}" (${pair.reason || 'contradiction'})`);
             } catch (e) {
                 console.warn(`[TunnelVision] Lifecycle: contradiction resolution failed for ${pair.keep_uid} ↔ ${pair.remove_uid}:`, e);
                 result.errors++;
@@ -651,6 +675,139 @@ async function reorganizeTree(bookName, bookData, chatId) {
         }
     } catch (e) {
         console.warn('[TunnelVision] Lifecycle tree reorganization failed:', e);
+        result.errors++;
+    }
+
+    return result;
+}
+
+// ── Step 4: Cross-Validation Audit (3B) ──────────────────────────
+
+const CROSS_VALIDATION_INTERVAL = 3;
+const MAX_TRACKER_CHARS = 3000;
+const MAX_FACTS_FOR_AUDIT = 40;
+const MAX_WS_CHARS = 2000;
+
+/**
+ * Run a consistency audit comparing tracker claims against recent facts
+ * and the current world state. Flags contradictions as "Review needed"
+ * background events. Runs every Nth lifecycle cycle.
+ *
+ * @param {string[]} activeBooks
+ * @param {string} chatId
+ * @returns {Promise<{contradictions: number, errors: number}>}
+ */
+async function runConsistencyAudit(activeBooks, chatId) {
+    const result = { contradictions: 0, errors: 0 };
+
+    // Gather tracker content
+    const trackerTexts = [];
+    for (const bookName of activeBooks) {
+        const bookData = await getCachedWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+        const trackerUidSet = new Set(getTrackerUids(bookName));
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable || !trackerUidSet.has(entry.uid)) continue;
+            const title = (entry.comment || '').trim();
+            const content = (entry.content || '').trim();
+            if (content) {
+                trackerTexts.push(`[${title} — UID ${entry.uid}]\n${content.substring(0, 800)}`);
+            }
+        }
+    }
+
+    if (trackerTexts.length === 0) return result;
+
+    // Gather recent facts (sorted newest-first by UID, cap to MAX_FACTS_FOR_AUDIT)
+    const allFacts = [];
+    for (const bookName of activeBooks) {
+        const bookData = await getCachedWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable) continue;
+            const title = (entry.comment || '').trim().toLowerCase();
+            if (title.startsWith('[tracker') || title.startsWith('[summary') || title.startsWith('[scene summary')) continue;
+            allFacts.push({
+                uid: entry.uid,
+                title: entry.comment || '',
+                content: (entry.content || '').substring(0, 200),
+            });
+        }
+    }
+    allFacts.sort((a, b) => b.uid - a.uid);
+    const recentFacts = allFacts.slice(0, MAX_FACTS_FOR_AUDIT);
+
+    // Gather world state
+    let worldStateSnippet = '';
+    try {
+        const wsText = getWorldStateText();
+        if (wsText) {
+            worldStateSnippet = wsText.substring(0, MAX_WS_CHARS);
+        }
+    } catch { /* proceed without world state */ }
+
+    const trackerSection = trackerTexts.join('\n\n---\n\n').substring(0, MAX_TRACKER_CHARS);
+    const factSection = recentFacts.map(f =>
+        `- UID ${f.uid}: "${f.title}" — ${f.content.replace(/\n/g, ' ')}`,
+    ).join('\n');
+
+    const auditPrompt = [
+        'You are a consistency auditor for a roleplay lorebook. Compare three sources of truth and find DIRECT CONTRADICTIONS where one source says X and another says NOT-X about the same subject.',
+        '',
+        'Only flag genuine contradictions — not differences in detail level or phrasing. A tracker saying "Location: Forest" while a fact says "Elena entered the deep forest" is NOT a contradiction.',
+        '',
+        '[TRACKER ENTRIES — structured character state documents]',
+        trackerSection,
+        '',
+        '[RECENT FACTS — individual story events, newest first]',
+        factSection,
+        '',
+        worldStateSnippet ? `[WORLD STATE — current scene snapshot]\n${worldStateSnippet}\n` : '',
+        'Find contradictions between these three sources. For each:',
+        '- Describe the contradiction clearly',
+        '- Identify which sources conflict',
+        '- Suggest which is likely correct (prefer the most recently created source)',
+        '',
+        'Respond with a JSON array. If no contradictions, return [].',
+        'Format: [{"subject": "who/what is contradicted", "claim_a": "what source A says", "source_a": "tracker|fact|world_state", "claim_b": "what source B says", "source_b": "tracker|fact|world_state", "likely_correct": "a|b", "reason": "brief explanation"}]',
+        '',
+        'Limit to at most 5 contradictions. Respond with ONLY the JSON array.',
+    ].join('\n');
+
+    try {
+        const response = await callWithRetry(
+            () => generateAnalytical({ prompt: auditPrompt }),
+            { label: 'Cross-validation audit', maxRetries: 1 },
+        );
+        if (getChatId() !== chatId) return result;
+
+        const contradictions = parseJsonFromLLM(response, { type: 'array' });
+        if (!Array.isArray(contradictions) || contradictions.length === 0) return result;
+
+        for (const item of contradictions.slice(0, 5)) {
+            if (!item?.subject || !item?.claim_a || !item?.claim_b) continue;
+            result.contradictions++;
+
+            addBackgroundEvent({
+                icon: 'fa-triangle-exclamation',
+                verb: 'Review needed',
+                color: '#fdcb6e',
+                summary: `Contradiction: ${item.subject}`,
+                details: [
+                    `${item.source_a || 'source'}: "${item.claim_a}"`,
+                    `${item.source_b || 'source'}: "${item.claim_b}"`,
+                    item.reason ? `Likely correct: ${item.likely_correct === 'a' ? item.claim_a : item.claim_b} — ${item.reason}` : '',
+                ].filter(Boolean),
+            });
+        }
+
+        if (result.contradictions > 0) {
+            console.log(`[TunnelVision] Cross-validation audit found ${result.contradictions} contradiction(s)`);
+        }
+    } catch (e) {
+        console.warn('[TunnelVision] Cross-validation audit failed:', e);
         result.errors++;
     }
 

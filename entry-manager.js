@@ -291,6 +291,90 @@ export function getEntryVersions(bookName, uid) {
     }
 }
 
+// ── Temporal Fact Metadata ─────────────────────────────────────────
+
+const TEMPORAL_METADATA_KEY = 'tunnelvision_entry_temporal';
+
+/**
+ * Record temporal metadata for a newly created entry.
+ * Stores turn index, in-world time, and optional causal links.
+ * @param {string} bookName
+ * @param {number} uid
+ * @param {Object} opts
+ * @param {number} opts.turnIndex - Chat message index when the fact was extracted
+ * @param {string} [opts.when] - In-world temporal label (e.g. "Day 3, evening")
+ * @param {string} [opts.arcId] - Associated narrative arc ID
+ */
+export function recordEntryTemporal(bookName, uid, { turnIndex, when, arcId }) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const store = context.chatMetadata[TEMPORAL_METADATA_KEY] || {};
+        const key = `${bookName}:${uid}`;
+        store[key] = {
+            turnIndex,
+            when: when || null,
+            arcId: arcId || null,
+            supersedes: null,
+            createdAt: Date.now(),
+        };
+        context.chatMetadata[TEMPORAL_METADATA_KEY] = store;
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+/**
+ * Retrieve temporal metadata for an entry.
+ * @param {string} bookName
+ * @param {number} uid
+ * @returns {{ turnIndex: number, when: string|null, arcId: string|null, supersedes: number|null, createdAt: number }|null}
+ */
+export function getEntryTemporal(bookName, uid) {
+    try {
+        const context = getContext();
+        const store = context.chatMetadata?.[TEMPORAL_METADATA_KEY];
+        if (!store) return null;
+        return store[`${bookName}:${uid}`] || null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Mark that one entry supersedes (replaces) another, creating a causal chain.
+ * Called during contradiction resolution to link the newer entry to the old one.
+ * @param {string} bookName
+ * @param {number} newerUid - The entry that supersedes the older one
+ * @param {number} olderUid - The entry being superseded
+ */
+export function setEntrySupersedes(bookName, newerUid, olderUid) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const store = context.chatMetadata[TEMPORAL_METADATA_KEY] || {};
+        const key = `${bookName}:${newerUid}`;
+        if (!store[key]) {
+            store[key] = { turnIndex: 0, when: null, arcId: null, supersedes: olderUid, createdAt: Date.now() };
+        } else {
+            store[key].supersedes = olderUid;
+        }
+        context.chatMetadata[TEMPORAL_METADATA_KEY] = store;
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+/**
+ * Get the temporal turn index for an entry, or fall back to 0.
+ * Useful for comparing which of two entries is narratively newer.
+ * @param {string} bookName
+ * @param {number} uid
+ * @returns {number}
+ */
+export function getEntryTurnIndex(bookName, uid) {
+    const temporal = getEntryTemporal(bookName, uid);
+    return temporal?.turnIndex ?? 0;
+}
+
 /**
  * Create a new lorebook entry and assign it to a tree node.
  * @param {string} bookName - Lorebook name
@@ -440,6 +524,43 @@ export async function updateEntry(bookName, uid, updates) {
 }
 
 /**
+ * Remove orphaned metadata keys for a deleted/disabled entry.
+ * Cleans tunnelvision_relevance, tunnelvision_feedback, and tunnelvision_entry_history.
+ * @param {string} bookName
+ * @param {number} uid
+ */
+export function cleanupEntryMetadata(bookName, uid) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+
+        const relevance = context.chatMetadata['tunnelvision_relevance'];
+        if (relevance) {
+            delete relevance[uid];
+            delete relevance[String(uid)];
+        }
+
+        const feedback = context.chatMetadata['tunnelvision_feedback'];
+        if (feedback) {
+            delete feedback[uid];
+            delete feedback[String(uid)];
+        }
+
+        const history = context.chatMetadata[VERSION_METADATA_KEY];
+        if (history) {
+            delete history[`${bookName}:${uid}`];
+        }
+
+        const temporal = context.chatMetadata[TEMPORAL_METADATA_KEY];
+        if (temporal) {
+            delete temporal[`${bookName}:${uid}`];
+        }
+
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+/**
  * Disable (soft-delete) a lorebook entry and remove it from the tree.
  * @param {string} bookName - Lorebook name
  * @param {number} uid - Entry UID to disable
@@ -483,6 +604,7 @@ export async function forgetEntry(bookName, uid, hardDelete = false) {
         saveTree(bookName, tree);
     }
     setTrackerUid(bookName, uid, false);
+    cleanupEntryMetadata(bookName, uid);
 
     console.log(`[TunnelVision] ${action} entry "${comment}" (UID ${uid}) in "${bookName}"`);
     return { uid, comment, action };
