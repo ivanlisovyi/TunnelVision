@@ -21,6 +21,7 @@ import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfoSync } from './entry-manager.js';
 import { getEntryTitle } from './agent-utils.js';
+import { getWorldStateSections } from './world-state.js';
 
 const RELEVANCE_KEY = 'tunnelvision_relevance';
 
@@ -106,6 +107,78 @@ function relevanceDecay(uid, relevanceMap) {
     return 0;
 }
 
+// ── World State Boost ────────────────────────────────────────────
+
+const WS_BOLD_NAME_RE = /\*\*([^*]+)\*\*/g;
+
+/**
+ * Extract boost signals from the world state's parsed sections.
+ * Returns lowercased sets of present character names and active thread keywords.
+ * @returns {{ presentCharacters: Set<string>, threadKeywords: Set<string> } | null}
+ */
+function extractWorldStateBoostSignals() {
+    const sections = getWorldStateSections();
+    if (!sections) return null;
+
+    const presentCharacters = new Set();
+    const threadKeywords = new Set();
+
+    // Current Scene → Present: line lists characters in the scene
+    const sceneBody = sections['Current Scene'] || '';
+    const presentMatch = sceneBody.match(/Present:\s*(.+)/i);
+    if (presentMatch) {
+        for (const name of presentMatch[1].split(/[,;&]+/)) {
+            const trimmed = name.replace(/\*\*/g, '').trim().toLowerCase();
+            if (trimmed.length >= 2) presentCharacters.add(trimmed);
+        }
+    }
+
+    // Active Threads → extract bold names and significant words
+    const threadsBody = sections['Active Threads'] || '';
+    let m;
+    WS_BOLD_NAME_RE.lastIndex = 0;
+    while ((m = WS_BOLD_NAME_RE.exec(threadsBody)) !== null) {
+        const keyword = m[1].trim().toLowerCase();
+        if (keyword.length >= 2) threadKeywords.add(keyword);
+    }
+
+    if (presentCharacters.size === 0 && threadKeywords.size === 0) return null;
+    return { presentCharacters, threadKeywords };
+}
+
+/**
+ * Score an entry against world state signals (present characters, active threads).
+ * @param {Object} entry - Lorebook entry
+ * @param {{ presentCharacters: Set<string>, threadKeywords: Set<string> }} signals
+ * @returns {number} Bonus score
+ */
+function worldStateBoost(entry, signals) {
+    if (!signals) return 0;
+
+    let boost = 0;
+    const title = (entry.comment || '').toLowerCase();
+    const keys = (entry.key || []).map(k => String(k).trim().toLowerCase());
+    const searchable = [title, ...keys];
+
+    // Boost entries whose title/keys mention a character currently in the scene
+    for (const charName of signals.presentCharacters) {
+        if (searchable.some(s => s.includes(charName))) {
+            boost += 8;
+            break;
+        }
+    }
+
+    // Boost entries whose title/keys align with active thread topics
+    for (const keyword of signals.threadKeywords) {
+        if (searchable.some(s => s.includes(keyword))) {
+            boost += 5;
+            break;
+        }
+    }
+
+    return boost;
+}
+
 // ── Core Logic ───────────────────────────────────────────────────
 
 /**
@@ -136,6 +209,7 @@ export function buildSmartContextPrompt() {
     const candidates = [];
     const trackerUidSets = new Map();
     const relevanceMap = getRelevanceMap();
+    const wsSignals = extractWorldStateBoostSignals();
 
     // Find max UID for recency boost calculation
     let maxUid = 0;
@@ -169,6 +243,9 @@ export function buildSmartContextPrompt() {
 
             // Recency boost — higher UIDs are newer entries
             if (maxUid > 0 && entry.uid > maxUid * 0.9) relevance += 3;
+
+            // World state boost — entries matching present characters / active threads
+            relevance += worldStateBoost(entry, wsSignals);
 
             // Tracker entries for mentioned entities get a boost
             if (isTracker && relevance > 0) {

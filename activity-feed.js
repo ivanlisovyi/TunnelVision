@@ -67,6 +67,8 @@ let panelBody = null;
 let panelTabs = null;
 /** Whether the panel is currently showing the world state view. */
 let showingWorldState = false;
+/** Whether the panel is currently showing the timeline view. */
+let showingTimeline = false;
 
 /** Cached lorebook stats for the stats bar. */
 let _lorebookStatsCache = null;
@@ -119,6 +121,7 @@ export function initActivityFeed() {
         eventSource.on(event_types.CHAT_CHANGED, () => {
             loadFeed();
             showingWorldState = false;
+            showingTimeline = false;
             if (panelTabs) panelTabs.style.display = '';
             if (panelEl?.classList.contains('open')) renderAllItems();
             queueHiddenToolCallRefresh(false);
@@ -307,6 +310,12 @@ function createPanel() {
     title.appendChild(icon('fa-satellite-dish'));
     title.append(' TunnelVision Feed');
     header.appendChild(title);
+    const timelineBtn = el('button', 'tv-float-panel-btn tv-timeline-btn');
+    timelineBtn.title = 'Timeline view';
+    timelineBtn.appendChild(icon('fa-clock-rotate-left'));
+    timelineBtn.addEventListener('click', toggleTimelineView);
+    header.appendChild(timelineBtn);
+
     const worldStateBtn = el('button', 'tv-float-panel-btn tv-ws-btn');
     worldStateBtn.title = 'View/edit world state';
     worldStateBtn.appendChild(icon('fa-globe'));
@@ -365,6 +374,8 @@ function togglePanel() {
         positionPanel();
         if (showingWorldState) {
             renderWorldStateView();
+        } else if (showingTimeline) {
+            renderTimelineView();
         } else {
             renderAllItems();
         }
@@ -984,7 +995,7 @@ export function getActiveTasks() {
 
 function refreshActiveTasksInPanel() {
     if (!panelEl?.classList.contains('open')) return;
-    if (showingWorldState) return;
+    if (showingWorldState || showingTimeline) return;
     renderAllItems();
 }
 
@@ -1108,8 +1119,10 @@ function toggleWorldStateView() {
 
 function enterWorldStateView() {
     showingWorldState = true;
+    showingTimeline = false;
     if (panelTabs) panelTabs.style.display = 'none';
     panelEl?.querySelector('.tv-ws-btn')?.classList.add('tv-ws-active');
+    panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
     renderWorldStateView();
 }
 
@@ -1117,7 +1130,11 @@ function exitWorldStateView() {
     showingWorldState = false;
     if (panelTabs) panelTabs.style.display = '';
     panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
-    renderAllItems();
+    if (showingTimeline) {
+        renderTimelineView();
+    } else {
+        renderAllItems();
+    }
 }
 
 function renderWorldStateView() {
@@ -1306,6 +1323,236 @@ async function onWorldStateRefreshFromFeed(btn) {
         btn.textContent = originalText;
         if (showingWorldState) renderWorldStateView();
     }
+}
+
+// ── Timeline View ──────────────────────────────────────────────
+
+function toggleTimelineView() {
+    if (showingTimeline) {
+        exitTimelineView();
+    } else {
+        enterTimelineView();
+    }
+}
+
+function enterTimelineView() {
+    showingTimeline = true;
+    showingWorldState = false;
+    if (panelTabs) panelTabs.style.display = 'none';
+    panelEl?.querySelector('.tv-timeline-btn')?.classList.add('tv-timeline-active');
+    panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
+    renderTimelineView();
+}
+
+function exitTimelineView() {
+    showingTimeline = false;
+    if (panelTabs) panelTabs.style.display = '';
+    panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
+    renderAllItems();
+}
+
+/**
+ * Parse a `[Day X, time]` or `[Day X]` prefix from entry content.
+ * Returns { day: number|null, timeLabel: string, rest: string }.
+ */
+function parseTimestamp(content) {
+    if (!content) return { day: null, timeLabel: '', rest: content || '' };
+    const match = content.match(/^\[([^\]]+)\]\s*/);
+    if (!match) return { day: null, timeLabel: '', rest: content };
+
+    const tag = match[1].trim();
+    const dayMatch = tag.match(/Day\s+(\d+)/i);
+    const day = dayMatch ? parseInt(dayMatch[1], 10) : null;
+    const rest = content.slice(match[0].length);
+    return { day, timeLabel: tag, rest };
+}
+
+/**
+ * Load all fact/summary entries from active TV lorebooks and group by day.
+ * Returns a sorted array of { day, timeLabel, entries[] } groups.
+ */
+async function loadTimelineEntries() {
+    const activeBooks = getActiveTunnelVisionBooks();
+    const items = [];
+
+    for (const bookName of activeBooks) {
+        try {
+            const bookData = await getCachedWorldInfo(bookName);
+            if (!bookData?.entries) continue;
+            for (const key of Object.keys(bookData.entries)) {
+                const entry = bookData.entries[key];
+                if (entry.disable) continue;
+                const title = entry.comment || '';
+                if (isTrackerTitle(title)) continue;
+
+                const isSummary = isSummaryTitle(title);
+                const { day, timeLabel, rest } = parseTimestamp(entry.content || '');
+                items.push({
+                    uid: entry.uid ?? null,
+                    title,
+                    content: rest,
+                    timeLabel,
+                    day,
+                    isSummary,
+                    lorebook: bookName,
+                });
+            }
+        } catch { /* skip unavailable books */ }
+    }
+
+    // Sort: entries with a day come first (ascending), then entries without a day
+    items.sort((a, b) => {
+        if (a.day != null && b.day != null) return a.day - b.day;
+        if (a.day != null) return -1;
+        if (b.day != null) return 1;
+        return 0;
+    });
+
+    // Group by day
+    const groups = [];
+    let currentGroup = null;
+    for (const item of items) {
+        const groupKey = item.day ?? -1;
+        if (!currentGroup || currentGroup.dayKey !== groupKey) {
+            currentGroup = { dayKey: groupKey, day: item.day, entries: [] };
+            groups.push(currentGroup);
+        }
+        currentGroup.entries.push(item);
+    }
+
+    return groups;
+}
+
+async function renderTimelineView() {
+    if (!panelBody) return;
+    panelBody.replaceChildren();
+
+    const container = el('div', 'tv-timeline-view');
+
+    // Header row
+    const headerRow = el('div', 'tv-timeline-header');
+    const titleEl = el('span', 'tv-timeline-title');
+    titleEl.appendChild(icon('fa-clock-rotate-left'));
+    titleEl.append(' Timeline');
+    headerRow.appendChild(titleEl);
+
+    const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
+    backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
+    backBtn.addEventListener('click', exitTimelineView);
+    headerRow.appendChild(backBtn);
+    container.appendChild(headerRow);
+
+    // Loading state
+    const loadingEl = el('div', 'tv-timeline-loading');
+    loadingEl.appendChild(el('span', 'tv_loading'));
+    loadingEl.appendChild(el('span', null, 'Loading entries...'));
+    container.appendChild(loadingEl);
+    panelBody.appendChild(container);
+
+    try {
+        const groups = await loadTimelineEntries();
+        loadingEl.remove();
+
+        if (groups.length === 0) {
+            const emptyEl = el('div', 'tv-float-empty');
+            emptyEl.style.cssText = 'flex: 1;';
+            emptyEl.appendChild(icon('fa-clock-rotate-left'));
+            emptyEl.appendChild(el('span', null, 'No facts or summaries yet'));
+            emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Facts and summaries will appear here grouped chronologically by their [Day X] timestamps'));
+            container.appendChild(emptyEl);
+            return;
+        }
+
+        // Stats line
+        let totalFacts = 0, totalSummaries = 0;
+        for (const g of groups) {
+            for (const e of g.entries) {
+                e.isSummary ? totalSummaries++ : totalFacts++;
+            }
+        }
+        const statsEl = el('div', 'tv-timeline-stats');
+        statsEl.textContent = `${totalFacts} fact${totalFacts !== 1 ? 's' : ''}, ${totalSummaries} summar${totalSummaries !== 1 ? 'ies' : 'y'} across ${groups.length} group${groups.length !== 1 ? 's' : ''}`;
+        container.appendChild(statsEl);
+
+        // Timeline body
+        const timelineBody = el('div', 'tv-timeline-body');
+
+        for (const group of groups) {
+            // Day header
+            const dayHeader = el('div', 'tv-timeline-day-header');
+            const dayDot = el('div', 'tv-timeline-day-dot');
+            dayHeader.appendChild(dayDot);
+            const dayLabel = group.day != null
+                ? `Day ${group.day}`
+                : 'Undated';
+            dayHeader.appendChild(el('span', 'tv-timeline-day-label', dayLabel));
+            dayHeader.appendChild(el('span', 'tv-timeline-day-count', `${group.entries.length}`));
+            timelineBody.appendChild(dayHeader);
+
+            // Entries for this day
+            const entriesContainer = el('div', 'tv-timeline-entries');
+            for (const entry of group.entries) {
+                entriesContainer.appendChild(buildTimelineEntry(entry));
+            }
+            timelineBody.appendChild(entriesContainer);
+        }
+
+        container.appendChild(timelineBody);
+    } catch (err) {
+        loadingEl.remove();
+        container.appendChild(el('div', 'tv-feed-expand-empty', `Failed to load timeline: ${err.message}`));
+    }
+}
+
+function buildTimelineEntry(entry) {
+    const row = el('div', `tv-timeline-entry${entry.isSummary ? ' tv-timeline-summary' : ''}`);
+
+    // Timeline connector
+    const connector = el('div', 'tv-timeline-connector');
+    const dot = el('div', 'tv-timeline-dot');
+    if (entry.isSummary) {
+        dot.classList.add('tv-timeline-dot-summary');
+    }
+    connector.appendChild(dot);
+    row.appendChild(connector);
+
+    // Entry content
+    const body = el('div', 'tv-timeline-entry-body');
+
+    // Title bar
+    const titleRow = el('div', 'tv-timeline-entry-title-row');
+    const entryIcon = entry.isSummary
+        ? icon('fa-file-lines')
+        : icon('fa-brain');
+    entryIcon.classList.add('tv-timeline-entry-icon');
+    entryIcon.style.color = entry.isSummary ? '#fdcb6e' : '#6c5ce7';
+    titleRow.appendChild(entryIcon);
+    titleRow.appendChild(el('span', 'tv-timeline-entry-title', truncate(entry.title, 60)));
+    if (entry.timeLabel) {
+        titleRow.appendChild(el('span', 'tv-timeline-entry-time', entry.timeLabel));
+    }
+    body.appendChild(titleRow);
+
+    // Content preview (collapsible)
+    const preview = el('div', 'tv-timeline-entry-preview');
+    preview.textContent = truncate(entry.content, 120);
+    body.appendChild(preview);
+
+    // Expandable full content (hidden by default)
+    const fullContent = el('div', 'tv-timeline-entry-full');
+    fullContent.textContent = entry.content;
+    fullContent.style.display = 'none';
+    body.appendChild(fullContent);
+
+    // Click to toggle expand
+    row.addEventListener('click', () => {
+        const isExpanded = row.classList.toggle('tv-timeline-expanded');
+        preview.style.display = isExpanded ? 'none' : '';
+        fullContent.style.display = isExpanded ? '' : 'none';
+    });
+
+    row.appendChild(body);
+    return row;
 }
 
 // ── Public API ──

@@ -649,6 +649,21 @@ export function getWorldStateText() {
     return getWorldState()?.text || '';
 }
 
+/**
+ * Get the parsed sections map from the world state, or null if unavailable.
+ * Each key is the section name (e.g. "Current Scene", "Active Threads"),
+ * and the value is the raw section body text.
+ * @returns {Record<string, string> | null}
+ */
+export function getWorldStateSections() {
+    const state = getWorldState();
+    if (!state?.sections || Object.keys(state.sections).length === 0) {
+        if (!state?.text) return null;
+        return parseWorldStateSections(state.text);
+    }
+    return state.sections;
+}
+
 /** Get the message index of the last update, or -1 if never updated. */
 export function getWorldStateLastIndex() {
     return getWorldState()?.lastUpdateMsgIdx ?? -1;

@@ -20,7 +20,7 @@ import { eventSource, event_types, generateQuietPrompt } from '../../../../scrip
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTree, saveTree, createTreeNode, addEntryToNode, removeEntryFromTree, getAllEntryUids, isSummaryTitle, isTrackerTitle, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid } from './entry-manager.js';
+import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid, updateEntry, forgetEntry } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getChatId, shouldSkipAiMessage, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
@@ -94,6 +94,8 @@ export async function runLifecycleMaintenance(force = false) {
         entriesCompressed: 0,
         duplicatesFound: 0,
         duplicatesMerged: 0,
+        contradictionsFound: 0,
+        contradictionsResolved: 0,
         entriesReorganized: 0,
         errors: 0,
     };
@@ -114,6 +116,8 @@ export async function runLifecycleMaintenance(force = false) {
                 const dupeResult = await findAndMergeDuplicates(bookName, bookData, chatId);
                 result.duplicatesFound += dupeResult.found;
                 result.duplicatesMerged += dupeResult.merged;
+                result.contradictionsFound += dupeResult.contradictionsFound;
+                result.contradictionsResolved += dupeResult.contradictionsResolved;
                 result.errors += dupeResult.errors;
             }
 
@@ -146,6 +150,8 @@ export async function runLifecycleMaintenance(force = false) {
         if (result.entriesCompressed > 0) details.push(`${result.entriesCompressed} compressed`);
         if (result.duplicatesMerged > 0) details.push(`${result.duplicatesMerged} merged`);
         else if (result.duplicatesFound > 0) details.push(`${result.duplicatesFound} duplicate pairs`);
+        if (result.contradictionsResolved > 0) details.push(`${result.contradictionsResolved} contradiction(s) resolved`);
+        else if (result.contradictionsFound > 0) details.push(`${result.contradictionsFound} contradiction(s) found`);
         if (result.entriesReorganized > 0) details.push(`${result.entriesReorganized} reorganized`);
         console.log(`[TunnelVision] Lifecycle maintenance complete: ${details.length > 0 ? details.join(', ') : 'no changes needed'}`);
 
@@ -179,7 +185,7 @@ export async function runLifecycleMaintenance(force = false) {
 // ── Step 1: Duplicate Detection ──────────────────────────────────
 
 async function findAndMergeDuplicates(bookName, bookData, chatId) {
-    const result = { found: 0, merged: 0, errors: 0 };
+    const result = { found: 0, merged: 0, contradictionsFound: 0, contradictionsResolved: 0, errors: 0 };
 
     const entries = [];
     for (const key of Object.keys(bookData.entries)) {
@@ -201,33 +207,45 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
 
     const quietPrompt = [
         'You are a lorebook maintenance assistant. Analyze these lorebook entry titles and previews.',
-        'Identify pairs that are genuinely about the SAME topic/entity and contain overlapping information that should be consolidated into one entry.',
+        'Perform TWO checks:',
+        '',
+        '1. DUPLICATES: Identify pairs that are genuinely about the SAME topic/entity and contain overlapping information that should be consolidated.',
+        '2. CONTRADICTIONS: Identify pairs where one fact directly contradicts another about the same subject (e.g. "Elena lives in Port Alara" vs "Elena moved to the capital"). The NEWER entry (higher UID) is assumed to have more recent/accurate info.',
         '',
         `[Entries in "${bookName}"]`,
         entryList,
         '',
-        'Find entries that are duplicates or near-duplicates. For each pair, decide which entry to KEEP (the more complete one) and provide merged content that combines the best of both.',
-        'Respond with a JSON array. If no duplicates found, respond with [].',
-        'Format: [{"keep_uid": 123, "remove_uid": 456, "merged_title": "best title", "merged_content": "combined content preserving all unique facts", "reason": "brief reason"}]',
+        'For DUPLICATES: decide which entry to KEEP (more complete) and provide merged content combining the best of both.',
+        'For CONTRADICTIONS: the entry with the HIGHER UID is newer and takes precedence. Provide resolved content that reflects the current truth. The older (lower UID) entry will be superseded.',
         '',
-        'Only flag genuine duplicates — not entries that merely reference the same character in different contexts.',
-        'Limit to at most 3 merge pairs per run.',
+        'Respond with a JSON array. If nothing found, respond with [].',
+        'Format: [{"type": "duplicate"|"contradiction", "keep_uid": 123, "remove_uid": 456, "merged_title": "best title", "merged_content": "resolved content", "reason": "brief reason"}]',
+        '',
+        'For contradictions: keep_uid = the NEWER entry (higher UID), remove_uid = the OLDER entry (lower UID).',
+        'Only flag genuine duplicates or direct contradictions — not entries that merely reference the same character in different contexts.',
+        'Different facts about the same character (e.g. "Elena is brave" and "Elena lives in Port Alara") are NOT contradictions.',
+        'Limit to at most 3 duplicate pairs + 3 contradiction pairs per run.',
         'Respond with ONLY the JSON array.',
     ].join('\n');
 
     try {
         const response = await callWithRetry(
             () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
-            { label: 'Lifecycle duplicates' },
+            { label: 'Lifecycle consolidation' },
         );
         if (getChatId() !== chatId) return result;
 
         const pairs = parseJsonFromLLM(response, { type: 'array' });
         if (!Array.isArray(pairs) || pairs.length === 0) return result;
 
-        result.found = pairs.length;
+        const duplicates = pairs.filter(p => p?.type !== 'contradiction').slice(0, 3);
+        const contradictions = pairs.filter(p => p?.type === 'contradiction').slice(0, 3);
 
-        for (const pair of pairs.slice(0, 3)) {
+        result.found = duplicates.length;
+        result.contradictionsFound = contradictions.length;
+
+        // Process duplicates — merge as before
+        for (const pair of duplicates) {
             if (!pair?.keep_uid || !pair?.remove_uid) continue;
             if (getChatId() !== chatId) break;
 
@@ -243,8 +261,36 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
                 result.errors++;
             }
         }
+
+        // Process contradictions — update newer entry with resolved content, disable older
+        for (const pair of contradictions) {
+            if (!pair?.keep_uid || !pair?.remove_uid) continue;
+            if (getChatId() !== chatId) break;
+
+            try {
+                const keepUid = Number(pair.keep_uid);
+                const removeUid = Number(pair.remove_uid);
+
+                // Update the newer entry with resolved content
+                if (pair.merged_content) {
+                    await updateEntry(bookName, keepUid, {
+                        content: pair.merged_content,
+                        ...(pair.merged_title ? { comment: pair.merged_title } : {}),
+                    });
+                }
+
+                // Disable the older (superseded) entry
+                await forgetEntry(bookName, removeUid, false);
+
+                result.contradictionsResolved++;
+                console.log(`[TunnelVision] Lifecycle: resolved contradiction — UID ${removeUid} superseded by UID ${keepUid} in "${bookName}" (${pair.reason || 'contradiction'})`);
+            } catch (e) {
+                console.warn(`[TunnelVision] Lifecycle: contradiction resolution failed for ${pair.keep_uid} ↔ ${pair.remove_uid}:`, e);
+                result.errors++;
+            }
+        }
     } catch (e) {
-        console.warn('[TunnelVision] Lifecycle duplicate detection failed:', e);
+        console.warn('[TunnelVision] Lifecycle consolidation failed:', e);
         result.errors++;
     }
 

@@ -21,7 +21,7 @@
 
 import { eventSource, event_types, generateQuietPrompt } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
-import { getSettings, getTrackerUids } from './tree-store.js';
+import { getSettings, getTrackerUids, isTrackerTitle, isSummaryTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
@@ -224,6 +224,11 @@ export async function runPostTurnProcessor(force = false) {
         }
 
         if (task.cancelled) return null;
+
+        // Check if any character has enough facts to warrant a tracker suggestion
+        if (result.factsCreated > 0) {
+            await checkTrackerSuggestions(activeBooks);
+        }
 
         // Trigger priority world state update on significant events
         if (result.sceneArchived || result.factsCreated >= 3) {
@@ -631,6 +636,105 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
     }
 
     return result;
+}
+
+// ── Tracker Suggestion ───────────────────────────────────────────
+
+const TRACKER_SUGGESTION_THRESHOLD = 5;
+const TRACKER_NAME_RE = /^\[tracker[:\s]*([^\]]+)\]/i;
+
+/** Metadata key for tracking which characters we've already suggested trackers for. */
+const TRACKER_SUGGESTIONS_KEY = 'tunnelvision_tracker_suggestions';
+
+function getAlreadySuggested() {
+    try {
+        return new Set(getContext().chatMetadata?.[TRACKER_SUGGESTIONS_KEY] || []);
+    } catch {
+        return new Set();
+    }
+}
+
+function markSuggested(characterName) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        const existing = context.chatMetadata[TRACKER_SUGGESTIONS_KEY] || [];
+        if (!existing.includes(characterName)) {
+            context.chatMetadata[TRACKER_SUGGESTIONS_KEY] = [...existing, characterName];
+            context.saveMetadataDebounced?.();
+        }
+    } catch { /* metadata not available */ }
+}
+
+/**
+ * After fact extraction, check if any character has accumulated enough facts
+ * to warrant a tracker. Emits a feed notification as a nudge — no auto-creation.
+ */
+async function checkTrackerSuggestions(activeBooks) {
+    try {
+        const alreadySuggested = getAlreadySuggested();
+
+        // Collect tracker character names and all fact keys across active books
+        const trackerCharacters = new Set();
+        /** @type {Map<string, number>} characterName → fact count */
+        const characterFactCounts = new Map();
+
+        for (const bookName of activeBooks) {
+            const bookData = await getCachedWorldInfo(bookName);
+            if (!bookData?.entries) continue;
+
+            const trackerUidSet = new Set(getTrackerUids(bookName));
+
+            for (const key of Object.keys(bookData.entries)) {
+                const entry = bookData.entries[key];
+                if (entry.disable) continue;
+                const title = (entry.comment || '').trim();
+
+                if (trackerUidSet.has(entry.uid) || isTrackerTitle(title)) {
+                    const match = title.match(TRACKER_NAME_RE);
+                    if (match) trackerCharacters.add(match[1].trim().toLowerCase());
+                    continue;
+                }
+
+                if (isSummaryTitle(title)) continue;
+
+                // Count this fact toward each character name in its keys
+                const keys = entry.key || [];
+                for (const k of keys) {
+                    const name = String(k).trim().toLowerCase();
+                    // Heuristic: character names are capitalized single/two words, 2+ chars.
+                    // We rely on the fact that post-turn extraction always includes
+                    // character names in keys with canonical form.
+                    if (name.length >= 2) {
+                        characterFactCounts.set(name, (characterFactCounts.get(name) || 0) + 1);
+                    }
+                }
+            }
+        }
+
+        // Find characters with enough facts and no tracker
+        for (const [name, count] of characterFactCounts) {
+            if (count < TRACKER_SUGGESTION_THRESHOLD) continue;
+            if (trackerCharacters.has(name)) continue;
+            if (alreadySuggested.has(name)) continue;
+
+            // Capitalize for display
+            const displayName = name.replace(/\b\w/g, c => c.toUpperCase());
+
+            addBackgroundEvent({
+                icon: 'fa-address-card',
+                verb: 'Tracker suggested',
+                color: '#a29bfe',
+                summary: `"${displayName}" has ${count} facts but no tracker — consider creating one`,
+                details: [`${count} facts`, 'No tracker found'],
+            });
+
+            markSuggested(name);
+            console.log(`[TunnelVision] Tracker suggestion: "${displayName}" has ${count} facts without a tracker`);
+        }
+    } catch (e) {
+        console.warn('[TunnelVision] Tracker suggestion check failed:', e);
+    }
 }
 
 // ── Swipe / Regeneration Rollback ────────────────────────────────
