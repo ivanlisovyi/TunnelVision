@@ -11,7 +11,7 @@ import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
 import { isProcessorRunning, hasRecentArchive } from './post-turn-processor.js';
 import { getChatId, shouldSkipAiMessage } from './agent-utils.js';
-import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
 
 const TV_COUNTER_META_KEY = 'tunnelvision_autosummary_count';
 

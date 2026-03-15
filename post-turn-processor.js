@@ -27,8 +27,9 @@ import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap,
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry } from './agent-utils.js';
-import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
 import { requestPriorityUpdate, getWorldStateText } from './world-state.js';
+import { processArcUpdates, buildArcsContextBlock } from './arc-tracker.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -179,6 +180,9 @@ export async function runPostTurnProcessor(force = false) {
         trackersUpdated: 0,
         sceneArchived: false,
         sceneTitle: null,
+        arcsCreated: 0,
+        arcsUpdated: 0,
+        arcsResolved: 0,
         errors: 0,
     };
 
@@ -203,6 +207,9 @@ export async function runPostTurnProcessor(force = false) {
 
         if (analysisResult) {
             result.factsCreated = analysisResult.factsCreated;
+            result.arcsCreated = analysisResult.arcsCreated || 0;
+            result.arcsUpdated = analysisResult.arcsUpdated || 0;
+            result.arcsResolved = analysisResult.arcsResolved || 0;
             result.errors += analysisResult.errors;
         }
 
@@ -257,6 +264,14 @@ export async function runPostTurnProcessor(force = false) {
             details.push(archiveLabel);
         }
         if (result.trackersUpdated > 0) details.push(`${result.trackersUpdated} tracker(s)`);
+        const arcTotal = result.arcsCreated + result.arcsUpdated;
+        if (arcTotal > 0) {
+            const arcParts = [];
+            if (result.arcsCreated > 0) arcParts.push(`${result.arcsCreated} new`);
+            if (result.arcsUpdated > 0) arcParts.push(`${result.arcsUpdated} updated`);
+            if (result.arcsResolved > 0) arcParts.push(`${result.arcsResolved} resolved`);
+            details.push(`arcs: ${arcParts.join(', ')}`);
+        }
         if (details.length > 0) {
             console.log(`[TunnelVision] Post-turn complete: ${details.join(', ')}`);
             addBackgroundEvent({
@@ -346,8 +361,11 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         }
     } catch { /* proceed without temporal context */ }
 
+    // Build current arcs context for TASK 3
+    const currentArcsSection = buildArcsContextBlock();
+
     const quietPrompt = [
-        'You are an analysis assistant for a roleplay lorebook. Perform TWO tasks on this exchange:',
+        'You are an analysis assistant for a roleplay lorebook. Perform THREE tasks on this exchange:',
         '',
         'TASK 1 — FACT EXTRACTION:',
         'Extract ONLY facts significant enough to matter for long-term story continuity — things that, if forgotten, would create a continuity error or miss something meaningful. Facts are persistent state changes, NOT moment-to-moment narration.',
@@ -394,6 +412,20 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '',
         'When in doubt, it is NOT a scene change. Err on the side of keeping the scene going — premature archiving fragments coherent scenes into useless pieces.',
         '',
+        'TASK 3 — NARRATIVE ARC TRACKING:',
+        'Identify multi-scene story arcs that are being advanced, stalled, or resolved in this exchange.',
+        'An arc is a storyline spanning multiple scenes (e.g., "The Search for the Lost Artifact", "Elena\'s Trust Issues").',
+        'Only track arcs with real narrative weight — not individual facts or single-scene events.',
+        '',
+        'For each arc touched in this exchange:',
+        '- id: Use the existing arc ID from the list below, or null for a new arc',
+        '- title: Short descriptive name',
+        '- status: "active" (advancing), "stalled" (mentioned but stuck), "resolved" (concluded), "abandoned" (dropped)',
+        '- progression: One sentence describing how this arc changed',
+        '',
+        'If no arcs were touched, use an empty array. Do NOT invent arcs for minor events.',
+        '',
+        currentArcsSection,
         temporalContext,
         existingFactsSection,
         '[Recent Exchange]',
@@ -406,10 +438,11 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '    "detected": true/false,',
         '    "type": "location|time_skip|narrative_shift|resolution|null",',
         '    "description": "brief description of what changed (only if detected)"',
-        '  }',
+        '  },',
+        '  "arcs": [{"id": "existing_id or null", "title": "Arc Title", "status": "active|stalled|resolved|abandoned", "progression": "what changed"}]',
         '}',
         '',
-        'If no facts, use empty array. If no scene change, set detected to false.',
+        'If no facts, use empty array. If no scene change, set detected to false. If no arcs, use empty array.',
         'Respond with ONLY the JSON. No commentary, no code fences.',
     ].join('\n');
 
@@ -483,6 +516,22 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
                 description: parsed.sceneChange.description || '',
             };
             console.log(`[TunnelVision] Scene change detected: ${result.sceneChange.type} — ${result.sceneChange.description}`);
+        }
+
+        // Process narrative arcs
+        if (Array.isArray(parsed.arcs) && parsed.arcs.length > 0) {
+            const arcResult = processArcUpdates(parsed.arcs);
+            result.arcsCreated = arcResult.created;
+            result.arcsUpdated = arcResult.updated;
+            result.arcsResolved = arcResult.resolved;
+
+            const arcDetails = [];
+            if (arcResult.created > 0) arcDetails.push(`${arcResult.created} new`);
+            if (arcResult.updated > 0) arcDetails.push(`${arcResult.updated} updated`);
+            if (arcResult.resolved > 0) arcDetails.push(`${arcResult.resolved} resolved`);
+            if (arcDetails.length > 0) {
+                console.log(`[TunnelVision] Arcs: ${arcDetails.join(', ')}`);
+            }
         }
     } catch (e) {
         console.error('[TunnelVision] Post-turn analysis LLM call failed:', e);

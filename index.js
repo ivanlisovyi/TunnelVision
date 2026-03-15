@@ -24,15 +24,14 @@
 
 import { eventSource, event_types, extension_prompt_types, extension_prompt_roles, setExtensionPrompt } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
-import { ToolManager } from '../../../tool-calling.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
-import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache } from './tool-registry.js';
+import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache, applyRecurseLimit } from './tool-registry.js';
 import { resetTurnEntryCount, invalidateWorldInfoCache, invalidateDirtyWorldInfoCache, getCachedWorldInfo } from './entry-manager.js';
 import { buildNotebookPrompt } from './tools/notebook.js';
 import { buildWorldStatePrompt, initWorldState } from './world-state.js';
 import { initPostTurnProcessor } from './post-turn-processor.js';
-import { buildSmartContextPrompt } from './smart-context.js';
+import { buildSmartContextPrompt, initSmartContext } from './smart-context.js';
 import { initMemoryLifecycle } from './memory-lifecycle.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
@@ -76,6 +75,9 @@ async function init() {
 
     // Wire up memory lifecycle manager (periodic consolidation + compression)
     initMemoryLifecycle();
+
+    // Wire up smart context relevance feedback loop
+    initSmartContext();
 
     // Clean up legacy auto-summary prompt key from the old injection-based system
     try {
@@ -377,26 +379,6 @@ async function onGenerationStarted(type, opts) {
         }
     }
 }
-
-/**
- * Apply the user's RECURSE_LIMIT override to ToolManager.
- * Only overrides when the user has set a value different from the default (5).
- * Stores the original value so we can restore on disable.
- * @param {Object} settings
- */
-const ST_DEFAULT_RECURSE_LIMIT = 5;
-function applyRecurseLimit(settings) {
-    const limit = Number(settings.recurseLimit);
-    if (!isFinite(limit) || limit < 1) {
-        ToolManager.RECURSE_LIMIT = ST_DEFAULT_RECURSE_LIMIT;
-        return;
-    }
-    // Clamp to sane range: 1–50. Over 50 is almost certainly a mistake.
-    ToolManager.RECURSE_LIMIT = Math.min(Math.max(Math.round(limit), 1), 50);
-}
-
-// Exported so ui-controller can call it when the setting changes
-export { applyRecurseLimit };
 
 // Initialize
 await init();

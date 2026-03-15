@@ -535,5 +535,23 @@ export function isSearchToolAvailable() {
     });
 }
 
+// ── Recurse Limit ────────────────────────────────────────────────
+
+const ST_DEFAULT_RECURSE_LIMIT = 5;
+
+/**
+ * Apply the user's RECURSE_LIMIT override to ToolManager.
+ * Clamps to 1–50. Called from init and when the UI setting changes.
+ * @param {Object} settings
+ */
+export function applyRecurseLimit(settings) {
+    const limit = Number(settings.recurseLimit);
+    if (!isFinite(limit) || limit < 1) {
+        ToolManager.RECURSE_LIMIT = ST_DEFAULT_RECURSE_LIMIT;
+        return;
+    }
+    ToolManager.RECURSE_LIMIT = Math.min(Math.max(Math.round(limit), 1), 50);
+}
+
 // Re-export tool names and constants for diagnostics/UI
 export { SEARCH_NAME, REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, REORGANIZE_NAME, SUMMARIZE_NAME, MERGESPLIT_NAME, NOTEBOOK_NAME, ALL_TOOL_NAMES, CONFIRMABLE_TOOLS };

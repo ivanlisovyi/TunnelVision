@@ -12,6 +12,9 @@ import { findEntry, getCachedWorldInfo } from './entry-manager.js';
 import { openTreeEditorForBook } from './ui-controller.js';
 import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState } from './world-state.js';
 import { createTrackerForCharacter } from './post-turn-processor.js';
+import { getAllArcs } from './arc-tracker.js';
+import { countStaleEntries } from './entry-scoring.js';
+import { _registerFeedCallbacks, addBackgroundEvent, markBackgroundStart, registerBackgroundTask, cancelBackgroundTask, getActiveTasks } from './background-events.js';
 
 const MAX_FEED_ITEMS = 50;
 const MAX_RENDERED_RETRIEVED_ENTRIES = 5;
@@ -70,6 +73,8 @@ let panelTabs = null;
 let showingWorldState = false;
 /** Whether the panel is currently showing the timeline view. */
 let showingTimeline = false;
+/** Whether the panel is currently showing the arcs view. */
+let showingArcs = false;
 
 /** Cached lorebook stats for the stats bar. */
 let _lorebookStatsCache = null;
@@ -102,6 +107,15 @@ export function initActivityFeed() {
     createTriggerButton();
     createPanel();
 
+    _registerFeedCallbacks({
+        addFeedItems,
+        setTriggerActive: (active) => {
+            if (!triggerEl) return;
+            triggerEl.classList.toggle('tv-bg-active', active);
+        },
+        refreshTasksUI: refreshActiveTasksInPanel,
+    });
+
     // Listen for WI activations (primary — shows what entries triggered)
     if (event_types.WORLD_INFO_ACTIVATED) {
         eventSource.on(event_types.WORLD_INFO_ACTIVATED, onWorldInfoActivated);
@@ -123,6 +137,7 @@ export function initActivityFeed() {
             loadFeed();
             showingWorldState = false;
             showingTimeline = false;
+            showingArcs = false;
             if (panelTabs) panelTabs.style.display = '';
             if (panelEl?.classList.contains('open')) renderAllItems();
             queueHiddenToolCallRefresh(false);
@@ -317,6 +332,12 @@ function createPanel() {
     timelineBtn.addEventListener('click', toggleTimelineView);
     header.appendChild(timelineBtn);
 
+    const arcsBtn = el('button', 'tv-float-panel-btn tv-arcs-btn');
+    arcsBtn.title = 'Narrative arcs';
+    arcsBtn.appendChild(icon('fa-diagram-project'));
+    arcsBtn.addEventListener('click', toggleArcsView);
+    header.appendChild(arcsBtn);
+
     const worldStateBtn = el('button', 'tv-float-panel-btn tv-ws-btn');
     worldStateBtn.title = 'View/edit world state';
     worldStateBtn.appendChild(icon('fa-globe'));
@@ -377,6 +398,8 @@ function togglePanel() {
             renderWorldStateView();
         } else if (showingTimeline) {
             renderTimelineView();
+        } else if (showingArcs) {
+            renderArcsView();
         } else {
             renderAllItems();
         }
@@ -557,9 +580,10 @@ function renderAllItems() {
     }
 
     // Active background tasks — shown at top in 'all' and 'bg' tabs
-    const showActiveTasks = (tab === 'all' || tab === 'bg') && _activeTasks.size > 0;
+    const activeTasks = getActiveTasks();
+    const showActiveTasks = (tab === 'all' || tab === 'bg') && activeTasks.size > 0;
     if (showActiveTasks) {
-        for (const task of _activeTasks.values()) {
+        for (const task of activeTasks.values()) {
             panelBody.appendChild(buildActiveTaskElement(task));
         }
     }
@@ -929,10 +953,21 @@ function renderStatsBar() {
     lbStat.appendChild(lbValue);
     bar.appendChild(lbStat);
 
-    computeLorebookStats().then(({ facts, summaries, trackers }) => {
+    computeLorebookStats().then(({ facts, summaries, trackers, stale }) => {
         const total = facts + summaries + trackers;
         lbValue.textContent = String(total);
-        lbStat.title = `Lorebook: ${facts} facts, ${summaries} summaries, ${trackers} trackers`;
+        const staleSuffix = stale > 0 ? `, ${stale} stale` : '';
+        lbStat.title = `Lorebook: ${facts} facts, ${summaries} summaries, ${trackers} trackers${staleSuffix}`;
+
+        if (stale > 0) {
+            const staleEl = el('div', 'tv-feed-stat');
+            staleEl.title = `${stale} entries injected 3+ times but never referenced by the AI`;
+            const staleIcon = icon('fa-triangle-exclamation');
+            staleIcon.style.color = '#e17055';
+            staleEl.appendChild(staleIcon);
+            staleEl.appendChild(el('span', 'tv-feed-stat-value', String(stale)));
+            bar.appendChild(staleEl);
+        }
     }).catch(() => {
         lbValue.textContent = '–';
         lbStat.title = 'Lorebook stats unavailable';
@@ -948,7 +983,7 @@ async function computeLorebookStats() {
     }
 
     const activeBooks = getActiveTunnelVisionBooks();
-    let facts = 0, summaries = 0, trackers = 0;
+    let facts = 0, summaries = 0, trackers = 0, stale = 0;
 
     for (const bookName of activeBooks) {
         try {
@@ -962,10 +997,11 @@ async function computeLorebookStats() {
                 else if (isTrackerTitle(title)) trackers++;
                 else facts++;
             }
+            stale += countStaleEntries(bookData);
         } catch { /* skip unavailable books */ }
     }
 
-    _lorebookStatsCache = { facts, summaries, trackers };
+    _lorebookStatsCache = { facts, summaries, trackers, stale };
     _lorebookStatsCacheTime = now;
     return _lorebookStatsCache;
 }
@@ -1010,135 +1046,9 @@ function addFeedItems(items) {
     pulseTrigger();
 }
 
-// ── Background Activity Indicator ────────────────────────────────
-
-let _activeBackgroundCount = 0;
-
-function setBackgroundActive(active) {
-    _activeBackgroundCount += active ? 1 : -1;
-    if (_activeBackgroundCount < 0) _activeBackgroundCount = 0;
-    if (!triggerEl) return;
-    if (_activeBackgroundCount > 0) {
-        triggerEl.classList.add('tv-bg-active');
-    } else {
-        triggerEl.classList.remove('tv-bg-active');
-    }
-}
-
-/**
- * Log a background agent event to the activity feed.
- * Call this from post-turn processor, world-state, auto-summary, lifecycle, etc.
- * @param {Object} opts
- * @param {string} opts.icon - FontAwesome icon class (e.g. 'fa-brain')
- * @param {string} opts.verb - Action label (e.g. 'Scene archived')
- * @param {string} opts.color - CSS color for the label
- * @param {string} [opts.summary] - Short description text
- * @param {string[]} [opts.details] - Extra detail tags
- */
-export function addBackgroundEvent({ icon, verb, color, summary = '', details = [], action = null }) {
-    const item = {
-        id: nextId++,
-        type: 'background',
-        icon,
-        verb,
-        color,
-        summary,
-        timestamp: Date.now(),
-        details: details.filter(Boolean),
-    };
-    if (action) item.action = action;
-    addFeedItems([item]);
-}
-
-/**
- * Mark the start of a background operation (shows spinner on trigger button).
- * Returns a function to call when the operation completes.
- * @returns {() => void} Call this when the background operation finishes
- */
-export function markBackgroundStart() {
-    setBackgroundActive(true);
-    let ended = false;
-    return () => {
-        if (ended) return;
-        ended = true;
-        setBackgroundActive(false);
-    };
-}
-
-// ── Cancellable Background Tasks ─────────────────────────────────
-
-/** @type {Map<number, BackgroundTask>} */
-const _activeTasks = new Map();
-let _nextTaskId = 0;
-
-/**
- * @typedef {Object} BackgroundTask
- * @property {number} id
- * @property {string} label
- * @property {string} icon
- * @property {string} color
- * @property {number} startedAt
- * @property {boolean} cancelled - Check this at async boundaries to abort early
- * @property {() => void} end - Call when the task finishes (success, error, or cancel)
- */
-
-/**
- * Register a cancellable background task. Shows a live indicator in the feed
- * with a cancel button. The caller should check `task.cancelled` at each async
- * boundary and bail out if true.
- *
- * @param {Object} opts
- * @param {string} opts.label - Display label (e.g. 'Post-turn processing')
- * @param {string} [opts.icon='fa-gear'] - FontAwesome icon class
- * @param {string} [opts.color='#6c5ce7'] - CSS color
- * @returns {BackgroundTask}
- */
-export function registerBackgroundTask({ label, icon: taskIcon = 'fa-gear', color = '#6c5ce7' }) {
-    const id = _nextTaskId++;
-    const task = {
-        id,
-        label,
-        icon: taskIcon,
-        color,
-        startedAt: Date.now(),
-        cancelled: false,
-        _ended: false,
-        end() {
-            if (task._ended) return;
-            task._ended = true;
-            _activeTasks.delete(id);
-            setBackgroundActive(false);
-            refreshActiveTasksInPanel();
-        },
-    };
-
-    _activeTasks.set(id, task);
-    setBackgroundActive(true);
-    refreshActiveTasksInPanel();
-    return task;
-}
-
-/**
- * Cancel a running background task by ID.
- * Sets the cancelled flag — the processor is responsible for checking it.
- */
-export function cancelBackgroundTask(id) {
-    const task = _activeTasks.get(id);
-    if (task && !task.cancelled) {
-        task.cancelled = true;
-        console.log(`[TunnelVision] Background task cancelled by user: ${task.label}`);
-        refreshActiveTasksInPanel();
-    }
-}
-
-/** @returns {ReadonlyMap<number, BackgroundTask>} */
-export function getActiveTasks() {
-    return _activeTasks;
-}
-
 function refreshActiveTasksInPanel() {
     if (!panelEl?.classList.contains('open')) return;
-    if (showingWorldState || showingTimeline) return;
+    if (showingWorldState || showingTimeline || showingArcs) return;
     renderAllItems();
 }
 
@@ -1263,9 +1173,11 @@ function toggleWorldStateView() {
 function enterWorldStateView() {
     showingWorldState = true;
     showingTimeline = false;
+    showingArcs = false;
     if (panelTabs) panelTabs.style.display = 'none';
     panelEl?.querySelector('.tv-ws-btn')?.classList.add('tv-ws-active');
     panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
+    panelEl?.querySelector('.tv-arcs-btn')?.classList.remove('tv-arcs-active');
     renderWorldStateView();
 }
 
@@ -1481,9 +1393,11 @@ function toggleTimelineView() {
 function enterTimelineView() {
     showingTimeline = true;
     showingWorldState = false;
+    showingArcs = false;
     if (panelTabs) panelTabs.style.display = 'none';
     panelEl?.querySelector('.tv-timeline-btn')?.classList.add('tv-timeline-active');
     panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
+    panelEl?.querySelector('.tv-arcs-btn')?.classList.remove('tv-arcs-active');
     renderTimelineView();
 }
 
@@ -1696,6 +1610,168 @@ function buildTimelineEntry(entry) {
 
     row.appendChild(body);
     return row;
+}
+
+// ── Arcs View ──────────────────────────────────────────────────
+
+function toggleArcsView() {
+    if (showingArcs) {
+        exitArcsView();
+    } else {
+        enterArcsView();
+    }
+}
+
+function enterArcsView() {
+    showingArcs = true;
+    showingWorldState = false;
+    showingTimeline = false;
+    if (panelTabs) panelTabs.style.display = 'none';
+    panelEl?.querySelector('.tv-arcs-btn')?.classList.add('tv-arcs-active');
+    panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
+    panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
+    renderArcsView();
+}
+
+function exitArcsView() {
+    showingArcs = false;
+    if (panelTabs) panelTabs.style.display = '';
+    panelEl?.querySelector('.tv-arcs-btn')?.classList.remove('tv-arcs-active');
+    renderAllItems();
+}
+
+function renderArcsView() {
+    if (!panelBody) return;
+    panelBody.replaceChildren();
+
+    const container = el('div', 'tv-arcs-view');
+
+    // Header
+    const headerRow = el('div', 'tv-arcs-header');
+    const titleEl = el('span', 'tv-arcs-title');
+    titleEl.appendChild(icon('fa-diagram-project'));
+    titleEl.append(' Narrative Arcs');
+    headerRow.appendChild(titleEl);
+
+    const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
+    backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
+    backBtn.addEventListener('click', exitArcsView);
+    headerRow.appendChild(backBtn);
+    container.appendChild(headerRow);
+
+    const arcs = getAllArcs();
+
+    if (arcs.length === 0) {
+        const emptyEl = el('div', 'tv-float-empty');
+        emptyEl.style.cssText = 'flex: 1;';
+        emptyEl.appendChild(icon('fa-diagram-project'));
+        emptyEl.appendChild(el('span', null, 'No narrative arcs yet'));
+        emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Story arcs will be detected and tracked automatically by the post-turn processor as the narrative progresses'));
+        container.appendChild(emptyEl);
+        panelBody.appendChild(container);
+        return;
+    }
+
+    // Stats
+    const active = arcs.filter(a => a.status === 'active').length;
+    const stalled = arcs.filter(a => a.status === 'stalled').length;
+    const resolved = arcs.filter(a => a.status === 'resolved' || a.status === 'abandoned').length;
+    const statsEl = el('div', 'tv-arcs-stats');
+    statsEl.textContent = `${active} active, ${stalled} stalled, ${resolved} resolved`;
+    container.appendChild(statsEl);
+
+    // Arc list
+    const arcList = el('div', 'tv-arcs-list');
+
+    const statusOrder = { active: 0, stalled: 1, resolved: 2, abandoned: 3 };
+    const sorted = [...arcs].sort((a, b) => (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9));
+
+    for (const arc of sorted) {
+        arcList.appendChild(buildArcCard(arc));
+    }
+
+    container.appendChild(arcList);
+    panelBody.appendChild(container);
+}
+
+const ARC_STATUS_COLORS = {
+    active: '#00b894',
+    stalled: '#fdcb6e',
+    resolved: '#636e72',
+    abandoned: '#d63031',
+};
+
+const ARC_STATUS_ICONS = {
+    active: 'fa-circle-play',
+    stalled: 'fa-circle-pause',
+    resolved: 'fa-circle-check',
+    abandoned: 'fa-circle-xmark',
+};
+
+function buildArcCard(arc) {
+    const card = el('div', `tv-arc-card tv-arc-${arc.status}`);
+
+    const statusColor = ARC_STATUS_COLORS[arc.status] || '#636e72';
+    const statusIcon = ARC_STATUS_ICONS[arc.status] || 'fa-circle-question';
+
+    // Title row
+    const titleRow = el('div', 'tv-arc-title-row');
+    const arcIcon = icon(statusIcon);
+    arcIcon.style.color = statusColor;
+    titleRow.appendChild(arcIcon);
+    titleRow.appendChild(el('span', 'tv-arc-title', arc.title));
+    const statusBadge = el('span', 'tv-arc-status');
+    statusBadge.textContent = arc.status;
+    statusBadge.style.color = statusColor;
+    titleRow.appendChild(statusBadge);
+    card.appendChild(titleRow);
+
+    // Progression
+    if (arc.progression) {
+        const progEl = el('div', 'tv-arc-progression');
+        progEl.textContent = arc.progression;
+        card.appendChild(progEl);
+    }
+
+    // Timestamp
+    const timeEl = el('div', 'tv-arc-time');
+    const updatedDate = new Date(arc.updatedAt);
+    timeEl.textContent = `Updated ${updatedDate.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+    card.appendChild(timeEl);
+
+    // Click to expand history
+    if (arc.history && arc.history.length > 0) {
+        card.classList.add('tv-feed-clickable');
+        card.addEventListener('click', () => {
+            const existing = card.querySelector('.tv-arc-history');
+            if (existing) {
+                existing.remove();
+                card.classList.remove('expanded');
+                return;
+            }
+            card.classList.add('expanded');
+            const historyEl = el('div', 'tv-arc-history');
+            const histHeader = el('div', 'tv-arc-history-header', 'History');
+            historyEl.appendChild(histHeader);
+
+            for (const h of [...arc.history].reverse()) {
+                const hRow = el('div', 'tv-arc-history-item');
+                const hStatus = el('span', 'tv-arc-history-status');
+                hStatus.textContent = h.status;
+                hStatus.style.color = ARC_STATUS_COLORS[h.status] || '#636e72';
+                hRow.appendChild(hStatus);
+                hRow.appendChild(el('span', 'tv-arc-history-text', h.progression || '(no note)'));
+                if (h.timestamp) {
+                    const hTime = new Date(h.timestamp);
+                    hRow.appendChild(el('span', 'tv-arc-history-time', hTime.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })));
+                }
+                historyEl.appendChild(hRow);
+            }
+            card.appendChild(historyEl);
+        });
+    }
+
+    return card;
 }
 
 // ── Public API ──

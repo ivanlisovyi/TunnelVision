@@ -16,6 +16,7 @@
  * so it does NOT make LLM calls — only fast local matching.
  */
 
+import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
@@ -24,6 +25,11 @@ import { getEntryTitle } from './agent-utils.js';
 import { getWorldStateSections } from './world-state.js';
 
 const RELEVANCE_KEY = 'tunnelvision_relevance';
+const FEEDBACK_KEY = 'tunnelvision_feedback';
+
+/** Entries injected during the most recent GENERATION_STARTED. */
+let _lastInjectedEntries = [];
+let _scInitialized = false;
 
 // ── Entity Extraction ────────────────────────────────────────────
 
@@ -105,6 +111,120 @@ function relevanceDecay(uid, relevanceMap) {
     if (hoursAgo < 2) return 3;
     if (hoursAgo < 8) return 1;
     return 0;
+}
+
+// ── Relevance Feedback ───────────────────────────────────────────
+
+/**
+ * Retrieve the per-entry feedback map from chat_metadata.
+ * Each key is a stringified UID, value is { injections, references, missStreak, lastReferenced }.
+ * @returns {Record<string, {injections:number, references:number, missStreak:number, lastReferenced:number}>}
+ */
+export function getFeedbackMap() {
+    try {
+        return getContext().chatMetadata?.[FEEDBACK_KEY] || {};
+    } catch {
+        return {};
+    }
+}
+
+function saveFeedbackMap(map) {
+    try {
+        const context = getContext();
+        if (!context.chatMetadata) return;
+        context.chatMetadata[FEEDBACK_KEY] = map;
+        context.saveMetadataDebounced?.();
+    } catch { /* metadata not available */ }
+}
+
+/**
+ * Score modifier based on whether an entry's past injections led to AI usage.
+ * Positive for entries the AI actually references; negative for repeatedly-ignored entries.
+ */
+function feedbackBoost(uid) {
+    const map = getFeedbackMap();
+    const data = map[uid];
+    if (!data) return 0;
+
+    let boost = 0;
+
+    if (data.lastReferenced) {
+        const hoursAgo = (Date.now() - data.lastReferenced) / (1000 * 60 * 60);
+        if (hoursAgo < 1) boost += 5;
+        else if (hoursAgo < 4) boost += 3;
+        else if (hoursAgo < 12) boost += 1;
+    }
+
+    if (data.injections >= 3 && data.references / data.injections > 0.5) {
+        boost += 3;
+    }
+
+    if (data.missStreak >= 5) boost -= 4;
+    else if (data.missStreak >= 3) boost -= 2;
+
+    return boost;
+}
+
+/**
+ * Check if the AI's response text references an injected entry.
+ * Matches on title or on 2+ keys (or 1 substantial key of 4+ chars).
+ */
+function isEntryReferenced(entry, responseText) {
+    const title = entry.title.toLowerCase();
+    if (title.length >= 3 && responseText.includes(title)) return true;
+
+    let keyHits = 0;
+    let hasSubstantialHit = false;
+    for (const key of entry.keys) {
+        const k = key.toLowerCase();
+        if (k.length >= 2 && responseText.includes(k)) {
+            keyHits++;
+            if (k.length >= 4) hasSubstantialHit = true;
+            if (keyHits >= 2) return true;
+        }
+    }
+
+    return keyHits >= 1 && hasSubstantialHit;
+}
+
+/**
+ * After an AI response, scan it for references to entries that were injected
+ * via smart context. Updates the per-entry feedback map in chat_metadata.
+ */
+export function processRelevanceFeedback() {
+    if (_lastInjectedEntries.length === 0) return;
+
+    const context = getContext();
+    const chat = context.chat;
+    if (!chat || chat.length < 2) return;
+
+    const lastMsg = chat[chat.length - 1];
+    if (!lastMsg || lastMsg.is_user) return;
+    const responseText = (lastMsg.mes || '').toLowerCase();
+    if (!responseText) return;
+
+    const feedbackMap = getFeedbackMap();
+
+    for (const entry of _lastInjectedEntries) {
+        const uid = String(entry.uid);
+        if (!feedbackMap[uid]) {
+            feedbackMap[uid] = { injections: 0, references: 0, missStreak: 0, lastReferenced: 0 };
+        }
+
+        const data = feedbackMap[uid];
+        data.injections++;
+
+        if (isEntryReferenced(entry, responseText)) {
+            data.references++;
+            data.missStreak = 0;
+            data.lastReferenced = Date.now();
+        } else {
+            data.missStreak++;
+        }
+    }
+
+    saveFeedbackMap(feedbackMap);
+    _lastInjectedEntries = [];
 }
 
 // ── World State Boost ────────────────────────────────────────────
@@ -247,6 +367,9 @@ export function buildSmartContextPrompt() {
             // World state boost — entries matching present characters / active threads
             relevance += worldStateBoost(entry, wsSignals);
 
+            // Feedback boost — entries the AI actually uses get promoted
+            relevance += feedbackBoost(entry.uid);
+
             // Tracker entries for mentioned entities get a boost
             if (isTracker && relevance > 0) {
                 candidates.push({
@@ -284,6 +407,7 @@ export function buildSmartContextPrompt() {
 
     const selected = [];
     const selectedUids = [];
+    const selectedEntryInfo = [];
     let totalChars = 0;
 
     for (const c of candidates) {
@@ -293,10 +417,18 @@ export function buildSmartContextPrompt() {
 
         selected.push(entryText);
         selectedUids.push(c.entry.uid);
+        selectedEntryInfo.push({
+            uid: c.entry.uid,
+            title: (c.entry.comment || '').trim(),
+            keys: (c.entry.key || []).map(k => String(k).trim()),
+        });
         totalChars += entryText.length;
     }
 
     if (selected.length === 0) return '';
+
+    // Store injected entries for post-response feedback scanning
+    _lastInjectedEntries = selectedEntryInfo;
 
     // Record which entries were selected for relevance decay tracking
     if (selectedUids.length > 0) touchRelevance(selectedUids);
@@ -313,4 +445,31 @@ export function buildSmartContextPrompt() {
 function formatEntryForInjection(entry, bookName, isTracker, isSummary = false) {
     const tag = isTracker ? ' [Tracker]' : isSummary ? ' [Summary]' : '';
     return `[${getEntryTitle(entry)}${tag} — ${bookName}, UID ${entry.uid}]\n${(entry.content || '').trim()}`;
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+
+function onMessageReceived() {
+    try {
+        const context = getContext();
+        const lastMsg = context.chat?.[context.chat.length - 1];
+        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
+    } catch { return; }
+
+    processRelevanceFeedback();
+}
+
+/**
+ * Register the MESSAGE_RECEIVED handler for relevance feedback scanning.
+ * Called once from index.js init.
+ */
+export function initSmartContext() {
+    if (_scInitialized) return;
+    _scInitialized = true;
+
+    if (event_types.MESSAGE_RECEIVED) {
+        eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
+    }
+
+    console.log('[TunnelVision] Smart context feedback loop initialized');
 }

@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// Shared mock metadata store — tests can manipulate this directly
+const mockMetadata = {};
+const mockChat = [];
 
 // Mock internal dependencies with complex transitive imports
 vi.mock('../tool-registry.js', () => ({
@@ -10,8 +14,23 @@ vi.mock('../entry-manager.js', () => ({
 vi.mock('../world-state.js', () => ({
     getWorldStateSections: vi.fn(() => ({})),
 }));
+// Override the st-context mock for this file so we can control chatMetadata
+vi.mock('../../../st-context.js', () => ({
+    getContext: () => ({
+        chatId: 'test-chat',
+        chat: mockChat,
+        chatMetadata: mockMetadata,
+        saveMetadataDebounced: vi.fn(),
+    }),
+}));
 
-import { scoreEntry } from '../smart-context.js';
+import { scoreEntry, getFeedbackMap, processRelevanceFeedback } from '../smart-context.js';
+
+beforeEach(() => {
+    // Reset state between tests
+    for (const key of Object.keys(mockMetadata)) delete mockMetadata[key];
+    mockChat.length = 0;
+});
 
 // ── scoreEntry ───────────────────────────────────────────────────
 
@@ -59,5 +78,32 @@ describe('scoreEntry', () => {
     it('handles entry with missing key array', () => {
         const entry = { comment: 'test' };
         expect(scoreEntry(entry, 'test entry')).toBe(10);
+    });
+});
+
+// ── getFeedbackMap ───────────────────────────────────────────────
+
+describe('getFeedbackMap', () => {
+    it('returns empty object when no feedback exists', () => {
+        expect(getFeedbackMap()).toEqual({});
+    });
+
+    it('returns stored feedback data', () => {
+        mockMetadata.tunnelvision_feedback = { '42': { injections: 3, references: 1, missStreak: 0, lastReferenced: 100 } };
+        const map = getFeedbackMap();
+        expect(map['42'].injections).toBe(3);
+        expect(map['42'].references).toBe(1);
+    });
+});
+
+// ── processRelevanceFeedback ─────────────────────────────────────
+
+describe('processRelevanceFeedback', () => {
+    it('does nothing when _lastInjectedEntries is empty (no prior injection)', () => {
+        mockChat.push({ is_user: true, mes: 'Hello' });
+        mockChat.push({ is_user: false, mes: 'Hi there' });
+
+        processRelevanceFeedback();
+        expect(getFeedbackMap()).toEqual({});
     });
 });

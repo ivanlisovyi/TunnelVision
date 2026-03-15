@@ -23,7 +23,7 @@ import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid, updateEntry, forgetEntry } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { getChatId, shouldSkipAiMessage, callWithRetry } from './agent-utils.js';
-import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
 
 const METADATA_KEY = 'tunnelvision_lifecycle';
 

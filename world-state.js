@@ -19,7 +19,8 @@ import { getSettings, isSummaryTitle, isTrackerTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfo } from './entry-manager.js';
 import { getChatId, formatChatExcerpt, callWithRetry } from './agent-utils.js';
-import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
+import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
+import { buildArcsSummary } from './arc-tracker.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
 const MAX_EXCERPT_CHARS = 20_000;
@@ -263,7 +264,12 @@ export function buildWorldStatePrompt() {
     included.sort((a, b) => orderedNames.indexOf(a.name) - orderedNames.indexOf(b.name));
 
     const assembled = included.map(s => s.body).join('\n\n');
-    return header + '\n\n' + assembled;
+
+    // Append tracked narrative arcs if available
+    const arcsSummary = buildArcsSummary();
+    const arcsBlock = arcsSummary ? '\n\n' + arcsSummary : '';
+
+    return header + '\n\n' + assembled + arcsBlock;
 }
 
 /**
@@ -406,6 +412,12 @@ async function buildUpdatePrompt(previousState, recentExcerpt, priorityContext =
     const historyBlock = await buildStoryHistoryBlock();
     if (historyBlock) {
         parts.push(historyBlock, '');
+    }
+
+    // Narrative arcs tracked by the post-turn processor
+    const arcsSummary = buildArcsSummary();
+    if (arcsSummary) {
+        parts.push('[Tracked Narrative Arcs — incorporate active arcs into Active Threads]', arcsSummary, '');
     }
 
     if (hasPrevious) {

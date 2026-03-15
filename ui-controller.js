@@ -40,10 +40,11 @@ import {
 import { buildTreeFromMetadata, buildTreeWithLLM, generateSummariesForTree, ingestChatMessages } from './tree-builder.js';
 import { registerTools, unregisterTools, getDefaultToolDescriptions, stripDynamicContent } from './tool-registry.js';
 import { runDiagnostics } from './diagnostics.js';
-import { applyRecurseLimit } from './index.js';
+import { applyRecurseLimit } from './tool-registry.js';
 import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
 import { escapeHtml } from './entry-manager.js';
+import { computeEntryQuality, getQualityRating, getQualityColor, qualityTooltip, buildQualityContext } from './entry-scoring.js';
 
 
 let currentLorebook = null;
@@ -1309,6 +1310,9 @@ async function onOpenTreeEditor() {
     const entryLookup = buildEntryLookup(bookData);
     const bookName = currentLorebook;
 
+    // Pre-compute entry quality context once for the editor session
+    const qualityCtx = buildQualityContext(bookData);
+
     // State: which node is selected in the tree
     let selectedNode = tree.root;
 
@@ -1611,6 +1615,17 @@ async function onOpenTreeEditor() {
         const $row = $(`<div class="tv-entry-row" draggable="true" data-uid="${uid}"></div>`);
         $row.append($('<span class="tv-entry-drag">\u22EE\u22EE</span>'));
         $row.append($('<span class="tv-entry-name"></span>').text(label));
+
+        // Health dot — quality indicator
+        if (entry && !entry.disable) {
+            const q = computeEntryQuality(entry, qualityCtx.maxUid, qualityCtx.feedbackMap, qualityCtx.recentText);
+            const rating = getQualityRating(q);
+            const color = getQualityColor(rating);
+            const $dot = $(`<span class="tv-entry-health" title="${escapeHtml(qualityTooltip(q))}"></span>`);
+            $dot.css('background', color);
+            $row.append($dot);
+        }
+
         $row.append($(`<span class="tv-entry-uid">#${uid}</span>`));
 
         // Tracker toggle
