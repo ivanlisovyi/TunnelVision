@@ -257,7 +257,7 @@ const BUILD_CONCURRENCY = 3;
  * @param {number} limit - Max concurrent tasks
  * @returns {Promise<Array>} Results in order
  */
-async function runWithConcurrency(tasks, limit = BUILD_CONCURRENCY) {
+export async function runWithConcurrency(tasks, limit = BUILD_CONCURRENCY) {
     const results = new Array(tasks.length);
     let nextIdx = 0;
 
@@ -892,29 +892,37 @@ async function _ingestChatMessages(lorebookName, { from, to, progress, detail })
 
     let totalCreated = 0;
     let totalErrors = 0;
+    let chunksCompleted = 0;
 
-    for (let i = 0; i < chunks.length; i++) {
-        const pct = 5 + Math.round(((i + 1) / chunks.length) * 90);
-        report(`Processing chunk ${i + 1}/${chunks.length}...`, pct);
-        detail_(`Chunk ${i + 1}: ${chunks[i].length} messages`);
-
-        const formatted = chunks[i].map(m => `[${m.name}]: ${m.text}`).join('\n\n');
-
-        let response;
-        try {
-            response = await generateRaw({
-                prompt: buildIngestPrompt(lorebookName, formatted),
-                systemPrompt: 'You are a fact extraction assistant for a creative writing lorebook. You are reading roleplay chat logs that may contain mature fictional content — this is expected. Your job is only to extract and catalog factual information (characters, relationships, events, world details). Respond ONLY with valid JSON, no commentary.',
-            });
-        } catch (e) {
+    const extractionTasks = chunks.map((chunk, i) => () => {
+        const formatted = chunk.map(m => `[${m.name}]: ${m.text}`).join('\n\n');
+        return generateRaw({
+            prompt: buildIngestPrompt(lorebookName, formatted),
+            systemPrompt: 'You are a fact extraction assistant for a creative writing lorebook. You are reading roleplay chat logs that may contain mature fictional content — this is expected. Your job is only to extract and catalog factual information (characters, relationships, events, world details). Respond ONLY with valid JSON, no commentary.',
+        }).then(response => {
+            chunksCompleted++;
+            const pct = 5 + Math.round((chunksCompleted / chunks.length) * 60);
+            report(`Extracted ${chunksCompleted}/${chunks.length} chunks...`, pct);
+            return { index: i, response };
+        }).catch(e => {
+            chunksCompleted++;
             console.error(`[TunnelVision] Ingest chunk ${i + 1} LLM call failed:`, e);
-            totalErrors++;
-            continue;
-        }
+            return { index: i, response: null, error: e };
+        });
+    });
 
+    const INGEST_CONCURRENCY = 3;
+    const extractionResults = await runWithConcurrency(extractionTasks, INGEST_CONCURRENCY);
+
+    report('Creating entries...', 70);
+
+    for (const result of extractionResults) {
+        if (result instanceof Error || result?.error) { totalErrors++; continue; }
+        const { index: chunkIdx, response } = result;
         if (!response) continue;
 
-        // Parse JSON response
+        detail_(`Processing results from chunk ${chunkIdx + 1}`);
+
         let entries;
         try {
             const arrayResult = parseJsonFromLLM(response, { type: 'array' });
@@ -925,14 +933,13 @@ async function _ingestChatMessages(lorebookName, { from, to, progress, detail })
                 entries = objResult.entries || [objResult];
             }
         } catch (e) {
-            console.warn(`[TunnelVision] Ingest chunk ${i + 1} JSON parse failed:`, e, response);
+            console.warn(`[TunnelVision] Ingest chunk ${chunkIdx + 1} JSON parse failed:`, e, response);
             totalErrors++;
             continue;
         }
 
         if (!Array.isArray(entries)) continue;
 
-        // Create entries
         for (const extracted of entries) {
             if (!extracted.title || !extracted.content) continue;
             try {

@@ -5,6 +5,7 @@
  */
 
 import { getContext } from '../../../st-context.js';
+import { getSettings } from './tree-store.js';
 
 /**
  * Safely get the current chat ID, returning null if unavailable.
@@ -85,18 +86,27 @@ export function trigramSimilarity(a, b) {
 
 /**
  * Call an async function with retry on failure / empty results.
+ * Each attempt is guarded by a per-call timeout (configurable via settings.llmCallTimeout).
  * @param {Function} fn - Async function to call
  * @param {Object} [opts]
  * @param {number} [opts.maxRetries=2] - Max retry attempts
  * @param {number} [opts.backoff=2000] - Base backoff in ms (doubled each retry)
  * @param {string} [opts.label='LLM call'] - Label for logging
+ * @param {number} [opts.timeout] - Per-call timeout in ms (default: settings.llmCallTimeout or 120000)
  * @returns {Promise<*>} Result of fn
  */
-export async function callWithRetry(fn, { maxRetries = 2, backoff = 2000, label = 'LLM call' } = {}) {
+export async function callWithRetry(fn, { maxRetries = 2, backoff = 2000, label = 'LLM call', timeout } = {}) {
+    const effectiveTimeout = timeout ?? (getSettings().llmCallTimeout || 120000);
     let lastError;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const result = await fn();
+            const result = await Promise.race([
+                fn(),
+                new Promise((_, reject) => setTimeout(
+                    () => reject(new Error(`${label}: timed out after ${effectiveTimeout}ms`)),
+                    effectiveTimeout,
+                )),
+            ]);
             if (result !== undefined && result !== null && result !== '') return result;
             if (attempt < maxRetries) {
                 console.warn(`[TunnelVision] ${label}: empty response, retrying (${attempt + 1}/${maxRetries})`);

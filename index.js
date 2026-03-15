@@ -28,7 +28,7 @@ import { ToolManager } from '../../../tool-calling.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
 import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache } from './tool-registry.js';
-import { resetTurnEntryCount, invalidateWorldInfoCache } from './entry-manager.js';
+import { resetTurnEntryCount, invalidateWorldInfoCache, invalidateDirtyWorldInfoCache, getCachedWorldInfo } from './entry-manager.js';
 import { buildNotebookPrompt } from './tools/notebook.js';
 import { buildWorldStatePrompt, initWorldState } from './world-state.js';
 import { initPostTurnProcessor } from './post-turn-processor.js';
@@ -270,10 +270,11 @@ async function onGenerationStarted(type, opts) {
         const invocations = lastMsg?.extra?.tool_invocations;
         isRecursiveToolPass = Array.isArray(invocations) && invocations.length > 0;
 
-        // Reset per-turn state on first pass only (not during tool recursion)
+        // Reset per-turn state on first pass only (not during tool recursion).
+        // Use dirty-flag invalidation so unmodified books stay cached across turns.
         if (!isRecursiveToolPass) {
             resetTurnEntryCount();
-            invalidateWorldInfoCache();
+            invalidateDirtyWorldInfoCache();
         }
 
         if (settings.ephemeralResults) {
@@ -314,6 +315,9 @@ async function onGenerationStarted(type, opts) {
                 worldStatePrompt = buildWorldStatePrompt();
             }
             if (settings.smartContextEnabled) {
+                if (activeBooks.length > 0) {
+                    await Promise.all(activeBooks.map(book => getCachedWorldInfo(book)));
+                }
                 smartContextPrompt = buildSmartContextPrompt();
             }
             if (settings.notebookEnabled !== false) {

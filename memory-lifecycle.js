@@ -18,7 +18,7 @@
 
 import { eventSource, event_types, generateQuietPrompt } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
-import { getSettings, getTree, saveTree, createTreeNode, addEntryToNode, removeEntryFromTree, getAllEntryUids, isSummaryTitle, isTrackerTitle } from './tree-store.js';
+import { getSettings, getTree, saveTree, createTreeNode, addEntryToNode, removeEntryFromTree, getAllEntryUids, isSummaryTitle, isTrackerTitle, getTrackerUids } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfo, buildUidMap, parseJsonFromLLM, invalidateWorldInfoCache, mergeEntries, findEntryByUid } from './entry-manager.js';
 import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
@@ -107,7 +107,9 @@ export async function runLifecycleMaintenance(force = false) {
             const bookData = await getCachedWorldInfo(bookName);
             if (!bookData?.entries) continue;
 
-            // ── Step 1: Find and merge near-duplicate entries ──
+            // Steps run sequentially: dedup and compress both do read-modify-write
+            // on bookData via saveWorldInfo, and dedup also modifies the tree.
+            // Parallelizing would cause lost-update races on shared mutable state.
             if (settings.lifecycleConsolidate !== false) {
                 const dupeResult = await findAndMergeDuplicates(bookName, bookData, chatId);
                 result.duplicatesFound += dupeResult.found;
@@ -117,7 +119,6 @@ export async function runLifecycleMaintenance(force = false) {
 
             if (getChatId() !== chatId || task.cancelled) break;
 
-            // ── Step 2: Compress verbose entries ──
             if (settings.lifecycleCompress !== false) {
                 const compressResult = await compressVerboseEntries(bookName, bookData, chatId);
                 result.entriesCompressed += compressResult.compressed;
@@ -126,7 +127,6 @@ export async function runLifecycleMaintenance(force = false) {
 
             if (getChatId() !== chatId || task.cancelled) break;
 
-            // ── Step 3: Reorganize orphaned entries into tree categories ──
             if (settings.lifecycleReorganize !== false) {
                 const reorgResult = await reorganizeTree(bookName, bookData, chatId);
                 result.entriesReorganized += reorgResult.reorganized;
@@ -251,12 +251,50 @@ async function findAndMergeDuplicates(bookName, bookData, chatId) {
     return result;
 }
 
+// ── Character Entry Detection ────────────────────────────────────
+
+/**
+ * Build a set of UIDs that belong to character-related tree subtrees.
+ * A subtree is character-related if it contains at least one tracker entry
+ * (trackers are per-character by definition). Also includes entries whose
+ * keywords contain "character". This works regardless of category naming.
+ */
+function buildCharacterUidSet(bookName, bookData) {
+    const characterUids = new Set();
+    const trackerSet = new Set(getTrackerUids(bookName));
+
+    const tree = getTree(bookName);
+    if (tree?.root) {
+        for (const child of (tree.root.children || [])) {
+            const subtreeUids = getAllEntryUids(child);
+            if (subtreeUids.some(uid => trackerSet.has(uid))) {
+                for (const uid of subtreeUids) characterUids.add(uid);
+            }
+        }
+    }
+
+    if (bookData?.entries) {
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (entry.disable) continue;
+            const keys = entry.key || [];
+            if (keys.some(k => String(k).toLowerCase().includes('character'))) {
+                characterUids.add(entry.uid);
+            }
+        }
+    }
+
+    return characterUids;
+}
+
 // ── Step 2: Entry Compression ────────────────────────────────────
 
 const COMPRESSION_THRESHOLD = 1500;
 
 async function compressVerboseEntries(bookName, bookData, chatId) {
     const result = { compressed: 0, errors: 0 };
+
+    const characterUids = buildCharacterUidSet(bookName, bookData);
 
     // Find entries that are excessively long
     const verbose = [];
@@ -267,6 +305,9 @@ async function compressVerboseEntries(bookName, bookData, chatId) {
             // Skip tracker entries and summaries — they have intentional structure
             const title = (entry.comment || '').toLowerCase();
             if (title.startsWith('[tracker') || title.startsWith('[summary')) continue;
+
+            // Skip character entries — their detail is intentional
+            if (characterUids.has(entry.uid)) continue;
 
             verbose.push({
                 uid: entry.uid,

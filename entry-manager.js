@@ -35,6 +35,7 @@ const MAX_ENTRIES_PER_TURN = 15;
 // ── Turn-Scoped WorldInfo Cache ──────────────────────────────────
 
 const _worldInfoCache = new Map();
+const _dirtyBooks = new Set();
 
 /**
  * Load world info with per-turn caching. Avoids redundant disk reads
@@ -62,15 +63,29 @@ export function getCachedWorldInfoSync(bookName) {
 
 /**
  * Invalidate the world info cache for a specific book (after writes)
- * or all books (at turn boundaries).
- * @param {string} [bookName] - If omitted, clears entire cache.
+ * or all books (at turn boundaries / external changes).
+ * @param {string} [bookName] - If omitted, clears entire cache and dirty set.
  */
 export function invalidateWorldInfoCache(bookName) {
     if (bookName) {
         _worldInfoCache.delete(bookName);
+        _dirtyBooks.add(bookName);
     } else {
         _worldInfoCache.clear();
+        _dirtyBooks.clear();
     }
+}
+
+/**
+ * Invalidate only books that were written to since the last full clear.
+ * Call this at generation boundaries instead of a full clear so that
+ * unmodified books stay cached across turns.
+ */
+export function invalidateDirtyWorldInfoCache() {
+    for (const bookName of _dirtyBooks) {
+        _worldInfoCache.delete(bookName);
+    }
+    _dirtyBooks.clear();
 }
 
 // ── Turn-Scoped Rate Limiter ─────────────────────────────────────

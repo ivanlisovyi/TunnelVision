@@ -359,6 +359,7 @@ Write naturally. Use tools when they help you stay consistent with established d
     selectiveRetrieval: false,
     ephemeralResults: false,
     ephemeralToolFilter: ['TunnelVision_Search', 'TunnelVision_Summarize', 'TunnelVision_MergeSplit'],
+    llmCallTimeout: 120000,
     stealthMode: false,
     autoHideSummarized: true,
     passthroughConstant: true,
