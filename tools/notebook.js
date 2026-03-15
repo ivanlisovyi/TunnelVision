@@ -23,6 +23,19 @@ const METADATA_KEY = 'tunnelvision_notebook';
 const MAX_NOTES = 50;
 
 /**
+ * Per-generation write guard — prevents the model from looping on Notebook
+ * (write → see result → remove → rewrite → repeat until depth limit).
+ * Tracks write count this generation cycle. Reset on each new generation.
+ */
+let _writeGuard = { writtenTitles: new Set(), writeCount: 0 };
+const MAX_WRITES_PER_GENERATION = 3;
+
+/** Call at the start of each first-pass generation to reset the write guard. */
+export function resetNotebookWriteGuard() {
+    _writeGuard = { writtenTitles: new Set(), writeCount: 0 };
+}
+
+/**
  * Get the notebook array from chat metadata. Creates it if missing.
  * @returns {Array<{id: string, title: string, content: string, created: number}>}
  */
@@ -113,6 +126,9 @@ Actions:
                     if (!args.title || !args.content) {
                         return 'Write requires both "title" and "content".';
                     }
+                    if (_writeGuard.writeCount >= MAX_WRITES_PER_GENERATION) {
+                        return `Notebook write limit reached for this turn (${MAX_WRITES_PER_GENERATION} writes). Your existing notes are preserved. Continue with your response.`;
+                    }
                     const notebook = getNotebook();
                     if (notebook.length >= MAX_NOTES) {
                         return `Notebook is full (${MAX_NOTES} notes). Remove some old notes first.`;
@@ -124,6 +140,8 @@ Actions:
                         content: args.content.trim(),
                         created: Date.now(),
                     });
+                    _writeGuard.writeCount++;
+                    _writeGuard.writtenTitles.add(args.title.trim().toLowerCase());
                     saveNotebook();
                     return `Note saved: "${args.title}" (ID: ${id}). You'll see it in your context every turn.`;
                 }

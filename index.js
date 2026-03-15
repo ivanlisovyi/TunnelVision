@@ -29,7 +29,7 @@ import { getSettings, isLorebookEnabled } from './tree-store.js';
 import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache, applyRecurseLimit } from './tool-registry.js';
 import { resetTurnEntryCount, invalidateWorldInfoCache, invalidateDirtyWorldInfoCache, getCachedWorldInfo } from './entry-manager.js';
 import { setInjectionSizes } from './agent-utils.js';
-import { buildNotebookPrompt } from './tools/notebook.js';
+import { buildNotebookPrompt, resetNotebookWriteGuard } from './tools/notebook.js';
 import { buildWorldStatePrompt, initWorldState } from './world-state.js';
 import { initPostTurnProcessor } from './post-turn-processor.js';
 import { buildSmartContextPrompt, initSmartContext, invalidatePreWarmCache } from './smart-context.js';
@@ -280,6 +280,7 @@ async function onGenerationStarted(type, opts) {
         if (!isRecursiveToolPass) {
             resetTurnEntryCount();
             invalidateDirtyWorldInfoCache();
+            resetNotebookWriteGuard();
         }
 
         if (settings.ephemeralResults) {
