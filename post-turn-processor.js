@@ -28,7 +28,7 @@ import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './activity-feed.js';
-import { requestPriorityUpdate } from './world-state.js';
+import { requestPriorityUpdate, getWorldStateText } from './world-state.js';
 
 const METADATA_KEY = 'tunnelvision_postturn';
 
@@ -323,6 +323,24 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         }
     } catch { /* proceed without existing facts */ }
 
+    // Extract temporal context from the world state's Current Scene if available
+    let temporalContext = '';
+    try {
+        const wsText = getWorldStateText();
+        if (wsText) {
+            const sceneMatch = wsText.match(/## Current Scene[\s\S]*?(?=\n## |$)/);
+            if (sceneMatch) {
+                const dayMatch = sceneMatch[0].match(/Day:\s*(.+)/i);
+                const dateMatch = sceneMatch[0].match(/Date:\s*(.+)/i);
+                const timeMatch = sceneMatch[0].match(/Time:\s*(.+)/i);
+                const parts = [dayMatch?.[1], dateMatch?.[1], timeMatch?.[1]].filter(Boolean);
+                if (parts.length > 0) {
+                    temporalContext = `\n[Current In-World Time — use this to timestamp facts]\n${parts.join(' | ')}\n`;
+                }
+            }
+        }
+    } catch { /* proceed without temporal context */ }
+
     const quietPrompt = [
         'You are an analysis assistant for a roleplay lorebook. Perform TWO tasks on this exchange:',
         '',
@@ -348,6 +366,8 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '',
         'When in doubt, do NOT extract. Fewer high-quality facts are better than many trivial ones. An empty facts array is perfectly fine.',
         '',
+        'WHEN: For each fact, provide the approximate in-world time it occurred (e.g. "Day 3, evening", "Day 5, morning", "early January 2025"). Use the Current In-World Time provided above as reference. If the timing is unclear, use "unknown".',
+        '',
         'KEYS: For each fact, provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this fact?',
         '',
         'TASK 2 — SCENE CHANGE DETECTION:',
@@ -369,13 +389,14 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '',
         'When in doubt, it is NOT a scene change. Err on the side of keeping the scene going — premature archiving fragments coherent scenes into useless pieces.',
         '',
+        temporalContext,
         existingFactsSection,
         '[Recent Exchange]',
         recentExcerpt,
         '',
         'Respond with ONLY a JSON object:',
         '{',
-        '  "facts": [{"title": "short title", "content": "third-person description", "keys": ["keyword1"]}],',
+        '  "facts": [{"title": "short title", "content": "third-person description", "when": "Day X, time", "keys": ["keyword1"]}],',
         '  "sceneChange": {',
         '    "detected": true/false,',
         '    "type": "location|time_skip|narrative_shift|resolution|null",',
@@ -424,8 +445,14 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
             }
 
             try {
+                let factContent = String(fact.content).trim();
+                const when = fact.when ? String(fact.when).trim() : '';
+                if (when && when.toLowerCase() !== 'unknown') {
+                    factContent = `[${when}] ${factContent}`;
+                }
+
                 const entryResult = await createEntry(targetBook, {
-                    content: String(fact.content).trim(),
+                    content: factContent,
                     comment: String(fact.title).trim(),
                     keys: Array.isArray(fact.keys) ? fact.keys.map(k => String(k).trim()).filter(Boolean) : [],
                     nodeId: null,
