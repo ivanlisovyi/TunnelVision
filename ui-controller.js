@@ -11,6 +11,7 @@ import { getWorldStateText, getWorldStateLastIndex, updateWorldState, clearWorld
 import { getLastProcessingResult, getLastProcessedIndex } from './post-turn-processor.js';
 import { getLastLifecycleResult, getLastLifecycleRunIndex } from './memory-lifecycle.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
+import { loadTimelineEntries } from './activity-feed.js';
 import {
     getTree,
     saveTree,
@@ -209,6 +210,21 @@ export function bindUIEvents() {
         $(this).toggleClass('expanded');
         $(this).next('.tv-diagnostics-body').slideToggle(200);
     });
+
+    // Import/Export collapsible header
+    $('#tv_importexport_header').on('click', function () {
+        $(this).toggleClass('expanded');
+        $(this).next('.tv-importexport-body').slideToggle(200);
+    });
+
+    // Export buttons
+    $('#tv_export_worldstate').on('click', onExportWorldState);
+    $('#tv_export_notebook').on('click', onExportNotebook);
+    $('#tv_export_timeline').on('click', onExportTimeline);
+
+    // Import facts
+    $('#tv_import_facts_btn').on('click', () => $('#tv_import_facts_file').trigger('click'));
+    $('#tv_import_facts_file').on('change', onImportFacts);
 
 }
 
@@ -2021,6 +2037,170 @@ async function onRunDiagnostics() {
         $output.append(`<div class="tv_diag_item tv_diag_fail"><i class="fa-solid fa-xmark"></i> Diagnostics error: ${escapeHtml(e.message)}</div>`);
     } finally {
         $btn.prop('disabled', false).html('<i class="fa-solid fa-stethoscope"></i> Run Diagnostics');
+    }
+}
+
+// ─── Import / Export Hub ─────────────────────────────────────────
+
+function downloadFile(filename, content, mimeType = 'text/plain') {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function onExportWorldState() {
+    const text = getWorldStateText();
+    if (!text) {
+        toastr.warning('No world state available. Enable and refresh the rolling world state first.', 'TunnelVision');
+        return;
+    }
+    const chatId = getContext().chatId || 'unknown';
+    downloadFile(`worldstate_${chatId}.md`, text, 'text/markdown');
+    toastr.success('World state exported.', 'TunnelVision');
+}
+
+function onExportNotebook() {
+    const context = getContext();
+    const notes = context.chatMetadata?.tunnelvision_notebook;
+    if (!notes || notes.length === 0) {
+        toastr.warning('Notebook is empty. The AI has not written any notes yet.', 'TunnelVision');
+        return;
+    }
+    const chatId = context.chatId || 'unknown';
+    const json = JSON.stringify(notes, null, 2);
+    downloadFile(`notebook_${chatId}.json`, json, 'application/json');
+    toastr.success(`Exported ${notes.length} notebook note(s).`, 'TunnelVision');
+}
+
+async function onExportTimeline() {
+    const $btn = $('#tv_export_timeline');
+    $btn.prop('disabled', true);
+
+    try {
+        const groups = await loadTimelineEntries();
+        if (!groups || groups.length === 0) {
+            toastr.warning('No facts or summaries to export. The lorebook is empty or has no timestamped entries.', 'TunnelVision');
+            return;
+        }
+
+        const lines = ['# TunnelVision Timeline Export', ''];
+        let totalEntries = 0;
+
+        for (const group of groups) {
+            const dayLabel = group.day != null ? `Day ${group.day}` : 'Undated';
+            lines.push(`## ${dayLabel}`, '');
+
+            for (const entry of group.entries) {
+                totalEntries++;
+                const prefix = entry.isSummary ? '[Summary]' : '[Fact]';
+                const time = entry.timeLabel ? ` *(${entry.timeLabel})*` : '';
+                lines.push(`### ${prefix} ${entry.title}${time}`, '');
+                if (entry.content) {
+                    lines.push(entry.content, '');
+                }
+            }
+        }
+
+        const chatId = getContext().chatId || 'unknown';
+        downloadFile(`timeline_${chatId}.md`, lines.join('\n'), 'text/markdown');
+        toastr.success(`Exported ${totalEntries} entries across ${groups.length} group(s).`, 'TunnelVision');
+    } catch (err) {
+        console.error('[TunnelVision] Timeline export failed:', err);
+        toastr.error(`Export failed: ${err.message}`, 'TunnelVision');
+    } finally {
+        $btn.prop('disabled', false);
+    }
+}
+
+async function onImportFacts(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Reset so the same file can be re-selected
+    event.target.value = '';
+
+    if (!currentLorebook) {
+        toastr.warning('Select a lorebook first.', 'TunnelVision');
+        return;
+    }
+
+    const bookName = currentLorebook;
+    const tree = getTree(bookName);
+    if (!tree || !tree.root) {
+        toastr.warning('The selected lorebook has no tree. Build a tree first.', 'TunnelVision');
+        return;
+    }
+
+    const $status = $('#tv_import_facts_status');
+    $status.show().text('Reading file...');
+
+    try {
+        const text = await file.text();
+        const rawLines = text.split(/\r?\n/);
+
+        // Filter: skip empty lines, comment lines starting with #
+        const factLines = rawLines
+            .map(l => l.trim())
+            .filter(l => l.length > 0 && !l.startsWith('#'));
+
+        if (factLines.length === 0) {
+            $status.text('No importable lines found. Make sure the file has non-empty, non-comment lines.');
+            return;
+        }
+
+        $status.text(`Importing ${factLines.length} fact(s)...`);
+
+        const { createEntry } = await import('./entry-manager.js');
+        let created = 0;
+        let failed = 0;
+
+        for (const line of factLines) {
+            try {
+                let title, content;
+
+                // "Title: Content" format — split on first colon
+                const colonIdx = line.indexOf(':');
+                if (colonIdx > 0 && colonIdx < 80) {
+                    title = line.substring(0, colonIdx).trim();
+                    content = line.substring(colonIdx + 1).trim();
+                    if (!content) content = title;
+                } else {
+                    const words = line.split(/\s+/).slice(0, 6).join(' ');
+                    title = words.length < line.length ? words + '…' : words;
+                    content = line;
+                }
+
+                await createEntry(bookName, {
+                    content,
+                    comment: title,
+                    background: true,
+                });
+                created++;
+                $status.text(`Imported ${created}/${factLines.length}...`);
+            } catch (err) {
+                console.warn(`[TunnelVision] Failed to import line: ${line.substring(0, 60)}`, err);
+                failed++;
+            }
+        }
+
+        const msg = `Import complete: ${created} created` + (failed > 0 ? `, ${failed} failed` : '');
+        $status.text(msg);
+        toastr.success(msg, 'TunnelVision');
+
+        // Refresh UI to show new entries
+        await loadLorebookUI(bookName);
+        populateLorebookDropdown();
+        registerTools();
+    } catch (err) {
+        console.error('[TunnelVision] Fact import failed:', err);
+        $status.text(`Import failed: ${err.message}`);
+        toastr.error(`Import failed: ${err.message}`, 'TunnelVision');
     }
 }
 

@@ -19,6 +19,7 @@ import {
     getTree,
     saveTree,
     findNodeById,
+    findBestNodeForEntry,
     addEntryToNode,
     removeEntryFromTree,
     createTreeNode,
@@ -292,6 +293,13 @@ export async function createEntry(bookName, { content, comment, keys, nodeId, _b
             if (found) {
                 targetNode = found;
                 nodeLabel = found.label;
+            }
+        } else {
+            const match = findBestNodeForEntry(tree.root, comment, keys);
+            if (match) {
+                targetNode = match.node;
+                nodeLabel = match.node.label;
+                console.log(`[TunnelVision] Auto-classified "${comment}" → "${nodeLabel}" (score: ${match.score.toFixed(3)})`);
             }
         }
         addEntryToNode(targetNode, newEntry.uid);

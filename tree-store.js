@@ -7,6 +7,7 @@
 import { extension_settings } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 import { loadWorldInfo } from '../../../world-info.js';
+import { trigramSimilarity } from './agent-utils.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const TRACKER_TITLE_PREFIX = /^\[tracker[^\]]*\]/i;
@@ -260,6 +261,49 @@ export function getAllEntryUids(node) {
  * @returns {number[]} Array of entry UIDs
  */
 
+const AUTO_CLASSIFY_THRESHOLD = 0.35;
+
+/**
+ * Find the best-matching non-root tree node for a new entry based on
+ * trigram similarity between the entry's title+keys and each node's label+summary.
+ * Returns null if no node scores above the threshold, meaning the entry stays at root.
+ * @param {TreeNode} root
+ * @param {string} title - Entry title/comment
+ * @param {string[]} [keys] - Entry trigger keys
+ * @returns {{ node: TreeNode, score: number } | null}
+ */
+export function findBestNodeForEntry(root, title, keys = []) {
+    if (!root || !root.children || root.children.length === 0) return null;
+
+    const entryText = [title, ...(keys || [])].filter(Boolean).join(' ');
+    if (!entryText.trim()) return null;
+
+    let bestNode = null;
+    let bestScore = 0;
+
+    function walk(node, isRoot) {
+        if (!isRoot) {
+            const nodeText = [node.label, node.summary].filter(Boolean).join(' ');
+            if (nodeText.trim()) {
+                const score = trigramSimilarity(entryText, nodeText);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestNode = node;
+                }
+            }
+        }
+        for (const child of (node.children || [])) {
+            walk(child, false);
+        }
+    }
+
+    walk(root, true);
+
+    if (bestScore >= AUTO_CLASSIFY_THRESHOLD && bestNode) {
+        return { node: bestNode, score: bestScore };
+    }
+    return null;
+}
 
 const SUMMARIES_NODE_LABEL = 'Summaries';
 

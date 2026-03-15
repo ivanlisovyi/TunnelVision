@@ -986,8 +986,57 @@
                     </div>
                 </div>
 
+                <!-- Import / Export Hub -->
+                <div class="tv-card">
+                    <div class="tv-card-header tv-card-header-collapsible" id="tv_importexport_header">
+                        <i class="fa-solid fa-arrow-right-arrow-left"></i>
+                        <span>Import / Export</span>
+                        <i class="fa-solid fa-chevron-down tv-collapse-icon"></i>
+                    </div>
+                    <div class="tv-card-body tv-importexport-body" style="display:none;">
+
+                        <!-- Export Section -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Export</div>
+                            <div class="tv-help-text" style="margin-bottom: 10px;">
+                                Download data from TunnelVision in portable formats. Exports use data from the currently active chat and selected lorebook.
+                            </div>
+                            <div class="tv-ie-btn-grid">
+                                <button id="tv_export_worldstate" class="tv-btn tv-btn-secondary tv-ie-btn" title="Download the rolling world state document as Markdown">
+                                    <i class="fa-solid fa-globe"></i>
+                                    <span>World State (.md)</span>
+                                </button>
+                                <button id="tv_export_notebook" class="tv-btn tv-btn-secondary tv-ie-btn" title="Download the AI's notebook notes as JSON">
+                                    <i class="fa-solid fa-book"></i>
+                                    <span>Notebook (.json)</span>
+                                </button>
+                                <button id="tv_export_timeline" class="tv-btn tv-btn-secondary tv-ie-btn" title="Download all facts and summaries as a chronological Markdown document">
+                                    <i class="fa-solid fa-clock-rotate-left"></i>
+                                    <span>Timeline (.md)</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
+                        <!-- Import Section -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Import Facts</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Import facts from a plain text or Markdown file. Each non-empty line becomes a new lorebook entry in the selected lorebook. Lines starting with <code>#</code> are skipped as comments. Lines in the format <code>Title: Content</code> will use the text before the colon as the entry title.
+                            </div>
+                            <button id="tv_import_facts_btn" class="tv-btn tv-btn-primary" style="width: 100%;">
+                                <i class="fa-solid fa-file-import"></i> Import Facts from File
+                            </button>
+                            <div id="tv_import_facts_status" class="tv-help-text" style="margin-top: 6px; display: none;"></div>
+                        </div>
+
+                    </div>
+                </div>
+
         </div>
     </div>
     <!-- Hidden file input for import -->
     <input type="file" id="tv_import_file" accept=".json" style="display:none;" />
+    <input type="file" id="tv_import_facts_file" accept=".txt,.md,.text" style="display:none;" />
 </div>

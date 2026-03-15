@@ -1371,7 +1371,7 @@ function parseTimestamp(content) {
  * Load all fact/summary entries from active TV lorebooks and group by day.
  * Returns a sorted array of { day, timeLabel, entries[] } groups.
  */
-async function loadTimelineEntries() {
+export async function loadTimelineEntries() {
     const activeBooks = getActiveTunnelVisionBooks();
     const items = [];
 
