@@ -13,7 +13,7 @@ import { generateRaw as _generateRaw } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { loadWorldInfo } from '../../../world-info.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
-import { createEntry, findEntryByUid, parseJsonFromLLM } from './entry-manager.js';
+import { createEntry, findEntryByUid, parseJsonFromLLM, KEYWORD_RULES } from './entry-manager.js';
 import {
     createEmptyTree,
     createTreeNode,
@@ -997,9 +997,10 @@ NOT WORTH EXTRACTING (skip these):
 Rules:
 - Write content in third person, factual style
 - Each entry should be a single, distinct piece of information
-- Keys: provide 4-10 short keywords for cross-referencing. Always include character names (canonical form — "Elena" not "she"), location names when relevant, topic/theme words (e.g. "curse", "betrayal"), and synonyms or related terms. Think: what would someone search to find this fact?
 - Merge related facts into single entries when they belong together
-- Fewer high-quality entries are better than many trivial ones`;
+- Fewer high-quality entries are better than many trivial ones
+
+${KEYWORD_RULES}`;
 }
 
 /**

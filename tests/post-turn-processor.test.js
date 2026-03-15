@@ -19,6 +19,7 @@ vi.mock('../entry-manager.js', () => ({
     buildUidMap: vi.fn(() => new Map()),
     parseJsonFromLLM: vi.fn(() => []),
     recordEntryTemporal: vi.fn(),
+    KEYWORD_RULES: 'KEYWORD RULES (test stub)',
 }));
 vi.mock('../auto-summary.js', () => ({
     markAutoSummaryComplete: vi.fn(),

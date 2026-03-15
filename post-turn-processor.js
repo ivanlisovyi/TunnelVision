@@ -23,7 +23,7 @@ import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, getTrackerUids, isTrackerTitle, isSummaryTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from './tool-registry.js';
-import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM, recordEntryTemporal } from './entry-manager.js';
+import { createEntry, updateEntry, forgetEntry, getCachedWorldInfo, buildUidMap, parseJsonFromLLM, recordEntryTemporal, KEYWORD_RULES } from './entry-manager.js';
 import { markAutoSummaryComplete } from './auto-summary.js';
 import { getWatermark, setWatermark, hideSummarizedMessages } from './tools/summarize.js';
 import { getChatId, formatChatExcerpt as formatRecentExchange, trigramSimilarity, trigrams as computeTrigrams, callWithRetry, generateAnalytical, getStoryContext } from './agent-utils.js';
@@ -456,7 +456,7 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
         '',
         'WHEN: For each fact, provide the approximate in-world time it occurred (e.g. "Day 3, evening", "Day 5, morning", "early January 2025"). Use the Current In-World Time provided above as reference. If the timing is unclear, use "unknown".',
         '',
-        'KEYS: For each fact, provide 4-10 short keywords for cross-referencing. Always include the FULL name of every character involved — use the most complete name known (e.g. "Elena Blackwood" not just "Elena", "John Wald" not just "John"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this fact?',
+        KEYWORD_RULES,
         '',
         'TASK 2 — SCENE CHANGE DETECTION:',
         'Determine if a MAJOR NARRATIVE BOUNDARY just occurred. The bar is HIGH — a scene change means the story has moved to a fundamentally different context, not just a minor shift within the same ongoing situation.',

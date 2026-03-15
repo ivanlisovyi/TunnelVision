@@ -13,7 +13,7 @@
  */
 
 import { getTree, findNodeById, createTreeNode, saveTree, getSettings, ensureSummariesNode } from '../tree-store.js';
-import { createEntry, buildSummaryKeys } from '../entry-manager.js';
+import { createEntry, buildSummaryKeys, KEYWORD_RULES } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
 import { markAutoSummaryComplete } from '../auto-summary.js';
 import { getContext } from '../../../../st-context.js';
@@ -156,7 +156,7 @@ When you notice related events forming a pattern or storyline, group them into "
                 keys: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: '8-15 keywords for retrieval. Include ALL character names (canonical form), locations, significant objects, themes (e.g. "confrontation", "betrayal"), emotional tones (e.g. "tension", "grief"), and arc name. Critical for long-term memory search.',
+                    description: KEYWORD_RULES,
                 },
                 significance: {
                     type: 'string',
@@ -182,7 +182,7 @@ When you notice related events forming a pattern or storyline, group them into "
                         properties: {
                             title: { type: 'string', description: 'Short fact title.' },
                             content: { type: 'string', description: 'Factual description in third person.' },
-                            keys: { type: 'array', items: { type: 'string' }, description: '4-10 short keywords for cross-referencing and search. Include character names (canonical form), location names, topic/theme words, and synonyms or related terms.' },
+                            keys: { type: 'array', items: { type: 'string' }, description: KEYWORD_RULES },
                         },
                         required: ['title', 'content'],
                     },

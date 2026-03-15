@@ -34,6 +34,21 @@ import {
 const MAX_ENTRY_CONTENT_LENGTH = 15000;
 const MAX_ENTRIES_PER_TURN = 15;
 
+/**
+ * Unified keyword generation instructions, used across all entry creation prompts.
+ * Kept here as a single source of truth so all paths (post-turn facts, summaries,
+ * remember tool, ingest, etc.) produce consistently styled keywords.
+ */
+export const KEYWORD_RULES = [
+    'KEYWORD RULES (apply to every "keys" array you produce):',
+    '- 6-12 keywords per entry',
+    '- Concrete and scene-specific: locations, objects, proper nouns, unique actions, repeated motifs, important milestones',
+    '- One concept per keyword — do NOT combine multiple ideas into one keyword',
+    '- Each keyword should be useful for retrieval if someone later mentions that noun or action alone, not only in a specific context',
+    '- Always include full character names in canonical form ("Elena Blackwood" not "she" or just "Elena")',
+    '- Include location/place names when the entry is tied to a specific setting',
+].join('\n');
+
 // ── Turn-Scoped WorldInfo Cache ──────────────────────────────────
 
 const _worldInfoCache = new Map();

@@ -25,7 +25,7 @@ import { ARGUMENT_TYPE, SlashCommandArgument } from '../../../slash-commands/Sla
 import { getSettings, getSelectedLorebook, ensureSummariesNode, getTree, findNodeById, createTreeNode, saveTree } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
-import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo, buildSummaryKeys } from './entry-manager.js';
+import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo, buildSummaryKeys, KEYWORD_RULES } from './entry-manager.js';
 import { getWorldStateText, updateWorldState, clearWorldState } from './world-state.js';
 import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
@@ -280,7 +280,8 @@ async function handleRememberCommand(_namedArgs, unnamedArgs) {
             recentContext ? `\nRecent conversation for context:\n${recentContext}` : '',
             '\nCreate a structured lorebook entry. Respond with ONLY a JSON object (no markdown, no code fences):',
             '{"title": "short descriptive title", "content": "the entry content, well-formatted and organized", "keys": ["keyword1", "keyword2"]}',
-            '\nFor keys: provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this entry?',
+            '',
+            KEYWORD_RULES,
         ].filter(Boolean).join('\n');
 
         const storyCtx = getStoryContext();
@@ -666,9 +667,9 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         'For the summary: write in past tense, third person. Capture ALL important actions, outcomes, emotional beats, physical interactions, intimate moments, conflicts, and character dynamics faithfully and without sanitizing or omitting anything. This summary replaces re-reading the scene — if you skip or censor what happened, continuity is lost. Be concise but thorough.',
         'For "when": estimate the in-world date/time from story context (e.g. "Late evening, Day 3", "Morning after the festival"). Use whatever granularity the story supports. If no time cues exist, write "unspecified".',
         'For significance: "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
-        'For keys (on the summary): provide 8-15 keywords that would help retrieve this summary later. Include ALL character names (canonical form), location/place names, significant objects, themes/topics (e.g. "confrontation", "betrayal", "confession", "date night"), emotional tones (e.g. "tension", "grief"), and the arc name if applicable. These keywords are critical for long-term memory retrieval — be thorough.',
         'For facts: extract ONLY facts significant enough to matter for long-term story continuity. Facts are persistent state changes — relationship shifts, relocations, status changes, revelations, consequential decisions, world-state changes, new character traits. Skip mundane actions ("asked about X", "poured tea"), fleeting emotions, and anything the summary already covers narratively. Fewer high-quality facts are better than many trivial ones.',
-        'For keys on each fact: provide 4-10 short keywords for cross-referencing. Always include character names involved (canonical form — "Elena" not "she"). Add location names when relevant, topic/theme words (e.g. "curse", "betrayal", "promotion"), and synonyms or related terms. Think: what would someone search to find this fact?',
+        '',
+        KEYWORD_RULES,
         '',
         'For arc: if the events belong to an ongoing storyline or narrative thread, provide a short arc name (e.g. "The Curse Investigation", "Elena & Ren\'s Romance"). If this is a standalone scene with no clear thread, omit the field or set it to null.',
         '',

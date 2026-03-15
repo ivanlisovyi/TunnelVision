@@ -19,6 +19,7 @@ vi.mock('../entry-manager.js', () => ({
     parseJsonFromLLM: vi.fn(() => ({})),
     buildSummaryKeys: vi.fn(() => ['key1', 'key2']),
     findEntryByUid: vi.fn(() => null),
+    KEYWORD_RULES: 'KEYWORD RULES (test stub)',
 }));
 vi.mock('../tree-store.js', () => ({
     getTree: vi.fn(() => ({ root: { id: 'root', children: [{ id: 'summ', label: 'Summaries', children: [], entryUids: [] }], entryUids: [] } })),

@@ -10,7 +10,7 @@
 
 import { loadWorldInfo } from '../../../../world-info.js';
 import { getSettings } from '../tree-store.js';
-import { createEntry } from '../entry-manager.js';
+import { createEntry, KEYWORD_RULES } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
 import { trigramSimilarity } from '../agent-utils.js';
 
@@ -92,7 +92,7 @@ Save entries to the lorebook where they belong based on the descriptions above. 
                 keys: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: '4-10 short keywords for cross-referencing and search. Always include character names (canonical form), location names when relevant, topic/theme words, and synonyms or related terms. Think: what would someone search to find this? E.g. ["Elena", "curse", "dark magic", "hex", "enchantment"].',
+                    description: KEYWORD_RULES,
                 },
                 node_id: {
                     type: 'string',

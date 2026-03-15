@@ -14,7 +14,7 @@
 
 import { getContext } from '../../../st-context.js';
 import { generateAnalytical } from './agent-utils.js';
-import { createEntry, getCachedWorldInfo, parseJsonFromLLM, buildSummaryKeys, findEntryByUid } from './entry-manager.js';
+import { createEntry, getCachedWorldInfo, parseJsonFromLLM, buildSummaryKeys, findEntryByUid, KEYWORD_RULES } from './entry-manager.js';
 import {
     getTree, saveTree, createTreeNode, addEntryToNode, findNodeById,
     ensureSummariesNode,
@@ -142,6 +142,8 @@ export async function rollupActSummary(bookName) {
         '',
         'Write in past tense, third person. Be thorough but condensed — this replaces reading all individual scenes.',
         'Do NOT sanitize or omit any content. This is a private memory document.',
+        '',
+        KEYWORD_RULES,
         '',
         'Respond with ONLY a JSON object (no markdown, no code fences):',
         '{',
@@ -316,6 +318,8 @@ export async function rollupStorySummary(bookName) {
         '',
         'Write in past tense, third person. Be thorough — this is the only guaranteed narrative context the AI always sees.',
         'Do NOT sanitize or omit any content. This is a private memory document.',
+        '',
+        KEYWORD_RULES,
         '',
         'Respond with ONLY a JSON object (no markdown, no code fences):',
         '{',
