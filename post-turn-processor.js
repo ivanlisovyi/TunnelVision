@@ -64,7 +64,11 @@ import {
 } from "./background-events.js";
 import { requestPriorityUpdate, getWorldStateText } from "./world-state.js";
 import { processArcUpdates, buildArcsContextBlock } from "./arc-tracker.js";
-import { getFeedbackMap } from "./smart-context.js";
+import {
+  getFeedbackMap,
+  preWarmSmartContext,
+  invalidatePreWarmCache,
+} from "./smart-context.js";
 import { hashString, shuffleArray, isSystemEntry } from "./shared-utils.js";
 import {
   DEDUP_SIMILARITY_THRESHOLD as DEDUP_THRESHOLD,
@@ -414,8 +418,37 @@ export async function runPostTurnProcessor(force = false) {
           );
         });
       });
+    } else if (!task.cancelled) {
+      refreshSmartContextAfterPostTurn(result);
     }
   }
+}
+
+export function shouldInvalidateSmartContextPreWarm(result) {
+  return !!(
+    result &&
+    (
+      result.factsCreated > 0 ||
+      result.trackersUpdated > 0 ||
+      result.sceneArchived ||
+      result.arcsCreated > 0 ||
+      result.arcsUpdated > 0 ||
+      result.arcsResolved > 0
+    )
+  );
+}
+
+export function refreshSmartContextAfterPostTurn(result) {
+  if (shouldInvalidateSmartContextPreWarm(result)) {
+    invalidatePreWarmCache();
+  }
+
+  preWarmSmartContext().catch((e) => {
+    console.debug(
+      "[TunnelVision] Post-turn smart-context pre-warm failed (non-critical):",
+      e.message,
+    );
+  });
 }
 
 // ── Step 1: Combined Analysis (Facts + Scene Detection) ──────────

@@ -44,6 +44,7 @@ import {
   isStorySummaryEntry,
   isSummaryEntry,
   isTrackerEntry,
+  hashString,
 } from "./shared-utils.js";
 import {
   HOT_RECENCY_MS,
@@ -81,9 +82,26 @@ let _preWarmCacheKey = null;
 
 function buildPreWarmCacheKey() {
   try {
-    const chatLen = getContext().chat?.length || 0;
+    const context = getContext();
+    const chat = context.chat || [];
+    const chatLen = chat.length;
     const books = getActiveTunnelVisionBooks().sort().join(",");
-    return `${chatLen}:${books}`;
+
+    const lastMsg = chat[chatLen - 1] || null;
+    const lastMsgFingerprint = lastMsg
+      ? hashString(
+          JSON.stringify({
+            is_user: !!lastMsg.is_user,
+            name: lastMsg.name || "",
+            mes: lastMsg.mes || "",
+            tool_invocations:
+              Array.isArray(lastMsg?.extra?.tool_invocations) &&
+              lastMsg.extra.tool_invocations.length > 0,
+          }),
+        )
+      : 0;
+
+    return `${chatLen}:${books}:${lastMsgFingerprint}`;
   } catch {
     return null;
   }
@@ -1377,7 +1395,7 @@ export function buildSmartContextPrompt() {
 
 /**
  * Async background pre-computation of smart context scores.
- * Called after MESSAGE_RECEIVED so the scoring is ready for the next GENERATION_STARTED.
+ * Called after MESSAGE_RECEIVED or post-turn completion so scoring is ready for the next generation.
  * Ensures world info data is loaded (async) then runs the full scoring pipeline.
  *
  * Enhanced with:
@@ -1385,7 +1403,7 @@ export function buildSmartContextPrompt() {
  *   - Hybrid sidecar reranking (5A): if sidecar available, reranks top candidates
  *   - Embedding similarity (5B): if embeddings available, adds similarity scores
  */
-async function preWarmSmartContext() {
+export async function preWarmSmartContext() {
   const settings = getSettings();
   if (!settings.smartContextEnabled || settings.globalEnabled === false) return;
 
@@ -1398,6 +1416,7 @@ async function preWarmSmartContext() {
 
   const cacheKey = buildPreWarmCacheKey();
   if (!cacheKey) return;
+  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) return;
 
   const lookback = settings.smartContextLookback || 6;
   const recentText = extractMentionsFromChat(chat, lookback);

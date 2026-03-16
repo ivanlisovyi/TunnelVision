@@ -26,19 +26,17 @@ import { eventSource, event_types, extension_prompt_types, extension_prompt_role
 import { getContext } from '../../../st-context.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
-import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache, applyRecurseLimit } from './tool-registry.js';
-import { resetTurnEntryCount, invalidateWorldInfoCache, invalidateDirtyWorldInfoCache, getCachedWorldInfo } from './entry-manager.js';
-import { setInjectionSizes } from './agent-utils.js';
-import { buildNotebookPrompt, resetNotebookWriteGuard } from './tools/notebook.js';
-import { buildWorldStatePrompt, initWorldState } from './world-state.js';
+import { preflightToolRuntimeState, registerTools, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache, applyRecurseLimit } from './tool-registry.js';
+import { invalidateWorldInfoCache } from './entry-manager.js';
+import { handleGenerationStartedPromptInjection } from './prompt-injection-service.js';
+import { initWorldState } from './world-state.js';
 import { initPostTurnProcessor } from './post-turn-processor.js';
-import { buildSmartContextPrompt, initSmartContext, invalidatePreWarmCache, initHierarchyRefs } from './smart-context.js';
+import { initSmartContext, invalidatePreWarmCache, initHierarchyRefs } from './smart-context.js';
 import { initMemoryLifecycle } from './memory-lifecycle.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
 import { initCommands } from './commands.js';
 import { initAutoSummary } from './auto-summary.js';
-import { MIN_INJECTION_BUDGET_CHARS, BUDGET_TRIM_NEWLINE_RATIO } from './constants.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const EXTENSION_FOLDER = `third-party/TunnelVision`;
@@ -71,6 +69,8 @@ async function init() {
 
     // Wire up rolling world state
     initWorldState();
+
+
 
     // Wire up post-turn processor (background fact extraction + tracker updates)
     initPostTurnProcessor();
@@ -190,33 +190,7 @@ function onWorldInfoEntriesLoaded(data) {
     }
 }
 
-const TV_PROMPT_KEY = 'tunnelvision_mandatory';
-const TV_NOTEBOOK_KEY = 'tunnelvision_notebook';
-const TV_WORLDSTATE_KEY = 'tunnelvision_worldstate';
-const TV_SMARTCTX_KEY = 'tunnelvision_smartcontext';
 
-/**
- * Map a position setting string to the ST extension_prompt_types enum.
- */
-function mapPositionSetting(val) {
-    switch (val) {
-        case 'in_prompt': return extension_prompt_types.IN_PROMPT;
-        case 'in_chat':
-        default: return extension_prompt_types.IN_CHAT;
-    }
-}
-
-/**
- * Map a role setting string to the ST extension_prompt_roles enum.
- */
-function mapRoleSetting(val) {
-    switch (val) {
-        case 'user': return extension_prompt_roles.USER;
-        case 'assistant': return extension_prompt_roles.ASSISTANT;
-        case 'system':
-        default: return extension_prompt_roles.SYSTEM;
-    }
-}
 
 /**
  * Strip TunnelVision tool results from older chat messages to save context tokens.
@@ -273,126 +247,20 @@ function stripOldToolResults() {
  * generations.
  */
 async function onGenerationStarted(type, opts) {
-    let settings, isRecursiveToolPass;
+    const { settings, isRecursiveToolPass } = await handleGenerationStartedPromptInjection({
+        stripOldToolResults,
+        preflightToolRuntimeState,
+    });
 
-    // ── Synchronous section — must complete before ST builds the prompt ──
-    try {
-        settings = getSettings();
-
-        const context = getContext();
-        const lastMsg = context.chat?.[context.chat.length - 1];
-        const invocations = lastMsg?.extra?.tool_invocations;
-        isRecursiveToolPass = Array.isArray(invocations) && invocations.length > 0;
-
-        // Reset per-turn state on first pass only (not during tool recursion).
-        // Use dirty-flag invalidation so unmodified books stay cached across turns.
-        if (!isRecursiveToolPass) {
-            resetTurnEntryCount();
-            invalidateDirtyWorldInfoCache();
-            resetNotebookWriteGuard();
-        }
-
-        if (settings.ephemeralResults) {
-            stripOldToolResults();
-        }
-
-        const mandatoryPosition = mapPositionSetting(settings.mandatoryPromptPosition);
-        const mandatoryDepth = settings.mandatoryPromptDepth ?? 1;
-        const mandatoryRole = mapRoleSetting(settings.mandatoryPromptRole);
-
-        const activeBooks = getActiveTunnelVisionBooks();
-        const enabled = settings.globalEnabled !== false;
-
-        // ── Collect all injection prompts ────────────────────────────
-        // Priority order: mandatory > world state > smart context > notebook
-        // (if a total budget is set, lower-priority prompts get trimmed first)
-
-        const notebookPosition = mapPositionSetting(settings.notebookPromptPosition);
-        const notebookDepth = settings.notebookPromptDepth ?? 1;
-        const notebookRole = mapRoleSetting(settings.notebookPromptRole);
-        const wsPosition = mapPositionSetting(settings.worldStatePosition);
-        const wsDepth = settings.worldStateDepth ?? 2;
-        const wsRole = mapRoleSetting(settings.worldStateRole);
-        const scPosition = mapPositionSetting(settings.smartContextPosition);
-        const scDepth = settings.smartContextDepth ?? 3;
-        const scRole = mapRoleSetting(settings.smartContextRole);
-
-        let mandatoryPrompt = '';
-        let worldStatePrompt = '';
-        let smartContextPrompt = '';
-        let notebookPrompt = '';
-
-        if (enabled) {
-            if (!isRecursiveToolPass && settings.mandatoryTools && activeBooks.length > 0) {
-                mandatoryPrompt = settings.mandatoryPromptText || '[IMPORTANT INSTRUCTION: You MUST use TunnelVision tools this turn.]';
-            }
-            if (settings.worldStateEnabled) {
-                worldStatePrompt = buildWorldStatePrompt();
-            }
-            if (settings.smartContextEnabled) {
-                if (activeBooks.length > 0) {
-                    await Promise.all(activeBooks.map(book => getCachedWorldInfo(book)));
-                }
-                smartContextPrompt = buildSmartContextPrompt();
-            }
-            if (settings.notebookEnabled !== false) {
-                notebookPrompt = buildNotebookPrompt();
-            }
-        }
-
-        // ── Apply total injection budget (if configured) ────────────
-        const budget = settings.totalInjectionBudget || 0;
-        if (budget > 0) {
-            let remaining = budget;
-            // Priority: mandatory > world state > smart context > notebook
-            const slots = [
-                { name: 'mandatory', get: () => mandatoryPrompt, set: v => { mandatoryPrompt = v; } },
-                { name: 'worldState', get: () => worldStatePrompt, set: v => { worldStatePrompt = v; } },
-                { name: 'smartContext', get: () => smartContextPrompt, set: v => { smartContextPrompt = v; } },
-                { name: 'notebook', get: () => notebookPrompt, set: v => { notebookPrompt = v; } },
-            ];
-            for (const slot of slots) {
-                const text = slot.get();
-                if (!text) continue;
-                if (text.length <= remaining) {
-                    remaining -= text.length;
-                } else if (remaining > MIN_INJECTION_BUDGET_CHARS) {
-                    const cutoff = text.lastIndexOf('\n', remaining);
-                    slot.set(text.substring(0, cutoff > remaining * BUDGET_TRIM_NEWLINE_RATIO ? cutoff : remaining) + '\n[...budget limit reached]');
-                    remaining = 0;
-                } else {
-                    slot.set('');
-                }
-            }
-        }
-
-        // ── Track injection sizes for UI display ─────────────────────
-        setInjectionSizes({
-            mandatory: mandatoryPrompt.length,
-            worldState: worldStatePrompt.length,
-            smartContext: smartContextPrompt.length,
-            notebook: notebookPrompt.length,
-        });
-
-        // ── Inject all prompts ──────────────────────────────────────
-        setExtensionPrompt(TV_PROMPT_KEY, mandatoryPrompt, mandatoryPosition, mandatoryDepth, false, mandatoryRole);
-        setExtensionPrompt(TV_WORLDSTATE_KEY, worldStatePrompt, wsPosition, wsDepth, false, wsRole);
-        setExtensionPrompt(TV_SMARTCTX_KEY, smartContextPrompt, scPosition, scDepth, false, scRole);
-        setExtensionPrompt(TV_NOTEBOOK_KEY, notebookPrompt, notebookPosition, notebookDepth, false, notebookRole);
-    } catch (e) {
-        console.error('[TunnelVision] Error in onGenerationStarted synchronous section:', e);
-        if (!settings) return;
-    }
-
-    // ── Async section — background repair ──
-
-    if (settings.globalEnabled !== false) {
+    if (
+        settings?.globalEnabled !== false
+        && !isRecursiveToolPass
+        && settings?.mandatoryTools
+    ) {
         const runtimeState = await preflightToolRuntimeState({ repair: true, reason: 'generation', log: true });
 
         if (
-            !isRecursiveToolPass
-            && settings.mandatoryTools
-            && runtimeState.activeBooks.length > 0
+            runtimeState.activeBooks.length > 0
             && runtimeState.expectedToolNames.length > 0
             && runtimeState.eligibleToolNames.length === 0
         ) {

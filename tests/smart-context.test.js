@@ -3,14 +3,38 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Shared mock metadata store — tests can manipulate this directly
 const mockMetadata = {};
 const mockChat = [];
+const mockState = {
+    activeBooks: [],
+    cachedWorldInfoCalls: [],
+    cachedWorldInfoSyncByBook: new Map(),
+    settings: {
+        smartContextEnabled: true,
+        globalEnabled: true,
+        smartContextLookback: 6,
+    },
+};
+
+function makeEntry(overrides = {}) {
+    return {
+        uid: 1,
+        comment: 'Elena',
+        key: ['elena'],
+        content: 'Elena trained at the Grand Cathedral.',
+        disable: false,
+        ...overrides,
+    };
+}
 
 // Mock internal dependencies with complex transitive imports
 vi.mock('../tool-registry.js', () => ({
-    getActiveTunnelVisionBooks: vi.fn(() => []),
+    getActiveTunnelVisionBooks: vi.fn(() => mockState.activeBooks),
 }));
 vi.mock('../entry-manager.js', () => ({
-    getCachedWorldInfoSync: vi.fn(() => null),
-    getCachedWorldInfo: vi.fn(async () => null),
+    getCachedWorldInfoSync: vi.fn((book) => mockState.cachedWorldInfoSyncByBook.get(book) || null),
+    getCachedWorldInfo: vi.fn(async (book) => {
+        mockState.cachedWorldInfoCalls.push(book);
+        return mockState.cachedWorldInfoSyncByBook.get(book) || null;
+    }),
 }));
 vi.mock('../world-state.js', () => ({
     getWorldStateSections: vi.fn(() => ({})),
@@ -18,6 +42,13 @@ vi.mock('../world-state.js', () => ({
 vi.mock('../arc-tracker.js', () => ({
     getActiveArcs: vi.fn(() => []),
 }));
+vi.mock('../tree-store.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        getSettings: vi.fn(() => mockState.settings),
+    };
+});
 // Override the st-context mock for this file so we can control chatMetadata
 vi.mock('../../../st-context.js', () => ({
     getContext: () => ({
@@ -28,12 +59,20 @@ vi.mock('../../../st-context.js', () => ({
     }),
 }));
 
-import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD } from '../smart-context.js';
+import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD, buildSmartContextPrompt, preWarmSmartContext } from '../smart-context.js';
 
 beforeEach(() => {
     // Reset state between tests
     for (const key of Object.keys(mockMetadata)) delete mockMetadata[key];
     mockChat.length = 0;
+    mockState.activeBooks = [];
+    mockState.cachedWorldInfoCalls = [];
+    mockState.cachedWorldInfoSyncByBook = new Map();
+    mockState.settings = {
+        smartContextEnabled: true,
+        globalEnabled: true,
+        smartContextLookback: 6,
+    };
 });
 
 // ── scoreEntry ───────────────────────────────────────────────────
@@ -333,5 +372,95 @@ describe('invalidatePreWarmCache', () => {
         invalidatePreWarmCache();
         invalidatePreWarmCache();
         invalidatePreWarmCache();
+    });
+});
+
+describe('preWarmSmartContext', () => {
+    it('loads world info asynchronously so current-turn prompt can use cached data', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena and the cathedral.' },
+            { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+        );
+
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        await preWarmSmartContext();
+
+        expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+
+        const prompt = buildSmartContextPrompt();
+        expect(prompt).toContain('Elena');
+        expect(prompt).toContain('Grand Cathedral');
+    });
+
+    it('invalidates a prewarmed cache when the last message content changes', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+        );
+
+        await preWarmSmartContext();
+        expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+
+        mockState.cachedWorldInfoCalls = [];
+        mockChat[mockChat.length - 1] = {
+            is_user: false,
+            mes: 'Completely unrelated reply about the weather.',
+        };
+
+        await preWarmSmartContext();
+
+        expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+    });
+
+    it('reuses a prewarmed cache when the last message is unchanged', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+        );
+
+        await preWarmSmartContext();
+        expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+
+        mockState.cachedWorldInfoCalls = [];
+
+        await preWarmSmartContext();
+
+        expect(mockState.cachedWorldInfoCalls).toEqual([]);
+    });
+
+    it('skips prewarm when smart context is disabled', async () => {
+        mockState.settings = {
+            ...mockState.settings,
+            smartContextEnabled: false,
+        };
+        mockState.activeBooks = ['Book A'];
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena remembers the cathedral.' },
+        );
+
+        await preWarmSmartContext();
+
+        expect(mockState.cachedWorldInfoCalls).toEqual([]);
     });
 });

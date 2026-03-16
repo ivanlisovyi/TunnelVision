@@ -58,12 +58,27 @@ vi.mock('../arc-tracker.js', () => ({
 }));
 vi.mock('../smart-context.js', () => ({
     getFeedbackMap: vi.fn(() => ({})),
+    preWarmSmartContext: vi.fn(() => Promise.resolve()),
+    invalidatePreWarmCache: vi.fn(),
 }));
 
 import { getContext } from '../../../st-context.js';
 import { updateEntry, parseJsonFromLLM } from '../entry-manager.js';
 import { callWithRetry, generateAnalytical } from '../agent-utils.js';
-import { contentHash, computeChangeFraction, updateTrackers } from '../post-turn-processor.js';
+import {
+    contentHash,
+    computeChangeFraction,
+    updateTrackers,
+    runPostTurnProcessor,
+    shouldInvalidateSmartContextPreWarm,
+    refreshSmartContextAfterPostTurn,
+} from '../post-turn-processor.js';
+import { getSettings } from '../tree-store.js';
+import { getActiveTunnelVisionBooks, resolveTargetBook } from '../tool-registry.js';
+import { formatChatExcerpt } from '../agent-utils.js';
+import { registerBackgroundTask } from '../background-events.js';
+import { invalidatePreWarmCache, preWarmSmartContext } from '../smart-context.js';
+
 beforeEach(() => {
     vi.clearAllMocks();
     getContext.mockReturnValue({
@@ -73,6 +88,22 @@ beforeEach(() => {
     callWithRetry.mockImplementation(async (fn) => await fn());
     generateAnalytical.mockResolvedValue('[]');
     parseJsonFromLLM.mockReturnValue([]);
+    getSettings.mockReturnValue({
+        postTurnEnabled: true,
+        globalEnabled: true,
+        postTurnExtractFacts: false,
+        postTurnUpdateTrackers: false,
+        postTurnSceneArchive: false,
+    });
+    getActiveTunnelVisionBooks.mockReturnValue(['test-book']);
+    resolveTargetBook.mockReturnValue({ book: 'test-book', error: null });
+    formatChatExcerpt.mockReturnValue('User: hello\n\nCharacter: hi');
+    registerBackgroundTask.mockReturnValue({
+        cancelled: false,
+        _ended: false,
+        end: vi.fn(function () { this._ended = true; }),
+        fail: vi.fn(),
+    });
 });
 
 // ── contentHash ─────────────────────────────────────────────────
@@ -259,5 +290,176 @@ describe('updateTrackers', () => {
             content: '## Current Status\nLocation: safehouse',
             _source: 'post-turn',
         });
+    });
+});
+
+describe('runPostTurnProcessor smart-context refresh', () => {
+    it('rewarms smart-context without invalidation when post-turn makes no memory changes', async () => {
+        getContext.mockReturnValue({
+            chat: [
+                { is_user: true, mes: 'Hello' },
+                { is_user: false, mes: 'Hi there' },
+                { is_user: true, mes: 'Remember Elena' },
+                { is_user: false, mes: 'Elena is important' },
+            ],
+            chatMetadata: {},
+            saveMetadataDebounced: vi.fn(),
+        });
+
+        const result = await runPostTurnProcessor(true);
+
+        expect(result).toEqual({
+            factsCreated: 0,
+            trackersUpdated: 0,
+            sceneArchived: false,
+            sceneTitle: null,
+            arcsCreated: 0,
+            arcsUpdated: 0,
+            arcsResolved: 0,
+            errors: 0,
+        });
+        expect(invalidatePreWarmCache).not.toHaveBeenCalled();
+        expect(preWarmSmartContext).toHaveBeenCalledTimes(1);
+    });
+
+    it('invalidates prewarm cache before refreshing when post-turn creates facts', async () => {
+        getSettings.mockReturnValue({
+            postTurnEnabled: true,
+            globalEnabled: true,
+            postTurnExtractFacts: true,
+            postTurnUpdateTrackers: false,
+            postTurnSceneArchive: false,
+        });
+
+        getContext.mockReturnValue({
+            chat: [
+                { is_user: true, mes: 'Hello' },
+                { is_user: false, mes: 'Hi there' },
+                { is_user: true, mes: 'Remember Elena' },
+                { is_user: false, mes: 'Elena is important' },
+            ],
+            chatMetadata: {},
+            saveMetadataDebounced: vi.fn(),
+        });
+
+        callWithRetry.mockResolvedValue('[]');
+        parseJsonFromLLM.mockReturnValue({
+            facts: [
+                {
+                    content: 'Elena trained at the Grand Cathedral.',
+                    title: 'Elena',
+                    keys: ['elena'],
+                },
+            ],
+            scene_change: null,
+            arcs: [],
+        });
+
+        const createEntry = (await import('../entry-manager.js')).createEntry;
+        createEntry.mockResolvedValue({ uid: 123 });
+
+        await runPostTurnProcessor(true);
+
+        expect(invalidatePreWarmCache).toHaveBeenCalledTimes(1);
+        expect(preWarmSmartContext).toHaveBeenCalledTimes(1);
+
+        const invalidateOrder = invalidatePreWarmCache.mock.invocationCallOrder[0];
+        const prewarmOrder = preWarmSmartContext.mock.invocationCallOrder[0];
+        expect(invalidateOrder).toBeLessThan(prewarmOrder);
+    });
+});
+
+describe('shouldInvalidateSmartContextPreWarm', () => {
+    it('returns false when there are no memory changes', () => {
+        expect(shouldInvalidateSmartContextPreWarm({
+            factsCreated: 0,
+            trackersUpdated: 0,
+            sceneArchived: false,
+            arcsCreated: 0,
+            arcsUpdated: 0,
+            arcsResolved: 0,
+        })).toBe(false);
+    });
+
+    it('returns true when facts were created', () => {
+        expect(shouldInvalidateSmartContextPreWarm({
+            factsCreated: 1,
+            trackersUpdated: 0,
+            sceneArchived: false,
+            arcsCreated: 0,
+            arcsUpdated: 0,
+            arcsResolved: 0,
+        })).toBe(true);
+    });
+
+    it('returns true when trackers were updated', () => {
+        expect(shouldInvalidateSmartContextPreWarm({
+            factsCreated: 0,
+            trackersUpdated: 1,
+            sceneArchived: false,
+            arcsCreated: 0,
+            arcsUpdated: 0,
+            arcsResolved: 0,
+        })).toBe(true);
+    });
+
+    it('returns true when a scene was archived', () => {
+        expect(shouldInvalidateSmartContextPreWarm({
+            factsCreated: 0,
+            trackersUpdated: 0,
+            sceneArchived: true,
+            arcsCreated: 0,
+            arcsUpdated: 0,
+            arcsResolved: 0,
+        })).toBe(true);
+    });
+
+    it('returns true when arc state changed', () => {
+        expect(shouldInvalidateSmartContextPreWarm({
+            factsCreated: 0,
+            trackersUpdated: 0,
+            sceneArchived: false,
+            arcsCreated: 0,
+            arcsUpdated: 1,
+            arcsResolved: 0,
+        })).toBe(true);
+    });
+});
+
+describe('refreshSmartContextAfterPostTurn', () => {
+    it('rewarms without invalidation when no memory changed', async () => {
+        refreshSmartContextAfterPostTurn({
+            factsCreated: 0,
+            trackersUpdated: 0,
+            sceneArchived: false,
+            arcsCreated: 0,
+            arcsUpdated: 0,
+            arcsResolved: 0,
+        });
+
+        await Promise.resolve();
+
+        expect(invalidatePreWarmCache).not.toHaveBeenCalled();
+        expect(preWarmSmartContext).toHaveBeenCalledTimes(1);
+    });
+
+    it('invalidates before rewarming when memory changed', async () => {
+        refreshSmartContextAfterPostTurn({
+            factsCreated: 0,
+            trackersUpdated: 1,
+            sceneArchived: false,
+            arcsCreated: 0,
+            arcsUpdated: 0,
+            arcsResolved: 0,
+        });
+
+        await Promise.resolve();
+
+        expect(invalidatePreWarmCache).toHaveBeenCalledTimes(1);
+        expect(preWarmSmartContext).toHaveBeenCalledTimes(1);
+
+        const invalidateOrder = invalidatePreWarmCache.mock.invocationCallOrder[0];
+        const prewarmOrder = preWarmSmartContext.mock.invocationCallOrder[0];
+        expect(invalidateOrder).toBeLessThan(prewarmOrder);
     });
 });
