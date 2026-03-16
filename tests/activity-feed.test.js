@@ -29,7 +29,11 @@ describe('parseTimestamp', () => {
         const result = parseTimestamp('[Day 5, Morning] Elena woke up.');
         expect(result).toEqual({
             day: 5,
+            dateKey: null,
+            dateLabel: '',
             timeLabel: 'Day 5, Morning',
+            groupKey: 'day:5',
+            groupLabel: 'Day 5',
             rest: 'Elena woke up.',
         });
     });
@@ -38,16 +42,50 @@ describe('parseTimestamp', () => {
         const result = parseTimestamp('[Day 3] Something happened.');
         expect(result).toEqual({
             day: 3,
+            dateKey: null,
+            dateLabel: '',
             timeLabel: 'Day 3',
+            groupKey: 'day:3',
+            groupLabel: 'Day 3',
             rest: 'Something happened.',
         });
     });
 
-    it('returns null day for bracket prefix without day number', () => {
+    it('parses date-aware tags and prefers date grouping with day in label', () => {
+        const result = parseTimestamp('[Day 6, Sunday 16 March 2025, around 13:10-13:20] They reached the market.');
+        expect(result).toEqual({
+            day: 6,
+            dateKey: '2025-03-16',
+            dateLabel: 'Sunday 16 March 2025',
+            timeLabel: 'Day 6, Sunday 16 March 2025, around 13:10-13:20',
+            groupKey: 'date:2025-03-16',
+            groupLabel: 'Sunday 16 March 2025 (Day 6)',
+            rest: 'They reached the market.',
+        });
+    });
+
+    it('parses date-only tags into date grouping', () => {
+        const result = parseTimestamp('[Sunday, 16 March 2025, morning] Bells rang at dawn.');
+        expect(result).toEqual({
+            day: null,
+            dateKey: '2025-03-16',
+            dateLabel: 'Sunday, 16 March 2025',
+            timeLabel: 'Sunday, 16 March 2025, morning',
+            groupKey: 'date:2025-03-16',
+            groupLabel: 'Sunday, 16 March 2025',
+            rest: 'Bells rang at dawn.',
+        });
+    });
+
+    it('returns undated group for bracket prefix without day/date', () => {
         const result = parseTimestamp('[Evening] The sun set.');
         expect(result).toEqual({
             day: null,
+            dateKey: null,
+            dateLabel: '',
             timeLabel: 'Evening',
+            groupKey: 'undated',
+            groupLabel: 'Undated',
             rest: 'The sun set.',
         });
     });
@@ -56,22 +94,44 @@ describe('parseTimestamp', () => {
         const result = parseTimestamp('No timestamp here.');
         expect(result).toEqual({
             day: null,
+            dateKey: null,
+            dateLabel: '',
             timeLabel: '',
+            groupKey: 'undated',
+            groupLabel: 'Undated',
             rest: 'No timestamp here.',
         });
     });
 
     it('handles null input', () => {
-        expect(parseTimestamp(null)).toEqual({ day: null, timeLabel: '', rest: '' });
+        expect(parseTimestamp(null)).toEqual({
+            day: null,
+            dateKey: null,
+            dateLabel: '',
+            timeLabel: '',
+            groupKey: 'undated',
+            groupLabel: 'Undated',
+            rest: '',
+        });
     });
 
     it('handles empty string input', () => {
-        expect(parseTimestamp('')).toEqual({ day: null, timeLabel: '', rest: '' });
+        expect(parseTimestamp('')).toEqual({
+            day: null,
+            dateKey: null,
+            dateLabel: '',
+            timeLabel: '',
+            groupKey: 'undated',
+            groupLabel: 'Undated',
+            rest: '',
+        });
     });
 
     it('handles large day numbers', () => {
         const result = parseTimestamp('[Day 142, Night] Battle raged.');
         expect(result.day).toBe(142);
+        expect(result.groupKey).toBe('day:142');
+        expect(result.groupLabel).toBe('Day 142');
     });
 });
 

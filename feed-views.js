@@ -350,24 +350,99 @@ export function exitTimelineView() {
 }
 
 /**
- * Parse a `[Day X, time]` or `[Day X]` prefix from entry content.
- * Returns { day: number|null, timeLabel: string, rest: string }.
+ * Parse a leading bracket timestamp tag from entry content.
+ * Supports forms like:
+ *   [Day 6, Sunday 16 March 2025, around 13:10-13:20]
+ *   [Sunday, 16 March 2025, morning]
+ *   [Day 6, evening]
+ *   [Day 6]
+ *
+ * Returns:
+ * {
+ *   day: number|null,
+ *   dateKey: string|null,     // YYYY-MM-DD when parseable
+ *   dateLabel: string,        // Human-readable date fragment (best effort)
+ *   timeLabel: string,        // Original bracket tag
+ *   groupKey: string,         // `date:YYYY-MM-DD` | `day:N` | `undated`
+ *   groupLabel: string,       // Display label for timeline section
+ *   rest: string
+ * }
  */
 export function parseTimestamp(content) {
-    if (!content) return { day: null, timeLabel: '', rest: content || '' };
+    if (!content) {
+        return {
+            day: null,
+            dateKey: null,
+            dateLabel: '',
+            timeLabel: '',
+            groupKey: 'undated',
+            groupLabel: 'Undated',
+            rest: content || '',
+        };
+    }
+
     const match = content.match(/^\[([^\]]+)\]\s*/);
-    if (!match) return { day: null, timeLabel: '', rest: content };
+    if (!match) {
+        return {
+            day: null,
+            dateKey: null,
+            dateLabel: '',
+            timeLabel: '',
+            groupKey: 'undated',
+            groupLabel: 'Undated',
+            rest: content,
+        };
+    }
 
     const tag = match[1].trim();
-    const dayMatch = tag.match(/Day\s+(\d+)/i);
+    const dayMatch = tag.match(/\bDay\s+(\d+)\b/i);
     const day = dayMatch ? parseInt(dayMatch[1], 10) : null;
+
+    // Try to capture a date-like fragment:
+    // - Sunday 16 March 2025
+    // - Sunday, 16 March 2025
+    // - 16 March 2025
+    let dateLabel = '';
+    const dateFragmentMatch = tag.match(/\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)?\,?\s*\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b/i);
+    if (dateFragmentMatch) {
+        dateLabel = dateFragmentMatch[0].replace(/\s+/g, ' ').trim().replace(/\s+,/g, ',');
+    }
+
+    let dateKey = null;
+    if (dateLabel) {
+        const normalized = dateLabel.replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+        const dateObj = new Date(normalized);
+        if (!Number.isNaN(dateObj.getTime())) {
+            const yyyy = dateObj.getFullYear();
+            const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const dd = String(dateObj.getDate()).padStart(2, '0');
+            dateKey = `${yyyy}-${mm}-${dd}`;
+        }
+    }
+
+    let groupKey = 'undated';
+    let groupLabel = 'Undated';
+    if (dateKey) {
+        groupKey = `date:${dateKey}`;
+        groupLabel = dateLabel || dateKey;
+        if (day != null) groupLabel = `${groupLabel} (Day ${day})`;
+    } else if (day != null) {
+        groupKey = `day:${day}`;
+        groupLabel = `Day ${day}`;
+    }
+
     const rest = content.slice(match[0].length);
-    return { day, timeLabel: tag, rest };
+    return { day, dateKey, dateLabel, timeLabel: tag, groupKey, groupLabel, rest };
 }
 
 /**
- * Load all fact/summary entries from active TV lorebooks and group by day.
- * Returns a sorted array of { day, timeLabel, entries[] } groups.
+ * Load all fact/summary entries from active TV lorebooks and group chronologically.
+ * Grouping priority:
+ *   1) Calendar date (when parseable from timestamp)
+ *   2) Story day (Day X)
+ *   3) Undated
+ *
+ * Returns a sorted array of { groupKey, groupLabel, day, dateKey, entries[] } groups.
  */
 export async function loadTimelineEntries() {
     const activeBooks = getActiveTunnelVisionBooks();
@@ -384,13 +459,17 @@ export async function loadTimelineEntries() {
                 if (isTrackerTitle(title)) continue;
 
                 const isSummary = isSummaryTitle(title);
-                const { day, timeLabel, rest } = parseTimestamp(entry.content || '');
+                const parsed = parseTimestamp(entry.content || '');
                 items.push({
                     uid: entry.uid ?? null,
                     title,
-                    content: rest,
-                    timeLabel,
-                    day,
+                    content: parsed.rest,
+                    timeLabel: parsed.timeLabel,
+                    day: parsed.day,
+                    dateKey: parsed.dateKey,
+                    dateLabel: parsed.dateLabel,
+                    groupKey: parsed.groupKey,
+                    groupLabel: parsed.groupLabel,
                     isSummary,
                     lorebook: bookName,
                 });
@@ -398,24 +477,43 @@ export async function loadTimelineEntries() {
         } catch { /* skip unavailable books */ }
     }
 
-    // Sort: entries with a day come first (ascending), then entries without a day
+    // Sort chronologically:
+    // - dated groups first by date asc
+    // - then day-only groups by day asc
+    // - undated last
     items.sort((a, b) => {
-        if (a.day != null && b.day != null) return a.day - b.day;
-        if (a.day != null) return -1;
-        if (b.day != null) return 1;
+        const aHasDate = !!a.dateKey;
+        const bHasDate = !!b.dateKey;
+        if (aHasDate && bHasDate) return a.dateKey.localeCompare(b.dateKey);
+        if (aHasDate) return -1;
+        if (bHasDate) return 1;
+
+        const aHasDay = a.day != null;
+        const bHasDay = b.day != null;
+        if (aHasDay && bHasDay) return a.day - b.day;
+        if (aHasDay) return -1;
+        if (bHasDay) return 1;
+
         return 0;
     });
 
-    // Group by day
+    // Group by normalized key
     const groups = [];
-    let currentGroup = null;
+    const byKey = new Map();
+
     for (const item of items) {
-        const groupKey = item.day ?? -1;
-        if (!currentGroup || currentGroup.dayKey !== groupKey) {
-            currentGroup = { dayKey: groupKey, day: item.day, entries: [] };
-            groups.push(currentGroup);
+        if (!byKey.has(item.groupKey)) {
+            const group = {
+                groupKey: item.groupKey,
+                groupLabel: item.groupLabel,
+                day: item.day ?? null,
+                dateKey: item.dateKey ?? null,
+                entries: [],
+            };
+            byKey.set(item.groupKey, group);
+            groups.push(group);
         }
-        currentGroup.entries.push(item);
+        byKey.get(item.groupKey).entries.push(item);
     }
 
     return groups;
@@ -457,7 +555,7 @@ export async function renderTimelineView() {
             emptyEl.style.cssText = 'flex: 1;';
             emptyEl.appendChild(icon('fa-clock-rotate-left'));
             emptyEl.appendChild(el('span', null, 'No facts or summaries yet'));
-            emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Facts and summaries will appear here grouped chronologically by their [Day X] timestamps'));
+            emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Facts and summaries will appear here grouped chronologically by date (when available) and Day labels'));
             container.appendChild(emptyEl);
             return;
         }
@@ -481,9 +579,7 @@ export async function renderTimelineView() {
             const dayHeader = el('div', 'tv-timeline-day-header');
             const dayDot = el('div', 'tv-timeline-day-dot');
             dayHeader.appendChild(dayDot);
-            const dayLabel = group.day != null
-                ? `Day ${group.day}`
-                : 'Undated';
+            const dayLabel = group.groupLabel || (group.day != null ? `Day ${group.day}` : 'Undated');
             dayHeader.appendChild(el('span', 'tv-timeline-day-label', dayLabel));
             dayHeader.appendChild(el('span', 'tv-timeline-day-count', `${group.entries.length}`));
             timelineBody.appendChild(dayHeader);
