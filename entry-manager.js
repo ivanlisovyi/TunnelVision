@@ -28,6 +28,7 @@ import {
     isTrackerUid,
     setTrackerUid,
 } from './tree-store.js';
+import { findOrCreateChildCategory } from './tree-categories.js';
 import {
     MAX_ENTRY_CONTENT_LENGTH,
     MAX_ENTRIES_PER_TURN,
@@ -756,12 +757,22 @@ export function createCategory(bookName, label, parentNodeId) {
         if (found) parentNode = found;
     }
 
-    const newNode = createTreeNode(label, '');
-    parentNode.children.push(newNode);
+    const { node, created } = findOrCreateChildCategory(parentNode, label, '');
+
     saveTree(bookName, tree);
 
-    console.log(`[TunnelVision] Created category "${label}" under "${parentNode.label}" in "${bookName}"`);
-    return { nodeId: newNode.id, label: newNode.label, parentLabel: parentNode.label };
+    if (created) {
+        console.log(`[TunnelVision] Created category "${node.label}" under "${parentNode.label}" in "${bookName}"`);
+    } else {
+        console.log(`[TunnelVision] Reused existing category "${node.label}" under "${parentNode.label}" in "${bookName}"`);
+    }
+
+    return {
+        nodeId: node.id,
+        label: node.label,
+        parentLabel: parentNode.label,
+        created,
+    };
 }
 
 /**

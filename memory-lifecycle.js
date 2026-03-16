@@ -30,6 +30,11 @@ import {
   isTrackerTitle,
   getTrackerUids,
 } from "./tree-store.js";
+import {
+  normalizeCategoryLabel,
+  findCategoryByLabel,
+  findOrCreateChildCategory,
+} from "./tree-categories.js";
 import { getActiveTunnelVisionBooks } from "./tool-registry.js";
 import {
   getCachedWorldInfo,
@@ -813,9 +818,10 @@ async function reorganizeTree(bookName, bookData, chatId) {
     "[Entries to Categorize]",
     entryList,
     "",
-    "Assign each entry UID to the best matching category. Use the category name (last segment, not the full path).",
+    "Assign each entry UID to the best matching existing category whenever possible.",
+    "Prefer an exact category path from the Existing Categories list.",
     'If an entry genuinely doesn\'t fit any category, use "new: Suggested Name" as the category.',
-    'Respond with ONLY a JSON array: [{"uid": 123, "category": "Category Name"}]',
+    'Respond with ONLY a JSON array: [{"uid": 123, "category": "Category Path"}]',
     "No commentary, no code fences.",
   ].join("\n");
 
@@ -829,13 +835,24 @@ async function reorganizeTree(bookName, bookData, chatId) {
     const assignments = parseJsonFromLLM(response, { type: "array" });
     if (!Array.isArray(assignments) || assignments.length === 0) return result;
 
-    // Build a label→node map (case-insensitive) for fast lookup
+    // Build lookup maps for exact path and label-based reuse.
+    const pathMap = new Map();
     const labelMap = new Map();
-    function indexNodes(node) {
-      labelMap.set(node.label.toLowerCase(), node);
-      for (const child of node.children || []) indexNodes(child);
+
+    function indexNodes(node, prefix = "") {
+      for (const child of node.children || []) {
+        const path = prefix ? `${prefix} > ${child.label}` : child.label;
+        pathMap.set(normalizeCategoryLabel(path), child);
+
+        const normalizedLabel = normalizeCategoryLabel(child.label);
+        if (!labelMap.has(normalizedLabel)) {
+          labelMap.set(normalizedLabel, child);
+        }
+
+        indexNodes(child, path);
+      }
     }
-    for (const child of tree.root.children) indexNodes(child);
+    indexNodes(tree.root);
 
     const batchUids = new Set(batch.map((e) => e.uid));
 
@@ -846,19 +863,31 @@ async function reorganizeTree(bookName, bookData, chatId) {
 
       let targetNode = null;
       const catStr = String(assignment.category).trim();
+      const normalizedCategory = normalizeCategoryLabel(catStr);
 
       if (catStr.toLowerCase().startsWith("new:")) {
         const newLabel = catStr.substring(4).trim();
-        if (newLabel) {
-          targetNode = createTreeNode(newLabel, "");
-          tree.root.children.push(targetNode);
-          labelMap.set(newLabel.toLowerCase(), targetNode);
+        const normalizedNewLabel = normalizeCategoryLabel(newLabel);
+        if (normalizedNewLabel) {
+          targetNode =
+            findCategoryByLabel(tree.root, newLabel) || labelMap.get(normalizedNewLabel) || null;
+
+          if (!targetNode) {
+            const created = findOrCreateChildCategory(tree.root, newLabel, "");
+            targetNode = created.node;
+            pathMap.set(normalizeCategoryLabel(targetNode.label), targetNode);
+            labelMap.set(normalizedNewLabel, targetNode);
+          }
         }
       } else {
-        const segments = catStr.split(">").map((s) => s.trim());
-        const lastSegment = segments[segments.length - 1].toLowerCase();
+        const segments = catStr.split(">").map((s) => s.trim()).filter(Boolean);
+        const lastSegment = segments[segments.length - 1] || catStr;
+
         targetNode =
-          labelMap.get(lastSegment) || labelMap.get(catStr.toLowerCase());
+          pathMap.get(normalizedCategory) ||
+          findCategoryByLabel(tree.root, catStr) ||
+          labelMap.get(normalizeCategoryLabel(lastSegment)) ||
+          findCategoryByLabel(tree.root, lastSegment);
       }
 
       if (targetNode) {

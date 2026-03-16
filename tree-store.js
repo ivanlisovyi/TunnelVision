@@ -10,6 +10,15 @@ import { loadWorldInfo } from '../../../world-info.js';
 import { trigramSimilarity } from './agent-utils.js';
 import { AUTO_CLASSIFY_THRESHOLD } from './constants.js';
 
+// Re-export category helpers from dedicated module so existing consumers
+// that import them from tree-store.js continue to work without changes.
+export {
+    normalizeCategoryLabel,
+    findChildCategoryByLabel,
+    findCategoryByLabel,
+    findOrCreateChildCategory,
+} from './tree-categories.js';
+
 const EXTENSION_NAME = 'tunnelvision';
 const TRACKER_TITLE_PREFIX = /^\[tracker[^\]]*\]/i;
 const SUMMARY_TITLE_PREFIX = /^\[(?:scene\s+|act\s+|story\s+)?summary/i;
