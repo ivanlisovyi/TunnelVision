@@ -9,7 +9,7 @@
 
 import { chat, eventSource, event_types, saveChatConditional } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
-import { ALL_TOOL_NAMES } from './tool-registry.js';
+import { ALL_TOOL_NAMES, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
 
 import { _registerFeedCallbacks, addBackgroundEvent, markBackgroundStart, registerBackgroundTask } from './background-events.js';
@@ -20,6 +20,8 @@ import { saveFeed, loadFeed } from './feed-ui/feed-storage.js';
 
 import {MAX_FEED_ITEMS,
     TOOL_DISPLAY,
+    TRACKER_SUGGESTION_NAME_RE,
+    getActiveChatId,
     getFeedItemsRaw, setFeedItems,
     bumpNextId,
     getFeedInitialized, setFeedInitialized,
