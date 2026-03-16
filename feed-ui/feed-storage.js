@@ -9,7 +9,7 @@
  * - It operates on shared feed state (feed-state.js) and the host chat metadata (st-context).
  */
 
-import { getContext } from '../../../st-context.js';
+import { getContext } from '../../../../st-context.js';
 import {
     getActiveChatId,
     setActiveChatId,
