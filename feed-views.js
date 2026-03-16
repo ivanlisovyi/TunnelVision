@@ -23,7 +23,7 @@ import { getAllArcs } from './arc-tracker.js';
 import { countStaleEntries, buildHealthReport } from './entry-scoring.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { isSummaryTitle, isTrackerTitle } from './tree-store.js';
-import { getCachedWorldInfo } from './entry-manager.js';
+import { getCachedWorldInfo, getEntryTemporal, persistWorldInfo } from './entry-manager.js';
 import { getContext } from '../../../st-context.js';
 import { formatShortDateTime } from './shared-utils.js';
 
@@ -435,6 +435,74 @@ export function parseTimestamp(content) {
     return { day, dateKey, dateLabel, timeLabel: tag, groupKey, groupLabel, rest };
 }
 
+function parseTimestampTag(tag) {
+    if (!tag || !String(tag).trim()) {
+        return {
+            day: null,
+            dateKey: null,
+            dateLabel: '',
+            timeLabel: '',
+            groupKey: 'undated',
+            groupLabel: 'Undated',
+        };
+    }
+    const parsed = parseTimestamp(`[${String(tag).trim()}] __TEMP__`);
+    return {
+        day: parsed.day,
+        dateKey: parsed.dateKey,
+        dateLabel: parsed.dateLabel,
+        timeLabel: parsed.timeLabel,
+        groupKey: parsed.groupKey,
+        groupLabel: parsed.groupLabel,
+    };
+}
+
+function hasLeadingTimestamp(content) {
+    return /^\[[^\]]+\]\s*/.test(content || '');
+}
+
+function prependTimestamp(content, when) {
+    return `[${when}] ${(content || '').trim()}`.trim();
+}
+
+async function enrichFactsFromTemporalData() {
+    const activeBooks = getActiveTunnelVisionBooks();
+    let updated = 0;
+    let skippedNoTemporal = 0;
+    let skippedHasTimestamp = 0;
+    let skippedInvalid = 0;
+
+    for (const bookName of activeBooks) {
+        const bookData = await getCachedWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+
+        let changed = false;
+        for (const key of Object.keys(bookData.entries)) {
+            const entry = bookData.entries[key];
+            if (!entry || entry.disable) continue;
+            if (!Number.isFinite(entry.uid)) { skippedInvalid++; continue; }
+
+            const temporal = getEntryTemporal(bookName, entry.uid);
+            const when = temporal?.when ? String(temporal.when).trim() : '';
+            if (!when) { skippedNoTemporal++; continue; }
+
+            const content = String(entry.content || '');
+            if (hasLeadingTimestamp(content)) { skippedHasTimestamp++; continue; }
+
+            entry.content = prependTimestamp(content, when);
+            changed = true;
+            updated++;
+        }
+
+        if (changed) {
+            // eslint-disable-next-line no-await-in-loop
+            await persistWorldInfo(bookName, bookData);
+        }
+    }
+
+    return { updated, skippedNoTemporal, skippedHasTimestamp, skippedInvalid };
+}
+
 /**
  * Load all fact/summary entries from active TV lorebooks and group chronologically.
  * Grouping priority:
@@ -459,11 +527,18 @@ export async function loadTimelineEntries() {
                 if (isTrackerTitle(title)) continue;
 
                 const isSummary = isSummaryTitle(title);
-                const parsed = parseTimestamp(entry.content || '');
+                const temporal = Number.isFinite(entry.uid) ? getEntryTemporal(bookName, entry.uid) : null;
+                const temporalWhen = temporal?.when ? String(temporal.when).trim() : '';
+                const parsedFromContent = parseTimestamp(entry.content || '');
+                const parsedTemporal = temporalWhen ? parseTimestampTag(temporalWhen) : null;
+                const parsed = parsedTemporal && parsedTemporal.groupKey !== 'undated'
+                    ? { ...parsedFromContent, ...parsedTemporal, timeLabel: parsedTemporal.timeLabel || parsedFromContent.timeLabel }
+                    : parsedFromContent;
+
                 items.push({
                     uid: entry.uid ?? null,
                     title,
-                    content: parsed.rest,
+                    content: parsedFromContent.rest,
                     timeLabel: parsed.timeLabel,
                     day: parsed.day,
                     dateKey: parsed.dateKey,
@@ -532,6 +607,27 @@ export async function renderTimelineView() {
     titleEl.appendChild(icon('fa-clock-rotate-left'));
     titleEl.append(' Timeline');
     headerRow.appendChild(titleEl);
+
+    const enrichBtn = el('button', 'tv-float-panel-btn', 'Enrich from Temporal');
+    enrichBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px; margin-right: 6px;';
+    enrichBtn.addEventListener('click', async () => {
+        enrichBtn.disabled = true;
+        const originalText = enrichBtn.textContent;
+        enrichBtn.textContent = 'Enriching...';
+        try {
+            const result = await enrichFactsFromTemporalData();
+            console.log(`[TunnelVision] Temporal enrich complete: updated=${result.updated}, skippedNoTemporal=${result.skippedNoTemporal}, skippedHasTimestamp=${result.skippedHasTimestamp}, skippedInvalid=${result.skippedInvalid}`);
+            await renderTimelineView();
+        } catch (err) {
+            console.warn('[TunnelVision] Temporal enrich failed:', err);
+            enrichBtn.textContent = 'Failed';
+            setTimeout(() => { enrichBtn.textContent = originalText; enrichBtn.disabled = false; }, 1200);
+            return;
+        }
+        enrichBtn.textContent = originalText;
+        enrichBtn.disabled = false;
+    });
+    headerRow.appendChild(enrichBtn);
 
     const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
     backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';

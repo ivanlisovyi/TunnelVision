@@ -176,6 +176,18 @@ export function invalidateDirtyWorldInfoCache() {
     _dirtyBooks.clear();
 }
 
+/**
+ * Persist modified lorebook data and invalidate its cache entry.
+ * @param {string} bookName
+ * @param {Object} bookData
+ * @returns {Promise<Object>}
+ */
+export async function persistWorldInfo(bookName, bookData) {
+    await saveWorldInfo(bookName, bookData, true);
+    invalidateWorldInfoCache(bookName);
+    return bookData;
+}
+
 // ── Turn-Scoped Rate Limiter ─────────────────────────────────────
 
 let _turnEntryCount = 0;
