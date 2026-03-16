@@ -22,7 +22,7 @@ import {
 import { generateSummariesForTree } from './tree-builder.js';
 import { registerTools } from './tool-registry.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
-import { escapeHtml, getEntryVersions } from './entry-manager.js';
+import { escapeHtml, getEntryVersions, updateEntry } from './entry-manager.js';
 import { formatShortDateTime } from './shared-utils.js';
 import { computeEntryQuality, getQualityRating, getQualityColor, qualityTooltip, buildQualityContext } from './entry-scoring.js';
 
@@ -784,27 +784,93 @@ export async function openTreeEditor(currentLorebook) {
                     $expand.append($keys);
                 }
 
-                // Content
-                if (entry.content) {
-                    $expand.append($('<div class="tv-expand-label">Content</div>'));
-                    const $contentWrap = $('<div class="tv-content-copy-wrap"></div>');
-                    const $copyBtn = $('<button class="tv-content-copy-btn" title="Copy to clipboard"><i class="fa-solid fa-copy"></i></button>');
-                    $copyBtn.on('click', function (e) {
-                        e.stopPropagation();
-                        const $btn = $(this);
-                        navigator.clipboard.writeText(entry.content).then(() => {
-                            $btn.html('<i class="fa-solid fa-check"></i>').addClass('tv-content-copy-btn--done');
-                            setTimeout(() => {
-                                $btn.html('<i class="fa-solid fa-copy"></i>').removeClass('tv-content-copy-btn--done');
-                            }, 1500);
-                        }).catch(() => {
-                            $btn.html('<i class="fa-solid fa-xmark"></i>');setTimeout(() => $btn.html('<i class="fa-solid fa-copy"></i>'), 1500);
-                        });
+                // Editable title/content
+                const originalTitle = entry.comment || '';
+                const originalContent = entry.content || '';
+
+                $expand.append($('<div class="tv-expand-label">Title</div>'));
+                const $titleInput = $('<input type="text" class="tv-main-title" />').val(originalTitle);
+                $titleInput.on('click keydown', (e) => e.stopPropagation());
+                $expand.append($titleInput);
+
+                $expand.append($('<div class="tv-expand-label">Content</div>'));
+                const $contentWrap = $('<div class="tv-content-copy-wrap"></div>');
+                const $copyBtn = $('<button class="tv-content-copy-btn" title="Copy to clipboard"><i class="fa-solid fa-copy"></i></button>');
+                $copyBtn.on('click', function (e) {
+                    e.stopPropagation();
+                    const currentText = String($contentInput.val() ?? '');
+                    const $btn = $(this);
+                    navigator.clipboard.writeText(currentText).then(() => {
+                        $btn.html('<i class="fa-solid fa-check"></i>').addClass('tv-content-copy-btn--done');
+                        setTimeout(() => {
+                            $btn.html('<i class="fa-solid fa-copy"></i>').removeClass('tv-content-copy-btn--done');
+                        }, 1500);
+                    }).catch(() => {
+                        $btn.html('<i class="fa-solid fa-xmark"></i>');
+                        setTimeout(() => $btn.html('<i class="fa-solid fa-copy"></i>'), 1500);
                     });
-                    $contentWrap.append($copyBtn);
-                    $contentWrap.append($('<div class="tv-expand-content"></div>').text(entry.content));
-                    $expand.append($contentWrap);
+                });
+                $contentWrap.append($copyBtn);
+
+                const $contentInput = $('<textarea class="tv-expand-content" rows="6"></textarea>').val(originalContent);
+                $contentInput.css({ width: '100%', resize: 'vertical' });
+                $contentInput.on('click keydown', (e) => e.stopPropagation());
+                $contentWrap.append($contentInput);
+                $expand.append($contentWrap);
+
+                const $editActions = $('<div class="tv-main-title-actions" style="margin-top:8px;"></div>');
+                const $saveBtn = $('<button class="tv-popup-btn"><i class="fa-solid fa-floppy-disk"></i> Save</button>');
+                const $cancelBtn = $('<button class="tv-popup-btn"><i class="fa-solid fa-rotate-left"></i> Cancel</button>');
+                $editActions.append($saveBtn, $cancelBtn);
+                $expand.append($editActions);
+
+                function resetForm() {
+                    $titleInput.val(originalTitle);
+                    $contentInput.val(originalContent);
                 }
+
+                $cancelBtn.on('click', (e) => {
+                    e.stopPropagation();
+                    resetForm();
+                });
+
+                $saveBtn.on('click', async (e) => {
+                    e.stopPropagation();
+                    const nextTitle = String($titleInput.val() ?? '').trim();
+                    const nextContent = String($contentInput.val() ?? '').trim();
+
+                    if (!nextTitle) {
+                        toastr.warning('Title cannot be empty.', 'TunnelVision');
+                        return;
+                    }
+                    if (!nextContent) {
+                        toastr.warning('Content cannot be empty.', 'TunnelVision');
+                        return;
+                    }
+
+                    try {
+                        $saveBtn.prop('disabled', true).find('i').addClass('fa-spin');
+                        await updateEntry(bookName, uid, {
+                            title: nextTitle,
+                            content: nextContent,
+                            source: 'tree-editor-inline',
+                        });
+
+                        entry.comment = nextTitle;
+                        entry.content = nextContent;
+
+                        $row.find('.tv-entry-name').text(nextTitle || entry.key?.[0] || `#${uid}`);
+                        renderTreeNodes();
+                        renderMainPanel();
+                        await renderUnassignedEntries(bookName, tree, bookData);
+                        registerTools();
+                        toastr.success('Entry updated.', 'TunnelVision');
+                    } catch (err) {
+                        toastr.error(`Failed to update entry: ${err.message}`, 'TunnelVision');
+                    } finally {
+                        $saveBtn.prop('disabled', false).find('i').removeClass('fa-spin');
+                    }
+                });
 
                 // Version history button
                 const versions = getEntryVersions(bookName, uid);
