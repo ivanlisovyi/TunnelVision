@@ -202,43 +202,7 @@ function onToolCallsRendered(invocations) {
 
 // ── Rendering ───────────────────────────────────────────────────
 
-function renderEmptyState(tab = 'all') {
-    const panelBody = getPanelBody();
-    if (!panelBody) return;
-    panelBody.replaceChildren();
-
-    const empty = document.createElement('div');
-    empty.className = 'tv-float-empty';
-
-    const emptyIcon = document.createElement('i');
-    emptyIcon.className = 'fa-solid fa-satellite-dish';
-    empty.appendChild(emptyIcon);
-
-    let message = 'No activity yet';
-    let subMessage = 'Tool calls and lorebook retrievals will appear here';
-
-    if (tab === 'wi') {
-        message = 'No entries yet';
-        subMessage = 'Native activations and TunnelVision retrievals will appear here';
-    } else if (tab === 'tools') {
-        message = 'No tool calls yet';
-        subMessage = 'TunnelVision tool usage will appear here';
-    } else if (tab === 'bg') {
-        message = 'No background agent activity';
-        subMessage = 'Background processing and deferred actions will appear here';
-    }
-
-    const messageEl = document.createElement('span');
-    messageEl.textContent = message;
-    empty.appendChild(messageEl);
-
-    const subMessageEl = document.createElement('span');
-    subMessageEl.className = 'tv-float-empty-sub';
-    subMessageEl.textContent = subMessage;
-    empty.appendChild(subMessageEl);
-
-    panelBody.appendChild(empty);
-}
+// (renderEmptyState extracted to feed-ui/feed-render.js and imported above)
 
 // ── Badge / Pulse / Trim / Add ──────────────────────────────────
 
