@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../../../st-context.js', () => ({
+    getContext: vi.fn(),
+}));
 
 // Mock transitive dependencies
 vi.mock('../tree-store.js', () => ({
@@ -20,6 +24,7 @@ vi.mock('../entry-manager.js', () => ({
     parseJsonFromLLM: vi.fn(() => []),
     recordEntryTemporal: vi.fn(),
     KEYWORD_RULES: 'KEYWORD RULES (test stub)',
+    FACT_EXTRACTION_PROMPT: 'FACT EXTRACTION PROMPT (test stub)',
 }));
 vi.mock('../auto-summary.js', () => ({
     markAutoSummaryComplete: vi.fn(),
@@ -55,7 +60,20 @@ vi.mock('../smart-context.js', () => ({
     getFeedbackMap: vi.fn(() => ({})),
 }));
 
-import { contentHash, computeChangeFraction } from '../post-turn-processor.js';
+import { getContext } from '../../../st-context.js';
+import { updateEntry, parseJsonFromLLM } from '../entry-manager.js';
+import { callWithRetry, generateAnalytical } from '../agent-utils.js';
+import { contentHash, computeChangeFraction, updateTrackers } from '../post-turn-processor.js';
+beforeEach(() => {
+    vi.clearAllMocks();
+    getContext.mockReturnValue({
+        chatMetadata: {},
+        saveMetadataDebounced: vi.fn(),
+    });
+    callWithRetry.mockImplementation(async (fn) => await fn());
+    generateAnalytical.mockResolvedValue('[]');
+    parseJsonFromLLM.mockReturnValue([]);
+});
 
 // ── contentHash ─────────────────────────────────────────────────
 
@@ -161,5 +179,85 @@ describe('computeChangeFraction', () => {
             expect(f).toBeGreaterThanOrEqual(0);
             expect(f).toBeLessThanOrEqual(1);
         }
+    });
+});
+
+describe('updateTrackers', () => {
+    it('rebases externally modified tracker content and still applies the update', async () => {
+        const saveMetadataDebounced = vi.fn();
+        getContext.mockReturnValue({
+            chatMetadata: {
+                tunnelvision_tracker_hashes: {
+                    'test-book:7': {
+                        hash: contentHash('## Current Status\nMood: calm'),
+                        timestamp: 1,
+                    },
+                },
+            },
+            saveMetadataDebounced,
+        });
+
+        generateAnalytical.mockResolvedValue('[{"uid":7,"book":"test-book","content":"## Current Status\nMood: alert"}]');
+        parseJsonFromLLM.mockReturnValue([
+            {
+                uid: 7,
+                book: 'test-book',
+                content: '## Current Status\nMood: alert',
+            },
+        ]);
+
+        const trackers = [
+            {
+                uid: 7,
+                book: 'test-book',
+                title: '[Tracker: Sophia Fuchs]',
+                content: '## Current Status\nMood: uneasy',
+            },
+        ];
+
+        const result = await updateTrackers(trackers, 'Sophia steadies herself.', 'test-chat');
+
+        expect(result.updated).toBe(1);
+        expect(result.staleSkips).toEqual([]);
+        expect(updateEntry).toHaveBeenCalledWith('test-book', 7, {
+            content: '## Current Status\nMood: alert',
+            _source: 'post-turn',
+        });
+        expect(getContext().chatMetadata.tunnelvision_tracker_hashes['test-book:7'].hash)
+            .toBe(contentHash('## Current Status\nMood: alert'));
+        expect(saveMetadataDebounced).toHaveBeenCalled();
+    });
+
+    it('updates trackers normally when no prior hash exists', async () => {
+        getContext.mockReturnValue({
+            chatMetadata: {},
+            saveMetadataDebounced: vi.fn(),
+        });
+
+        generateAnalytical.mockResolvedValue('[{"uid":9,"book":"test-book","content":"## Current Status\nLocation: safehouse"}]');
+        parseJsonFromLLM.mockReturnValue([
+            {
+                uid: 9,
+                book: 'test-book',
+                content: '## Current Status\nLocation: safehouse',
+            },
+        ]);
+
+        const trackers = [
+            {
+                uid: 9,
+                book: 'test-book',
+                title: '[Tracker: Sophia Fuchs]',
+                content: '## Current Status\nLocation: street',
+            },
+        ];
+
+        const result = await updateTrackers(trackers, 'Sophia arrives at the safehouse.', 'test-chat');
+
+        expect(result.updated).toBe(1);
+        expect(updateEntry).toHaveBeenCalledWith('test-book', 9, {
+            content: '## Current Status\nLocation: safehouse',
+            _source: 'post-turn',
+        });
     });
 });

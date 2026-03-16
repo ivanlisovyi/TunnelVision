@@ -904,7 +904,7 @@ export function computeChangeFraction(oldText, newText) {
   return Math.min(1, (addedCount + removedCount) / totalLines);
 }
 
-async function updateTrackers(trackers, recentExcerpt, chatId) {
+export async function updateTrackers(trackers, recentExcerpt, chatId) {
   const result = {
     updated: 0,
     errors: 0,
@@ -978,29 +978,23 @@ async function updateTrackers(trackers, recentExcerpt, chatId) {
       const newContent = String(update.content).trim();
       if (tracker.content.trim() === newContent) continue;
 
-      // Staleness guard: if another source modified the tracker since
-      // we last wrote to it, the stored hash won't match the current
-      // content — skip to avoid overwriting concurrent edits.
+      // Rebase guard: if another source modified the tracker since
+      // we last wrote to it, adopt the current saved content as the
+      // new baseline for this turn instead of skipping indefinitely.
       const hashKey = `${tracker.book}:${tracker.uid}`;
       const storedEntry = hashes[hashKey];
-      if (storedEntry) {
-        const currentHash = contentHash(tracker.content.trim());
-        if (storedEntry.hash !== currentHash) {
-          console.warn(
-            `[TunnelVision] Tracker "${tracker.title}" (UID ${tracker.uid}) was modified externally — skipping post-turn update to avoid conflict`,
-          );
-          result.staleSkips.push({
-            uid: tracker.uid,
-            book: tracker.book,
-            title: tracker.title,
-          });
-          continue;
-        }
+      const currentContent = tracker.content.trim();
+      const currentHash = contentHash(currentContent);
+      if (storedEntry && storedEntry.hash !== currentHash) {
+        console.warn(
+          `[TunnelVision] Tracker "${tracker.title}" (UID ${tracker.uid}) was modified externally — rebasing post-turn update on latest saved content`,
+        );
+        setTrackerHash(tracker.book, tracker.uid, currentHash);
       }
 
       // Large-update guard: flag updates that change >60% of content
       const changeFraction = computeChangeFraction(
-        tracker.content.trim(),
+        currentContent,
         newContent,
       );
       const isLargeUpdate = changeFraction >= LARGE_UPDATE_THRESHOLD;
