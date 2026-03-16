@@ -200,10 +200,6 @@ function onToolCallsRendered(invocations) {
     applyHiddenToolCallVisibility(messageIndex, true);
 }
 
-// ── Rendering ───────────────────────────────────────────────────
-
-// (renderEmptyState extracted to feed-ui/feed-render.js and imported above)
-
 // ── Badge / Pulse / Trim / Add ──────────────────────────────────
 
 function updateBadge(count) {
@@ -408,7 +404,6 @@ function initActivityFeed() {
 
     registerFeedRenderCallbacks({
         renderStatsBar,
-        renderEmptyState,
         saveFeed,
         renderAllItems,
         openTreeEditorFromFeed,

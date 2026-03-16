@@ -28,7 +28,6 @@ function icon(iconClass) {
 }
 
 let _renderStatsBar = () => document.createDocumentFragment();
-let _renderEmptyState = () => {};
 let _saveFeed = () => {};
 let _renderAllItems = () => {};
 let _openTreeEditorFromFeed = () => {};
@@ -38,16 +37,41 @@ let _openTreeEditorFromFeed = () => {};
  */
 export function registerFeedRenderCallbacks({
     renderStatsBar,
-    renderEmptyState,
     saveFeed,
     renderAllItems,
     openTreeEditorFromFeed,
 }) {
     if (renderStatsBar) _renderStatsBar = renderStatsBar;
-    if (renderEmptyState) _renderEmptyState = renderEmptyState;
     if (saveFeed) _saveFeed = saveFeed;
     if (renderAllItems) _renderAllItems = renderAllItems;
     if (openTreeEditorFromFeed) _openTreeEditorFromFeed = openTreeEditorFromFeed;
+}
+
+export function renderEmptyState(tab = 'all') {
+    const panelBody = getPanelBody();
+    if (!panelBody) return;
+    panelBody.replaceChildren();
+
+    const empty = el('div', 'tv-float-empty');
+    empty.appendChild(icon('fa-satellite-dish'));
+
+    let message = 'No activity yet';
+    let subMessage = 'Tool calls and lorebook retrievals will appear here';
+
+    if (tab === 'wi') {
+        message = 'No entries yet';
+        subMessage = 'Native activations and TunnelVision retrievals will appear here';
+    } else if (tab === 'tools') {
+        message = 'No tool calls yet';
+        subMessage = 'TunnelVision tool usage will appear here';
+    } else if (tab === 'bg') {
+        message = 'No background agent activity';
+        subMessage = 'Background processing and deferred actions will appear here';
+    }
+
+    empty.appendChild(el('span', null, message));
+    empty.appendChild(el('span', 'tv-float-empty-sub', subMessage));
+    panelBody.appendChild(empty);
 }
 
 export function renderAllItems() {
@@ -88,7 +112,7 @@ export function renderAllItems() {
     });
 
     if (filtered.length === 0 && !showActiveTasks && !showFailedTasks) {
-        _renderEmptyState(tab);
+        renderEmptyState(tab);
         return;
     }
 
