@@ -26,6 +26,7 @@ import {
 
 export const STORAGE_KEY_POS = 'tv-feed-trigger-position';
 export const STORAGE_KEY_SIZE = 'tv-feed-panel-size';
+export const STORAGE_KEY_PANEL_POS = 'tv-feed-panel-position';
 
 // ── Local DOM helpers ────────────────────────────────────────────
 
@@ -191,6 +192,19 @@ export function createPanel({
         }
     }
 
+    // Restore saved panel position
+    const savedPanelPos = localStorage.getItem(STORAGE_KEY_PANEL_POS);
+    if (savedPanelPos) {
+        try {
+            const pos = JSON.parse(savedPanelPos);
+            if (pos && typeof pos.left === 'string') panelEl.style.left = pos.left;
+            if (pos && typeof pos.top === 'string') panelEl.style.top = pos.top;
+            panelEl.dataset.dragPinned = 'true';
+        } catch {
+            /* ignore invalid saved position */
+        }
+    }
+
     // Persist size after resize interaction
     const persistSize = () => {
         const w = panelEl.style.width;
@@ -204,6 +218,65 @@ export function createPanel({
 
     // Header
     const header = el('div', 'tv-float-panel-header');
+    header.style.cursor = 'move';
+
+    // Drag behavior (panel follows pointer while dragging header)
+    let draggingPanel = false;
+    let panelOffsetX = 0;
+    let panelOffsetY = 0;
+
+    const persistPanelPosition = () => {
+        const left = panelEl.style.left;
+        const top = panelEl.style.top;
+        if (!left || !top) return;
+        localStorage.setItem(STORAGE_KEY_PANEL_POS, JSON.stringify({ left, top }));
+    };
+
+    header.addEventListener('pointerdown', (e) => {
+        // Only start drag from header background (avoid hijacking button clicks)
+        if (e.target instanceof HTMLElement && e.target.closest('button')) return;
+
+        draggingPanel = false;
+        const rect = panelEl.getBoundingClientRect();
+        panelOffsetX = e.clientX - rect.left;
+        panelOffsetY = e.clientY - rect.top;
+        header.setPointerCapture(e.pointerId);
+    });
+
+    header.addEventListener('pointermove', (e) => {
+        if (!header.hasPointerCapture(e.pointerId)) return;
+
+        const rect = panelEl.getBoundingClientRect();
+        const dx = e.clientX - rect.left - panelOffsetX;
+        const dy = e.clientY - rect.top - panelOffsetY;
+
+        if (!draggingPanel && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
+            draggingPanel = true;
+        }
+
+        if (!draggingPanel) return;
+
+        const panelRect = panelEl.getBoundingClientRect();
+        const maxLeft = Math.max(0, window.innerWidth - panelRect.width);
+        const maxTop = Math.max(0, window.innerHeight - panelRect.height);
+
+        const x = Math.max(0, Math.min(maxLeft, e.clientX - panelOffsetX));
+        const y = Math.max(0, Math.min(maxTop, e.clientY - panelOffsetY));
+
+        panelEl.style.left = `${x}px`;
+        panelEl.style.top = `${y}px`;
+        panelEl.dataset.dragPinned = 'true';
+    });
+
+    header.addEventListener('pointerup', (e) => {
+        if (header.hasPointerCapture(e.pointerId)) {
+            header.releasePointerCapture(e.pointerId);
+        }
+        if (draggingPanel) {
+            persistPanelPosition();
+            draggingPanel = false;
+        }
+    });
 
     const title = el('span', 'tv-float-panel-title');
     title.appendChild(icon('fa-satellite-dish'));
@@ -288,6 +361,23 @@ export function positionPanel() {
     const triggerEl = getTriggerEl();
     const panelEl = getPanelEl();
     if (!triggerEl || !panelEl) return;
+
+    // If user has manually dragged the panel, preserve that position.
+    if (panelEl.dataset.dragPinned === 'true') {
+        const left = parseFloat(panelEl.style.left || '');
+        const top = parseFloat(panelEl.style.top || '');
+        const pw = panelEl.offsetWidth || parseFloat(panelEl.style.width || '') || 340;
+        const ph = panelEl.offsetHeight || parseFloat(panelEl.style.height || '') || 420;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        const clampedLeft = Number.isFinite(left) ? Math.max(0, Math.min(vw - pw, left)) : 16;
+        const clampedTop = Number.isFinite(top) ? Math.max(0, Math.min(vh - ph, top)) : 16;
+
+        panelEl.style.left = `${clampedLeft}px`;
+        panelEl.style.top = `${clampedTop}px`;
+        return;
+    }
 
     const rect = triggerEl.getBoundingClientRect();
     const vw = window.innerWidth;
