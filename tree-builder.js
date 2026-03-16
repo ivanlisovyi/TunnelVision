@@ -24,6 +24,7 @@ import {
     getSettings,
     isSummaryTitle,
 } from './tree-store.js';
+import { chunkBySize } from './shared-utils.js';
 
 /**
  * Granularity presets control how aggressively the builder splits entries.
@@ -280,14 +281,7 @@ export async function runWithConcurrency(tasks, limit = BUILD_CONCURRENCY) {
     return results;
 }
 
-async function _buildTreeWithLLM(lorebookName, options = {}) {
-    const progress = options.onProgress || (() => {});
-    const detail_ = options.onDetail || (() => {});
-    const bookData = await loadWorldInfo(lorebookName);
-    if (!bookData || !bookData.entries) {
-        throw new Error(`Lorebook "${lorebookName}" not found or has no entries.`);
-    }
-
+export function splitEntriesForTree(bookData) {
     const activeEntries = [];
     const summaryEntries = [];
     for (const key of Object.keys(bookData.entries)) {
@@ -299,24 +293,17 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
             activeEntries.push(entry);
         }
     }
+    return { activeEntries, summaryEntries };
+}
 
-    if (activeEntries.length === 0 && summaryEntries.length === 0) {
-        throw new Error(`Lorebook "${lorebookName}" has no active entries to index.`);
-    }
+export function getTreeBuildSettings(settings) {
+    return {
+        detail: settings.llmBuildDetail || 'full',
+        chunkLimit: settings.llmChunkTokens || 30000,
+    };
+}
 
-    const settings = getSettings();
-    const detail = settings.llmBuildDetail || 'full';
-    const chunkLimit = settings.llmChunkTokens || 30000;
-
-    // Format all entries and split into chunks with overfill
-    const chunks = chunkEntries(activeEntries, detail, chunkLimit);
-    const gran = getEffectiveGranularity(activeEntries.length);
-    console.log(`[TunnelVision] Categorizing ${activeEntries.length} entries in ${chunks.length} chunk(s) (limit: ${chunkLimit} chars)${summaryEntries.length > 0 ? ` (${summaryEntries.length} summaries pinned)` : ''}`);
-    console.log(`[TunnelVision] Using granularity level ${gran.level} (${gran.label}): ${gran.targetCategories} top-level categories, max ${gran.maxEntries} entries/node`);
-
-    // First chunk: fresh categorization (must run alone to establish categories)
-    progress(`Categorizing chunk 1/${chunks.length}`, 0);
-    detail_(`${activeEntries.length} entries across ${chunks.length} chunk(s)`);
+export async function categorizeInitialChunk(lorebookName, chunks, activeEntries) {
     const firstPrompt = buildCategorizationPrompt(lorebookName, chunks[0], activeEntries.length);
     const firstResponse = await generateRaw({
         prompt: firstPrompt,
@@ -326,70 +313,103 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
 
     const allUids = activeEntries.map(e => e.uid);
     const tree = await parseLLMTreeResponse(lorebookName, firstResponse, allUids);
+    return { tree, allUids };
+}
 
-    // Subsequent chunks: run in parallel — each gets the same category snapshot
-    if (chunks.length > 1) {
-        const existingCategories = extractCategoryLabels(tree.root);
-        const chunkTasks = [];
-        for (let i = 1; i < chunks.length; i++) {
-            const chunkIdx = i;
-            chunkTasks.push(() => {
-                progress(`Categorizing chunks (${chunkIdx + 1}/${chunks.length})`, Math.round((chunkIdx / chunks.length) * 60));
-                const contPrompt = buildContinuationPrompt(lorebookName, chunks[chunkIdx], existingCategories, activeEntries.length);
-                return generateRaw({
-                    prompt: contPrompt,
-                    systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
-                });
+export async function categorizeContinuationChunks(lorebookName, chunks, tree, activeEntries, allUids, progress) {
+    if (chunks.length <= 1) return;
+
+    const existingCategories = extractCategoryLabels(tree.root);
+    const chunkTasks = [];
+    for (let i = 1; i < chunks.length; i++) {
+        const chunkIdx = i;
+        chunkTasks.push(() => {
+            progress(`Categorizing chunks (${chunkIdx + 1}/${chunks.length})`, Math.round((chunkIdx / chunks.length) * 60));
+            const contPrompt = buildContinuationPrompt(lorebookName, chunks[chunkIdx], existingCategories, activeEntries.length);
+            return generateRaw({
+                prompt: contPrompt,
+                systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
             });
-        }
-
-        const chunkResults = await runWithConcurrency(chunkTasks, BUILD_CONCURRENCY);
-
-        // Merge results sequentially (merging is cheap, just node assignment)
-        for (let i = 0; i < chunkResults.length; i++) {
-            const resp = chunkResults[i];
-            if (resp && typeof resp === 'string') {
-                mergeLLMResponse(tree, resp, allUids);
-            } else if (resp instanceof Error) {
-                console.warn(`[TunnelVision] Chunk ${i + 2}/${chunks.length} categorization failed:`, resp);
-            }
-        }
+        });
     }
 
-    // Assign any still-unassigned UIDs to root
+    const chunkResults = await runWithConcurrency(chunkTasks, BUILD_CONCURRENCY);
+    for (let i = 0; i < chunkResults.length; i++) {
+        const resp = chunkResults[i];
+        if (resp && typeof resp === 'string') {
+            mergeLLMResponse(tree, resp, allUids);
+        } else if (resp instanceof Error) {
+            console.warn(`[TunnelVision] Chunk ${i + 2}/${chunks.length} categorization failed:`, resp);
+        }
+    }
+}
+
+export function assignUnassignedEntries(tree, allUids) {
     const assigned = new Set(getAllEntryUids(tree.root));
     for (const uid of allUids) {
         if (!assigned.has(uid)) addEntryToNode(tree.root, uid);
     }
+}
 
-    // Save intermediate tree so chunking work isn't lost if subdivision/summaries abort
+export function pinSummaryEntries(tree, summaryEntries) {
+    if (summaryEntries.length === 0) return;
+
+    let summariesNode = tree.root.children.find(c => c.label === 'Summaries');
+    if (!summariesNode) {
+        summariesNode = createTreeNode('Summaries', 'Temporal scene summaries and event records created by the AI.');
+        tree.root.children.push(summariesNode);
+    }
+    for (const entry of summaryEntries) {
+        removeEntryFromTree(tree.root, entry.uid);
+        addEntryToNode(summariesNode, entry.uid);
+    }
+}
+
+export async function _buildTreeWithLLM(lorebookName, options = {}) {
+    const progress = options.onProgress || (() => {});
+    const detail_ = options.onDetail || (() => {});
+    const bookData = await loadWorldInfo(lorebookName);
+    if (!bookData || !bookData.entries) {
+        throw new Error(`Lorebook "${lorebookName}" not found or has no entries.`);
+    }
+
+    const { activeEntries, summaryEntries } = splitEntriesForTree(bookData);
+
+    if (activeEntries.length === 0 && summaryEntries.length === 0) {
+        throw new Error(`Lorebook "${lorebookName}" has no active entries to index.`);
+    }
+
+    const settings = getSettings();
+    const { detail, chunkLimit } = getTreeBuildSettings(settings);
+
+    const chunks = chunkEntries(activeEntries, detail, chunkLimit);
+    const gran = getEffectiveGranularity(activeEntries.length);
+    console.log(`[TunnelVision] Categorizing ${activeEntries.length} entries in ${chunks.length} chunk(s) (limit: ${chunkLimit} chars)${summaryEntries.length > 0 ? ` (${summaryEntries.length} summaries pinned)` : ''}`);
+    console.log(`[TunnelVision] Using granularity level ${gran.level} (${gran.label}): ${gran.targetCategories} top-level categories, max ${gran.maxEntries} entries/node`);
+
+    progress(`Categorizing chunk 1/${chunks.length}`, 0);
+    detail_(`${activeEntries.length} entries across ${chunks.length} chunk(s)`);
+
+    const { tree, allUids } = await categorizeInitialChunk(lorebookName, chunks, activeEntries);
+
+    await categorizeContinuationChunks(lorebookName, chunks, tree, activeEntries, allUids, progress);
+
+    assignUnassignedEntries(tree, allUids);
+
     tree.lastBuilt = Date.now();
     saveTree(lorebookName, tree);
     console.log('[TunnelVision] Chunked categorization complete, saved intermediate tree.');
 
-    // PageIndex pattern: recursively subdivide large nodes (parallel siblings)
     progress('Subdividing large nodes…', 65);
     detail_(`Splitting categories with ${gran.maxEntries}+ entries (granularity: ${gran.label})`);
     await subdivideLargeNodes(tree.root, bookData, activeEntries.length);
     saveTree(lorebookName, tree);
 
-    // PageIndex pattern: generate per-node summaries (parallel with batching)
     progress('Generating summaries…', 80);
     detail_('LLM writing descriptions for each category');
     await _generateSummariesForTree(tree.root, lorebookName, true, bookData);
 
-    // Pin summary entries to the Summaries node (never LLM-categorized)
-    if (summaryEntries.length > 0) {
-        let summariesNode = tree.root.children.find(c => c.label === 'Summaries');
-        if (!summariesNode) {
-            summariesNode = createTreeNode('Summaries', 'Temporal scene summaries and event records created by the AI.');
-            tree.root.children.push(summariesNode);
-        }
-        for (const entry of summaryEntries) {
-            removeEntryFromTree(tree.root, entry.uid);
-            addEntryToNode(summariesNode, entry.uid);
-        }
-    }
+    pinSummaryEntries(tree, summaryEntries);
 
     saveTree(lorebookName, tree);
     return tree;
@@ -406,34 +426,8 @@ async function _buildTreeWithLLM(lorebookName, options = {}) {
  * @param {number} charLimit - Max characters per chunk
  * @returns {Object[][]} Array of entry chunks
  */
-function chunkEntries(entries, detail, charLimit) {
-    if (entries.length === 0) return [];
-
-    const chunks = [];
-    let currentChunk = [];
-    let currentSize = 0;
-
-    for (const entry of entries) {
-        const formatted = formatEntryForLLM(entry, detail);
-        const entrySize = formatted.length + 5; // +5 for "  - " prefix and newline
-
-        if (currentChunk.length > 0 && currentSize + entrySize > charLimit) {
-            // Overfill: include this entry in the current chunk, then start new
-            currentChunk.push(entry);
-            chunks.push(currentChunk);
-            currentChunk = [];
-            currentSize = 0;
-        } else {
-            currentChunk.push(entry);
-            currentSize += entrySize;
-        }
-    }
-
-    if (currentChunk.length > 0) {
-        chunks.push(currentChunk);
-    }
-
-    return chunks;
+export function chunkEntries(entries, detail, charLimit) {
+    return chunkBySize(entries, (entry) => formatEntryForLLM(entry, detail).length + 5, charLimit);
 }
 
 /**
@@ -441,7 +435,7 @@ function chunkEntries(entries, detail, charLimit) {
  * @param {import('./tree-store.js').TreeNode} root
  * @returns {string[]}
  */
-function extractCategoryLabels(root) {
+export function extractCategoryLabels(root) {
     const labels = [];
     for (const child of (root.children || [])) {
         labels.push(child.label);
@@ -459,7 +453,7 @@ function extractCategoryLabels(root) {
  * @param {string[]} existingCategories
  * @returns {string}
  */
-function buildContinuationPrompt(lorebookName, entries, existingCategories, totalEntryCount = 0) {
+export function buildContinuationPrompt(lorebookName, entries, existingCategories, totalEntryCount = 0) {
     const detail = getSettings().llmBuildDetail || 'full';
     const entryList = entries.map(e => `  - ${formatEntryForLLM(e, detail)}`).join('\n');
     const catList = existingCategories.map(c => `  - ${c}`).join('\n');
@@ -1010,25 +1004,5 @@ ${KEYWORD_RULES}`;
  * @returns {Array<Array>}
  */
 function chunkMessages(messages, charLimit) {
-    if (messages.length === 0) return [];
-
-    const chunks = [];
-    let current = [];
-    let currentSize = 0;
-
-    for (const msg of messages) {
-        const size = msg.name.length + msg.text.length + 10;
-        if (current.length > 0 && currentSize + size > charLimit) {
-            current.push(msg); // overfill — don't split mid-message
-            chunks.push(current);
-            current = [];
-            currentSize = 0;
-        } else {
-            current.push(msg);
-            currentSize += size;
-        }
-    }
-
-    if (current.length > 0) chunks.push(current);
-    return chunks;
+    return chunkBySize(messages, (msg) => msg.name.length + msg.text.length + 10, charLimit);
 }

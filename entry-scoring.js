@@ -12,6 +12,11 @@
  */
 
 import { getFeedbackMap } from './smart-context.js';
+import {SPECIFICITY_THRESHOLDS, SPECIFICITY_DEFAULT_SCORE,
+    QUALITY_RATING_GOOD, QUALITY_RATING_FAIR, QUALITY_RATING_STALE,
+    HEALTH_DUPLICATE_CANDIDATE_THRESHOLD, HEALTH_DUPLICATE_DENSITY_THRESHOLD,
+    HEALTH_MAX_DUPLICATE_SCAN_ENTRIES, HEALTH_OUTLIER_LENGTH_FLOOR,
+} from './constants.js';
 import { getContext } from '../../../st-context.js';
 import { isSummaryTitle, isTrackerTitle, getTree, getAllEntryUids } from './tree-store.js';
 import { trigramSimilarity } from './agent-utils.js';
@@ -34,10 +39,10 @@ export function computeEntryQuality(entry, maxUid, feedbackData, recentText) {
     // ── Specificity (0-25) ──
     const content = (entry.content || '').trim();
     const contentLen = content.length;
-    if (contentLen >= 500) quality.specificity = 20;
-    else if (contentLen >= 150) quality.specificity = 15;
-    else if (contentLen >= 50) quality.specificity = 10;
-    else quality.specificity = 5;
+    quality.specificity = SPECIFICITY_DEFAULT_SCORE;
+    for (const { minChars, score } of SPECIFICITY_THRESHOLDS) {
+        if (contentLen >= minChars) { quality.specificity = score; break; }
+    }
 
     const properNouns = (content.match(PROPER_NOUN_RE) || []).length;
     const numbers = (content.match(NUMBER_RE) || []).length;
@@ -96,9 +101,9 @@ export function computeEntryQuality(entry, maxUid, feedbackData, recentText) {
  */
 export function getQualityRating(quality) {
     const total = typeof quality === 'number' ? quality : quality.total;
-    if (total >= 70) return 'good';
-    if (total >= 50) return 'fair';
-    if (total >= 30) return 'stale';
+    if (total >= QUALITY_RATING_GOOD) return 'good';
+    if (total >= QUALITY_RATING_FAIR) return 'fair';
+    if (total >= QUALITY_RATING_STALE) return 'stale';
     return 'poor';
 }
 
@@ -297,7 +302,7 @@ export function buildHealthReport(bookName, bookData) {
 
     // Average length and outliers (>3x average or >2000 chars)
     report.avgLength = report.totalEntries > 0 ? Math.round(totalLength / report.totalEntries) : 0;
-    const outlierThreshold = Math.max(report.avgLength * 3, 2000);
+    const outlierThreshold = Math.max(report.avgLength * 3, HEALTH_OUTLIER_LENGTH_FLOOR);
     for (const { entry, title, content } of factEntries) {
         if (content.length > outlierThreshold) {
             report.outlierEntries.push({
@@ -312,7 +317,7 @@ export function buildHealthReport(bookName, bookData) {
 
     // Duplicate candidates — check trigram similarity between fact entries
     // Cap comparisons to avoid O(n²) blowup on large lorebooks
-    const dupCheckEntries = factEntries.slice(0, 200);
+    const dupCheckEntries = factEntries.slice(0, HEALTH_MAX_DUPLICATE_SCAN_ENTRIES);
     for (let i = 0; i < dupCheckEntries.length; i++) {
         for (let j = i + 1; j < dupCheckEntries.length; j++) {
             const a = dupCheckEntries[i];
@@ -320,7 +325,7 @@ export function buildHealthReport(bookName, bookData) {
             const textA = a.title + ' ' + a.content.substring(0, 200);
             const textB = b.title + ' ' + b.content.substring(0, 200);
             const sim = trigramSimilarity(textA, textB);
-            if (sim >= 0.6) {
+            if (sim >= HEALTH_DUPLICATE_CANDIDATE_THRESHOLD) {
                 report.duplicateCandidates.push({
                     uidA: a.entry.uid,
                     uidB: b.entry.uid,
@@ -348,7 +353,7 @@ export function buildHealthReport(bookName, bookData) {
     // ── Duplicate density (fraction of entries with >0.7 similarity to at least one other) ──
     const dupUids = new Set();
     for (const d of report.duplicateCandidates) {
-        if (d.similarity >= 0.7) {
+        if (d.similarity >= HEALTH_DUPLICATE_DENSITY_THRESHOLD) {
             dupUids.add(d.uidA);
             dupUids.add(d.uidB);
         }

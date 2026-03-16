@@ -30,6 +30,7 @@ import { getWorldStateText, updateWorldState, clearWorldState } from './world-st
 import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { hideSummarizedMessages, setWatermark } from './tools/summarize.js';
+import { collectActiveEntryTitles } from './shared-utils.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -275,10 +276,7 @@ async function handleRememberCommand(_namedArgs, unnamedArgs) {
         try {
             const bookData = await getCachedWorldInfo(lorebook);
             if (bookData?.entries) {
-                const titles = Object.values(bookData.entries)
-                    .filter(e => !e.disable && e.comment)
-                    .map(e => (e.comment || '').trim())
-                    .filter(t => t && !t.toLowerCase().startsWith('[tracker') && !t.toLowerCase().startsWith('[summary'))
+                const titles = collectActiveEntryTitles(bookData.entries)
                     .slice(0, 30);
                 if (titles.length > 0) {
                     existingFactsSection = '[Already Known Facts — do NOT re-extract these]\n' + titles.map(t => `- ${t}`).join('\n') + '\n';
@@ -678,14 +676,11 @@ async function handleMaintainCommand() {
  * @param {string} [titleHint] - Optional title hint
  * @returns {Promise<{title: string, uid: number}>}
  */
-export async function runQuietSummarize(lorebook, chat, messageCount, titleHint = '', { background = false, skipAutoHide = false } = {}) {
-    const recentContext = formatChatExcerpt(chat, messageCount);
-
+function buildSummaryPrompt(recentContext, titleHint) {
     const titleInstruction = titleHint
         ? `Use this as the title: "${titleHint}".`
         : 'Create a short, descriptive title for the summary.';
 
-    // Include world state for better contextual awareness
     const worldStateText = getWorldStateText();
     const worldStateSection = worldStateText
         ? `\n[Current Story Context — use this to understand the broader narrative when writing your summary]\n${worldStateText}\n`
@@ -718,11 +713,14 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         `Conversation to summarize:\n${recentContext}`,
     ].join('\n');
 
+    return quietPrompt;
+}
+
+async function parseSummaryWithRetry(recentContext, quietPrompt) {
     let response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
     let parsed = parseJsonFromLLM(response);
 
     if (!parsed.title || !parsed.summary) {
-        // Retry once with a shorter, more direct prompt
         console.warn('[TunnelVision] Summary parse failed, retrying with simplified prompt. Raw response:', response?.substring?.(0, 300));
         const retryPrompt = [
             'Summarize this roleplay excerpt as JSON. Respond with ONLY valid JSON, no other text.',
@@ -738,39 +736,66 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
         }
     }
 
+    return parsed;
+}
+
+function resolveSummaryTargetNode(lorebook, summariesNodeId, arcName) {
+    if (!arcName || typeof arcName !== 'string' || !arcName.trim()) {
+        return summariesNodeId;
+    }
+
+    const tree = getTree(lorebook);
+    if (!tree?.root) return summariesNodeId;
+
+    const summNode = findNodeById(tree.root, summariesNodeId);
+    if (!summNode) return summariesNodeId;
+
+    const normalized = arcName.trim();
+    const existing = (summNode.children || []).find(
+        c => c.label?.toLowerCase() === normalized.toLowerCase(),
+    );
+    if (existing) return existing.id;
+
+    const arcNode = createTreeNode(normalized, '');
+    arcNode.isArc = true;
+    summNode.children = summNode.children || [];
+    summNode.children.push(arcNode);
+    saveTree(lorebook, tree);
+    console.log(`[TunnelVision] Auto-created arc "${normalized}" (${arcNode.id})`);
+    return arcNode.id;
+}
+
+function buildSummaryContent(parsed, participants, significance) {
+    const whenLine = parsed.when && parsed.when !== 'unspecified' ? `When: ${parsed.when}\n` : '';
+    return `[Scene Summary — ${significance}]\n${whenLine}Participants: ${participants.join(', ') || '(unspecified)'}\n\n${parsed.summary.trim()}`;
+}
+
+async function applySummaryWatermarkAndHide(chat, messageCount) {
+    try {
+        const currentMsgId = (chat?.length || 1) - 1;
+        const coveredEnd = Math.max(0, currentMsgId - 1);
+        setWatermark(coveredEnd);
+    } catch { /* metadata not available */ }
+
+    try {
+        await hideSummarizedMessages(messageCount);
+    } catch (e) {
+        console.warn('[TunnelVision] Failed to hide summarized messages:', e);
+    }
+}
+
+export async function runQuietSummarize(lorebook, chat, messageCount, titleHint = '', { background = false, skipAutoHide = false } = {}) {
+    const recentContext = formatChatExcerpt(chat, messageCount);
+    const quietPrompt = buildSummaryPrompt(recentContext, titleHint);
+    const parsed = await parseSummaryWithRetry(recentContext, quietPrompt);
+
     const summariesNodeId = ensureSummariesNode(lorebook);
     const participants = Array.isArray(parsed.participants) ? parsed.participants : [];
     const significance = ['minor', 'moderate', 'major', 'critical'].includes(parsed.significance)
         ? parsed.significance : 'moderate';
-    const whenLine = parsed.when && parsed.when !== 'unspecified' ? `When: ${parsed.when}\n` : '';
 
-    // Resolve arc — find existing or create new
-    let targetNodeId = summariesNodeId;
-    if (parsed.arc && typeof parsed.arc === 'string' && parsed.arc.trim()) {
-        const arcName = parsed.arc.trim();
-        const tree = getTree(lorebook);
-        if (tree?.root) {
-            const summNode = findNodeById(tree.root, summariesNodeId);
-            if (summNode) {
-                const existing = (summNode.children || []).find(
-                    c => c.label?.toLowerCase() === arcName.toLowerCase(),
-                );
-                if (existing) {
-                    targetNodeId = existing.id;
-                } else {
-                    const arcNode = createTreeNode(arcName, '');
-                    arcNode.isArc = true;
-                    summNode.children = summNode.children || [];
-                    summNode.children.push(arcNode);
-                    saveTree(lorebook, tree);
-                    targetNodeId = arcNode.id;
-                    console.log(`[TunnelVision] Auto-created arc "${arcName}" (${arcNode.id})`);
-                }
-            }
-        }
-    }
-
-    const content = `[Scene Summary — ${significance}]\n${whenLine}Participants: ${participants.join(', ') || '(unspecified)'}\n\n${parsed.summary.trim()}`;
+    const targetNodeId = resolveSummaryTargetNode(lorebook, summariesNodeId, parsed.arc);
+    const content = buildSummaryContent(parsed, participants, significance);
     const keys = buildSummaryKeys(parsed, participants, significance);
 
     const result = await createEntry(lorebook, {
@@ -784,20 +809,7 @@ export async function runQuietSummarize(lorebook, chat, messageCount, titleHint 
     markAutoSummaryComplete();
 
     if (!skipAutoHide) {
-        // Always advance the watermark so the scene archiver knows what's been covered,
-        // regardless of whether messages are visually hidden.
-        try {
-            const currentMsgId = (chat?.length || 1) - 1;
-            const coveredEnd = Math.max(0, currentMsgId - 1);
-            setWatermark(coveredEnd);
-        } catch { /* metadata not available */ }
-
-        // Hide summarized messages if the setting is enabled
-        try {
-            await hideSummarizedMessages(messageCount);
-        } catch (e) {
-            console.warn('[TunnelVision] Failed to hide summarized messages:', e);
-        }
+        await applySummaryWatermarkAndHide(chat, messageCount);
     }
 
     console.log(`[TunnelVision] Background summary created: "${parsed.title}" (UID ${result.uid})`);

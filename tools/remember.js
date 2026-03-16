@@ -16,6 +16,7 @@ import { getSettings } from '../tree-store.js';
 import { createEntry, getCachedWorldInfo, parseJsonFromLLM, KEYWORD_RULES, FACT_EXTRACTION_PROMPT } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
 import { trigramSimilarity, callWithRetry, generateAnalytical, getStoryContext } from '../agent-utils.js';
+import { collectActiveEntryTitles } from '../shared-utils.js';
 
 export const TOOL_NAME = 'TunnelVision_Remember';
 
@@ -73,10 +74,7 @@ async function extractFactsFromInput(rawInput, lorebook) {
     try {
         const bookData = await getCachedWorldInfo(lorebook);
         if (bookData?.entries) {
-            const titles = Object.values(bookData.entries)
-                .filter(e => !e.disable && e.comment)
-                .map(e => (e.comment || '').trim())
-                .filter(t => t && !t.toLowerCase().startsWith('[tracker') && !t.toLowerCase().startsWith('[summary'))
+            const titles = collectActiveEntryTitles(bookData.entries)
                 .slice(0, 30);
             if (titles.length > 0) {
                 existingFactsSection = '[Already Known Facts — do NOT re-extract these]\n' + titles.map(t => `- ${t}`).join('\n') + '\n';

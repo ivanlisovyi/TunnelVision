@@ -8,6 +8,7 @@ import { extension_settings } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 import { loadWorldInfo } from '../../../world-info.js';
 import { trigramSimilarity } from './agent-utils.js';
+import { AUTO_CLASSIFY_THRESHOLD } from './constants.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const TRACKER_TITLE_PREFIX = /^\[tracker[^\]]*\]/i;
@@ -261,7 +262,7 @@ export function getAllEntryUids(node) {
  * @returns {number[]} Array of entry UIDs
  */
 
-const AUTO_CLASSIFY_THRESHOLD = 0.35;
+
 
 /**
  * Find the best-matching non-root tree node for a new entry based on

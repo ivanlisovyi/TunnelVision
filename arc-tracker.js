@@ -10,11 +10,10 @@
  */
 
 import { getContext } from '../../../st-context.js';
+import { ARC_MAX_HISTORY as MAX_HISTORY, RECENT_RESOLVED_ARC_TURNS } from './constants.js';
 
 const ARCS_KEY = 'tunnelvision_arcs';
 const VALID_STATUSES = new Set(['active', 'stalled', 'resolved', 'abandoned']);
-const MAX_HISTORY = 10;
-const RECENT_RESOLVED_ARC_TURNS = 5;
 
 // ── Persistence ──────────────────────────────────────────────────
 

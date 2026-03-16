@@ -38,6 +38,7 @@ import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
 import { initCommands } from './commands.js';
 import { initAutoSummary } from './auto-summary.js';
+import { MIN_INJECTION_BUDGET_CHARS, BUDGET_TRIM_NEWLINE_RATIO } from './constants.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const EXTENSION_FOLDER = `third-party/TunnelVision`;
@@ -355,9 +356,9 @@ async function onGenerationStarted(type, opts) {
                 if (!text) continue;
                 if (text.length <= remaining) {
                     remaining -= text.length;
-                } else if (remaining > 200) {
+                } else if (remaining > MIN_INJECTION_BUDGET_CHARS) {
                     const cutoff = text.lastIndexOf('\n', remaining);
-                    slot.set(text.substring(0, cutoff > remaining * 0.5 ? cutoff : remaining) + '\n[...budget limit reached]');
+                    slot.set(text.substring(0, cutoff > remaining * BUDGET_TRIM_NEWLINE_RATIO ? cutoff : remaining) + '\n[...budget limit reached]');
                     remaining = 0;
                 } else {
                     slot.set('');

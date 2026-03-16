@@ -28,11 +28,11 @@ import {
     isTrackerUid,
     setTrackerUid,
 } from './tree-store.js';
-
-// ── Shared Constants ─────────────────────────────────────────────
-
-const MAX_ENTRY_CONTENT_LENGTH = 15000;
-const MAX_ENTRIES_PER_TURN = 15;
+import {
+    MAX_ENTRY_CONTENT_LENGTH,
+    MAX_ENTRIES_PER_TURN,
+    MAX_VERSIONS_PER_ENTRY,
+} from './constants.js';
 
 /**
  * Unified keyword generation instructions, used across all entry creation prompts.
@@ -319,7 +319,6 @@ export function escapeHtml(str) {
 // ── Entry Version History ─────────────────────────────────────────
 
 const VERSION_METADATA_KEY = 'tunnelvision_entry_history';
-const MAX_VERSIONS_PER_ENTRY = 5;
 
 /**
  * Record a version snapshot for an entry before it's mutated.

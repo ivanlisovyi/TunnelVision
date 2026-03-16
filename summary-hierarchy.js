@@ -13,6 +13,7 @@
  */
 
 import { getContext } from '../../../st-context.js';
+import { SCENES_PER_ACT, ACTS_PER_STORY_UPDATE } from './constants.js';
 import { generateAnalytical } from './agent-utils.js';
 import { createEntry, getCachedWorldInfo, parseJsonFromLLM, buildSummaryKeys, findEntryByUid, KEYWORD_RULES, SUMMARY_STYLE_RULES } from './entry-manager.js';
 import {
@@ -25,8 +26,7 @@ import { addBackgroundEvent } from './background-events.js';
 
 const HIERARCHY_META_KEY = 'tunnelvision_summary_hierarchy';
 
-const SCENES_PER_ACT = 10;
-const ACTS_PER_STORY_UPDATE = 3;
+
 
 const ACT_TITLE_PREFIX = '[Act Summary]';
 const STORY_TITLE_PREFIX = '[Story Summary]';

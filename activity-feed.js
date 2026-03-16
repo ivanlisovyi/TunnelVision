@@ -2,6 +2,9 @@
  * TunnelVision Activity Feed
  * Floating widget that shows real-time worldbook entry activations and tool call activity.
  * Lives on document.body as a draggable trigger button + expandable panel.
+ *
+ * This is the main orchestration module. View logic lives in feed-views.js,
+ * helper/parsing utilities in feed-helpers.js, and shared mutable state in feed-state.js.
  */
 
 import { chat, eventSource, event_types, saveChatConditional } from '../../../../script.js';
@@ -10,210 +13,64 @@ import { ALL_TOOL_NAMES, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getSettings, isLorebookEnabled, getTree, isSummaryTitle, isTrackerTitle } from './tree-store.js';
 import { findEntry, getCachedWorldInfo, getEntryVersions } from './entry-manager.js';
 import { openTreeEditorForBook } from './ui-controller.js';
-import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState } from './world-state.js';
 import { createTrackerForCharacter } from './post-turn-processor.js';
-import { getAllArcs } from './arc-tracker.js';
-import { countStaleEntries, buildHealthReport } from './entry-scoring.js';
+import { countStaleEntries } from './entry-scoring.js';
+import { CHARS_PER_TOKEN } from './constants.js';
 import { getInjectionSizes, getMaxContextTokens } from './agent-utils.js';
 import { _registerFeedCallbacks, addBackgroundEvent, markBackgroundStart, registerBackgroundTask, cancelBackgroundTask, getActiveTasks, getFailedTasks, retryFailedTask, dismissFailedTask } from './background-events.js';
 
-const MAX_FEED_ITEMS = 50;
-const MAX_RENDERED_RETRIEVED_ENTRIES = 5;
+// ── Sub-module imports ──────────────────────────────────────────
+
+import {MAX_FEED_ITEMS, MAX_RENDERED_RETRIEVED_ENTRIES, LOREBOOK_STATS_CACHE_TTL,
+    TOOL_DISPLAY, TRACKER_SUGGESTION_NAME_RE,
+    getActiveChatId, setActiveChatId,
+    getFeedItemsRaw, setFeedItems,
+    getNextId, setNextId, bumpNextId,
+    getFeedInitialized, setFeedInitialized,
+    getTriggerEl, setTriggerEl,
+    getPanelEl, setPanelEl,
+    getPanelBody, setPanelBody,
+    getPanelTabs, setPanelTabs,
+    getShowingWorldState, setShowingWorldState,
+    getShowingTimeline, setShowingTimeline,
+    getShowingArcs, setShowingArcs,
+    getShowingHealth, setShowingHealth,
+    getLorebookStatsCache, setLorebookStatsCache,
+    getLorebookStatsCacheTime, setLorebookStatsCacheTime,
+    getTurnToolCalls, setTurnToolCalls,
+    getHiddenToolCallRefreshTimer, setHiddenToolCallRefreshTimer,
+    getHiddenToolCallRefreshNeedsSync, setHiddenToolCallRefreshNeedsSync,
+} from './feed-state.js';
+
+import {
+    registerViewCallbacks,
+    toggleWorldStateView, toggleTimelineView, toggleArcsView, toggleHealthView,
+    enterArcsView, enterHealthView,
+    renderWorldStateView, renderTimelineView,
+    parseTimestamp, loadTimelineEntries,
+} from './feed-views.js';
+
+import {
+    truncate, formatTime,
+    createEntryFeedItem, shouldIncludeLorebookForEntries,
+    formatEntrySummary, formatRetrievedEntryLabel,
+    parseInvocationParameters, extractRetrievedEntries, parseRetrievedEntryHeader,
+    buildToolSummary, computeLineDiff, buildDiffView, buildVersionHistoryPanel,
+} from './feed-helpers.js';
+
+// ── Re-exports (preserve existing public API) ───────────────────
+
+export { initActivityFeed, refreshHiddenToolCallMessages, clearFeed, getFeedItems };
+export { parseTimestamp, loadTimelineEntries };
+export { parseRetrievedEntryHeader, buildToolSummary, computeLineDiff };
+
+// ── Constants (module-private) ──────────────────────────────────
+
 const STORAGE_KEY_POS = 'tv-feed-trigger-position';
 const METADATA_KEY = 'tunnelvision_feed';
 const HIDDEN_TOOL_CALL_FLAG = 'tvHiddenToolCalls';
 
-/** Track which chatId the current feedItems belong to, prevents cross-chat bleed. */
-let activeChatId = null;
-
-// Turn-level tool call accumulator for console summary
-/** @type {Array<{name: string, verb: string, summary: string}>} */
-let turnToolCalls = [];
-
-/**
- * @typedef {Object} RetrievedEntry
- * @property {string} lorebook
- * @property {number|null} uid
- * @property {string} title
- */
-
-/**
- * @typedef {Object} FeedItem
- * @property {number} id
- * @property {'entry'|'tool'|'background'} type
- * @property {string} icon
- * @property {string} verb
- * @property {string} color
- * @property {string} [summary]
- * @property {number} timestamp
- * @property {'native'|'tunnelvision'} [source]
- * @property {string} [lorebook]
- * @property {number|null} [uid]
- * @property {string} [title]
- * @property {string[]} [keys]
- * @property {RetrievedEntry[]} [retrievedEntries]
- * @property {string[]} [details] - Extra detail lines for background items
- * @property {number} [completedAt] - Timestamp when an actionable suggestion was fulfilled
- * @property {number} [dismissedAt] - Timestamp when a suggestion was dismissed by the user
- */
-
-/** @type {FeedItem[]} */
-let feedItems = [];
-let nextId = 0;
-let feedInitialized = false;
-let hiddenToolCallRefreshTimer = null;
-let hiddenToolCallRefreshNeedsSync = false;
-
-/** @type {HTMLElement|null} */
-let triggerEl = null;
-/** @type {HTMLElement|null} */
-let panelEl = null;
-/** @type {HTMLElement|null} */
-let panelBody = null;
-/** @type {HTMLElement|null} */
-let panelTabs = null;
-/** Whether the panel is currently showing the world state view. */
-let showingWorldState = false;
-/** Whether the panel is currently showing the timeline view. */
-let showingTimeline = false;
-/** Whether the panel is currently showing the arcs view. */
-let showingArcs = false;
-/** Whether the panel is currently showing the health dashboard view. */
-let showingHealth = false;
-
-/** Cached lorebook stats for the stats bar. */
-let _lorebookStatsCache = null;
-let _lorebookStatsCacheTime = 0;
-const LOREBOOK_STATS_CACHE_TTL = 30000;
-
-// Tool display config
-const TOOL_DISPLAY = {
-    'TunnelVision_Search':     { icon: 'fa-magnifying-glass', verb: 'Searched', color: '#e84393' },
-    'TunnelVision_Remember':   { icon: 'fa-brain',           verb: 'Remembered', color: '#6c5ce7' },
-    'TunnelVision_Update':     { icon: 'fa-pen',             verb: 'Updated', color: '#f0946c' },
-    'TunnelVision_Forget':     { icon: 'fa-eraser',          verb: 'Forgot', color: '#ef4444' },
-    'TunnelVision_Reorganize': { icon: 'fa-arrows-rotate',   verb: 'Reorganized', color: '#00b894' },
-    'TunnelVision_Summarize':  { icon: 'fa-file-lines',      verb: 'Summarized', color: '#fdcb6e' },
-    'TunnelVision_MergeSplit': { icon: 'fa-code-merge',       verb: 'Merged/Split', color: '#0984e3' },
-    'TunnelVision_Notebook':   { icon: 'fa-note-sticky',     verb: 'Noted', color: '#a29bfe' },
-    // BlackBox
-    'BlackBox_Pick':           { icon: 'fa-cube',            verb: 'Picked', color: '#00cec9' },
-};
-
-/**
- * Initialize the activity feed — create floating widget and bind events.
- * Called once from index.js init.
- */
-export function initActivityFeed() {
-    if (feedInitialized) return;
-    feedInitialized = true;
-
-    loadFeed();
-    createTriggerButton();
-    createPanel();
-
-    _registerFeedCallbacks({
-        addFeedItems,
-        setTriggerActive: (active) => {
-            if (!triggerEl) return;
-            triggerEl.classList.toggle('tv-bg-active', active);
-        },
-        refreshTasksUI: refreshActiveTasksInPanel,
-        getFeedItems: () => feedItems,
-    });
-
-    // Listen for WI activations (primary — shows what entries triggered)
-    if (event_types.WORLD_INFO_ACTIVATED) {
-        eventSource.on(event_types.WORLD_INFO_ACTIVATED, onWorldInfoActivated);
-    }
-
-    // Listen for TV tool calls (secondary)
-    if (event_types.TOOL_CALLS_PERFORMED) {
-        eventSource.on(event_types.TOOL_CALLS_PERFORMED, onToolCallsPerformed);
-    }
-
-    // Listen for tool call rendering to apply visual hiding
-    if (event_types.TOOL_CALLS_RENDERED) {
-        eventSource.on(event_types.TOOL_CALLS_RENDERED, onToolCallsRendered);
-    }
-
-    // Reload feed from chat metadata on chat switch
-    if (event_types.CHAT_CHANGED) {
-        eventSource.on(event_types.CHAT_CHANGED, () => {
-            loadFeed();
-            showingWorldState = false;
-            showingTimeline = false;
-            showingArcs = false;
-            showingHealth = false;
-            if (panelTabs) panelTabs.style.display = '';
-            if (panelEl?.classList.contains('open')) renderAllItems();
-            queueHiddenToolCallRefresh(false);
-        });
-    }
-
-    // Reset turn accumulator each generation
-    if (event_types.GENERATION_STARTED) {
-        eventSource.on(event_types.GENERATION_STARTED, () => {
-            turnToolCalls = [];
-        });
-    }
-    if (event_types.MESSAGE_RECEIVED) {
-        eventSource.on(event_types.MESSAGE_RECEIVED, printTurnSummary);
-    }
-
-    queueHiddenToolCallRefresh(false);
-}
-
-// ── Persistence (chat metadata) ──
-
-function saveFeed() {
-    try {
-        const context = getContext();
-        if (!context.chatMetadata || !context.chatId) return;
-        if (activeChatId && context.chatId !== activeChatId) return;
-        context.chatMetadata[METADATA_KEY] = { items: feedItems, nextId };
-        context.saveMetadataDebounced?.();
-    } catch { /* no active chat */ }
-}
-
-function loadFeed() {
-    feedItems = [];
-    nextId = 0;
-    activeChatId = null;
-    try {
-        const context = getContext();
-        if (!context.chatId) return;
-        activeChatId = context.chatId;
-        const data = context.chatMetadata?.[METADATA_KEY];
-        if (data && Array.isArray(data.items)) {
-            feedItems = data.items;
-            nextId = typeof data.nextId === 'number' ? data.nextId : feedItems.length;
-            migrateFeedItems(feedItems);
-        }
-    } catch { /* no active chat */ }
-}
-
-const TRACKER_SUGGESTION_NAME_RE = /^"([^"]+)"/;
-
-/**
- * Backfill missing properties on old feed items so they gain
- * UI affordances that were added after they were originally persisted.
- */
-function migrateFeedItems(items) {
-    let mutated = false;
-    for (const item of items) {
-        if (item.type === 'background' && item.verb === 'Tracker suggested' && !item.action && item.summary) {
-            const m = item.summary.match(TRACKER_SUGGESTION_NAME_RE);
-            if (m) {
-                item.action = { type: 'create-tracker', label: 'Create Tracker', icon: 'fa-address-card', characterName: m[1] };
-                mutated = true;
-            }
-        }
-    }
-    if (mutated) saveFeed();
-}
-
-// ── DOM Helpers ──
+// ── DOM Helpers ─────────────────────────────────────────────────
 
 function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -228,8 +85,7 @@ function icon(iconClass) {
     return i;
 }
 
-
-// ── Tree editor shortcut ──
+// ── Tree editor shortcut ────────────────────────────────────────
 
 /**
  * Open the tree editor for an active TV lorebook.
@@ -252,6 +108,7 @@ function openTreeEditorFromFeed() {
     }
 
     // Multiple books — show a quick picker
+    const panelEl = getPanelEl();
     const picker = el('div', 'tv-book-picker');
     const label = el('div', 'tv-book-picker-label');
     label.textContent = 'Choose lorebook:';
@@ -280,10 +137,11 @@ function openTreeEditorFromFeed() {
     }
 }
 
-// ── Trigger Button ──
+// ── Trigger Button ──────────────────────────────────────────────
 
 function createTriggerButton() {
-    triggerEl = el('div', 'tv-float-trigger');
+    const triggerEl = el('div', 'tv-float-trigger');
+    setTriggerEl(triggerEl);
     triggerEl.title = 'TunnelVision Activity Feed';
     triggerEl.setAttribute('data-tv-count', '0');
     triggerEl.appendChild(icon('fa-satellite-dish'));
@@ -344,10 +202,11 @@ function createTriggerButton() {
     document.body.appendChild(triggerEl);
 }
 
-// ── Panel ──
+// ── Panel ───────────────────────────────────────────────────────
 
 function createPanel() {
-    panelEl = el('div', 'tv-float-panel');
+    const panelEl = el('div', 'tv-float-panel');
+    setPanelEl(panelEl);
 
     // Header
     const header = el('div', 'tv-float-panel-header');
@@ -401,7 +260,8 @@ function createPanel() {
     panelEl.appendChild(header);
 
     // Tabs
-    panelTabs = el('div', 'tv-float-panel-tabs');
+    const panelTabs = el('div', 'tv-float-panel-tabs');
+    setPanelTabs(panelTabs);
     for (const [key, label] of [['all', 'All'], ['wi', 'Entries'], ['tools', 'Tools'], ['bg', 'Agent']]) {
         const tab = el('button', `tv-float-tab${key === 'all' ? ' active' : ''}`, label);
         tab.dataset.tab = key;
@@ -415,7 +275,8 @@ function createPanel() {
     panelEl.appendChild(panelTabs);
 
     // Body
-    panelBody = el('div', 'tv-float-panel-body');
+    const panelBody = el('div', 'tv-float-panel-body');
+    setPanelBody(panelBody);
     panelEl.appendChild(panelBody);
 
     renderEmptyState('all');
@@ -424,27 +285,31 @@ function createPanel() {
 }
 
 function togglePanel() {
+    const panelEl = getPanelEl();
     if (!panelEl) return;
     const isOpen = panelEl.classList.toggle('open');
     if (isOpen) {
-        _lorebookStatsCache = null;
+        setLorebookStatsCache(null);
         positionPanel();
-        if (showingWorldState) {
+        if (getShowingWorldState()) {
             renderWorldStateView();
-        } else if (showingTimeline) {
+        } else if (getShowingTimeline()) {
             renderTimelineView();
-        } else if (showingArcs) {
-            renderArcsView();
-        } else if (showingHealth) {
-            renderHealthView();
+        } else if (getShowingArcs()) {
+            enterArcsView();
+        } else if (getShowingHealth()) {
+            enterHealthView();
         } else {
             renderAllItems();
         }
+        const triggerEl = getTriggerEl();
         if (triggerEl) triggerEl.setAttribute('data-tv-count', '0');
     }
 }
 
 function positionPanel() {
+    const triggerEl = getTriggerEl();
+    const panelEl = getPanelEl();
     if (!triggerEl || !panelEl) return;
     const rect = triggerEl.getBoundingClientRect();
     const vw = window.innerWidth;
@@ -464,7 +329,7 @@ function positionPanel() {
     panelEl.style.top = `${top}px`;
 }
 
-// ── Event Handlers ──
+// ── Event Handlers ──────────────────────────────────────────────
 
 function onWorldInfoActivated(entries) {
     if (!Array.isArray(entries) || entries.length === 0) return;
@@ -475,7 +340,7 @@ function onWorldInfoActivated(entries) {
     // Guard: ignore callbacks from a chat we've already switched away from
     try {
         const currentChatId = getContext().chatId;
-        if (activeChatId && currentChatId !== activeChatId) return;
+        if (getActiveChatId() && currentChatId !== getActiveChatId()) return;
     } catch { /* no chat context */ }
 
     const activeBooks = getActiveTunnelVisionBooks();
@@ -493,8 +358,7 @@ function onWorldInfoActivated(entries) {
             uid: Number.isFinite(entry?.uid) ? entry.uid : null,
             title: entry.comment || entry.key?.[0] || `UID ${entry.uid}`,
             keys: Array.isArray(entry.key) ? entry.key : [],
-            timestamp,
-        }));
+            timestamp,}));
     }
 
     addFeedItems(items);
@@ -509,7 +373,7 @@ function onToolCallsPerformed(invocations) {
     // Guard: ignore callbacks from a chat we've already switched away from
     try {
         const currentChatId = getContext().chatId;
-        if (activeChatId && currentChatId !== activeChatId) return;
+        if (getActiveChatId() && currentChatId !== getActiveChatId()) return;
     } catch { /* no chat context */ }
 
     const timestamp = Date.now();
@@ -537,7 +401,7 @@ function onToolCallsPerformed(invocations) {
         const display = TOOL_DISPLAY[invocation.name] || { icon: 'fa-gear', verb: 'Used', color: '#888' };
         const summary = buildToolSummary(invocation.name, params, invocation.result || '', retrievedEntries);
         items.push({
-            id: nextId++,
+            id: bumpNextId(),
             type: 'tool',
             icon: display.icon,
             verb: display.verb,
@@ -548,7 +412,7 @@ function onToolCallsPerformed(invocations) {
         });
 
         // Accumulate for end-of-turn console summary
-        turnToolCalls.push({ name: invocation.name, verb: display.verb, summary });
+        getTurnToolCalls().push({ name: invocation.name, verb: display.verb, summary });
     }
 
     addFeedItems(items);
@@ -577,13 +441,14 @@ function onToolCallsRendered(invocations) {
     applyHiddenToolCallVisibility(messageIndex, true);
 }
 
-// ── Rendering ──
+// ── Rendering ───────────────────────────────────────────────────
 
 function getActiveTab() {
-    return panelEl?.querySelector('.tv-float-tab.active')?.dataset.tab || 'all';
+    return getPanelEl()?.querySelector('.tv-float-tab.active')?.dataset.tab || 'all';
 }
 
 function renderEmptyState(tab) {
+    const panelBody = getPanelBody();
     if (!panelBody) return;
     panelBody.replaceChildren();
     const empty = el('div', 'tv-float-empty');
@@ -606,8 +471,10 @@ function renderEmptyState(tab) {
 }
 
 function renderAllItems() {
+    const panelBody = getPanelBody();
     if (!panelBody) return;
     const tab = getActiveTab();
+    const feedItems = getFeedItemsRaw();
 
     panelBody.replaceChildren();
 
@@ -616,7 +483,7 @@ function renderAllItems() {
         panelBody.appendChild(renderStatsBar());
     }
 
-    // Active background tasks — shown at top in 'all' and 'bg' tabs
+    // Active background tasks — shown at top in'all' and 'bg' tabs
     const activeTasks = getActiveTasks();
     const failedTasks = getFailedTasks();
     const showActiveTasks = (tab === 'all' || tab === 'bg') && activeTasks.size > 0;
@@ -721,8 +588,7 @@ function buildFailedTaskElement(task) {
                 retryBtn.replaceChildren(icon('fa-check'));
                 retryBtn.append(' Done');
                 retryBtn.classList.add('tv-retry-success');
-            }
-        });
+            }});
     }
     btnGroup.appendChild(retryBtn);
 
@@ -742,8 +608,7 @@ function buildItemElement(item) {
         rowClasses.push('tv-float-item-entry');
         rowClasses.push(item.source === 'native' ? 'tv-float-item-entry-native' : 'tv-float-item-entry-tv');
     } else if (item.type === 'wi') {
-        rowClasses.push('tv-float-item-wi');
-    }
+        rowClasses.push('tv-float-item-wi');}
     if (item.completedAt) rowClasses.push('tv-float-item--completed');
     if (item.dismissedAt) rowClasses.push('tv-float-item--dismissed');
 
@@ -804,14 +669,14 @@ function buildItemElement(item) {
 
         for (const entry of shown) {
             const chip = el('div', 'tv-float-entry-tag', formatRetrievedEntryLabel(entry, includeLorebook));
-            chip.title = `${entry.lorebook || 'Lorebook'} | UID ${entry.uid ?? '?'}${entry.title ? ` | ${entry.title}` : ''}`;
+            chip.title = `${entry.lorebook ||'Lorebook'} |UID ${entry.uid ?? '?'}${entry.title ? ` | ${entry.title}` : ''}`;
             entriesRow.appendChild(chip);
         }
 
         if (item.retrievedEntries.length > MAX_RENDERED_RETRIEVED_ENTRIES) {
             const remaining = item.retrievedEntries.length - MAX_RENDERED_RETRIEVED_ENTRIES;
             entriesRow.appendChild(
-                el('div', 'tv-float-entry-more', `+${remaining} more retrieved entr${remaining === 1 ? 'y' : 'ies'}`),
+                el('div', 'tv-float-entry-more', `+${remaining} more retrieved entr${remaining === 1 ?'y' : 'ies'}`),
             );
         }
 
@@ -906,8 +771,7 @@ async function toggleFeedEntryExpand(row, item) {
                 e.stopPropagation();
                 const existing = expandDiv.querySelector('.tv-version-history');
                 if (existing) {
-                    existing.remove();
-                    return;
+                    existing.remove();return;
                 }
                 expandDiv.appendChild(buildVersionHistoryPanel(versions, entry.content));
             });
@@ -1075,7 +939,10 @@ async function handleCreateTrackerAction(action, btn, item) {
     }
 }
 
+//── Stats Bar ───────────────────────────────────────────────────
+
 function renderStatsBar() {
+    const feedItems = getFeedItemsRaw();
     const bar = el('div', 'tv-feed-stats');
     let nativeEntries = 0, tvEntries = 0, toolCount = 0, bgCount = 0;
     for (const item of feedItems) {
@@ -1127,8 +994,9 @@ function renderStatsBar() {
 
 async function computeLorebookStats() {
     const now = Date.now();
-    if (_lorebookStatsCache && now - _lorebookStatsCacheTime < LOREBOOK_STATS_CACHE_TTL) {
-        return _lorebookStatsCache;
+    const cache = getLorebookStatsCache();
+    if (cache && now - getLorebookStatsCacheTime() < LOREBOOK_STATS_CACHE_TTL) {
+        return cache;
     }
 
     const activeBooks = getActiveTunnelVisionBooks();
@@ -1150,9 +1018,10 @@ async function computeLorebookStats() {
         } catch { /* skip unavailable books */ }
     }
 
-    _lorebookStatsCache = { facts, summaries, trackers, stale };
-    _lorebookStatsCacheTime = now;
-    return _lorebookStatsCache;
+    const result = { facts, summaries, trackers, stale };
+    setLorebookStatsCache(result);
+    setLorebookStatsCacheTime(now);
+    return result;
 }
 
 function buildContextUsageBar() {
@@ -1160,7 +1029,7 @@ function buildContextUsageBar() {
     if (sizes.total === 0) return null;
 
     const maxTokens = getMaxContextTokens();
-    const maxChars = maxTokens > 0 ? maxTokens * 4 : 0;
+    const maxChars = maxTokens > 0 ? maxTokens * CHARS_PER_TOKEN : 0;
 
     const wrapper = el('div', 'tv-context-usage');
 
@@ -1170,7 +1039,7 @@ function buildContextUsageBar() {
     labelIcon.style.color = '#a29bfe';
     labelRow.appendChild(labelIcon);
 
-    const tokensUsed = Math.round(sizes.total / 4);
+    const tokensUsed = Math.round(sizes.total / CHARS_PER_TOKEN);
     let labelText = `TV: ~${tokensUsed.toLocaleString()} tok`;
     if (maxTokens > 0) {
         const pct = ((sizes.total / maxChars) * 100).toFixed(1);
@@ -1247,45 +1116,52 @@ function addStatPair(container, iconClass, value, tooltip, color) {
     container.appendChild(pair);
 }
 
+// ── Badge / Pulse / Trim / Add ──────────────────────────────────
+
 function updateBadge(count) {
+    const triggerEl = getTriggerEl();
+    const panelEl = getPanelEl();
     if (!triggerEl || panelEl?.classList.contains('open')) return;
     const current = parseInt(triggerEl.getAttribute('data-tv-count') || '0', 10);
     triggerEl.setAttribute('data-tv-count', String(current + count));
 }
 
 function pulseTrigger() {
+    const triggerEl = getTriggerEl();
     if (!triggerEl) return;
     triggerEl.classList.add('tv-float-pulse');
     setTimeout(() => triggerEl.classList.remove('tv-float-pulse'), 600);
 }
 
 function trimFeed() {
+    let feedItems = getFeedItemsRaw();
     if (feedItems.length > MAX_FEED_ITEMS) {
         feedItems = feedItems.slice(0, MAX_FEED_ITEMS);
-    }
-    saveFeed();
+        setFeedItems(feedItems);
+    }saveFeed();
 }
 
 function addFeedItems(items) {
     if (!Array.isArray(items) || items.length === 0) return;
-    _lorebookStatsCache = null;
+    setLorebookStatsCache(null);
 
-    feedItems = [...items, ...feedItems];
+    const feedItems = getFeedItemsRaw();
+    setFeedItems([...items, ...feedItems]);
     trimFeed();
     updateBadge(items.length);
-    if (panelEl?.classList.contains('open')) renderAllItems();
+    if (getPanelEl()?.classList.contains('open')) renderAllItems();
     pulseTrigger();
 }
 
 function refreshActiveTasksInPanel() {
-    if (!panelEl?.classList.contains('open')) return;
-    if (showingWorldState || showingTimeline || showingArcs) return;
+    if (!getPanelEl()?.classList.contains('open')) return;
+    if (getShowingWorldState() || getShowingTimeline() || getShowingArcs()) return;
     renderAllItems();
 }
 
-// ── Hidden Tool Call (Visual Hiding) ──
+// ── Hidden Tool Call (Visual Hiding) ────────────────────────────
 
-export async function refreshHiddenToolCallMessages({ syncFlags = false } = {}) {
+async function refreshHiddenToolCallMessages({ syncFlags = false } = {}) {
     try {
         const hideMode = getSettings().stealthMode === true;
         let flagsMutated = false;
@@ -1325,15 +1201,15 @@ export async function refreshHiddenToolCallMessages({ syncFlags = false } = {}) 
 }
 
 function queueHiddenToolCallRefresh(syncFlags = false) {
-    hiddenToolCallRefreshNeedsSync = hiddenToolCallRefreshNeedsSync || syncFlags;
-    if (hiddenToolCallRefreshTimer !== null) return;
+    setHiddenToolCallRefreshNeedsSync(getHiddenToolCallRefreshNeedsSync() || syncFlags);
+    if (getHiddenToolCallRefreshTimer() !== null) return;
 
-    hiddenToolCallRefreshTimer = window.setTimeout(async () => {
-        const shouldSync = hiddenToolCallRefreshNeedsSync;
-        hiddenToolCallRefreshTimer = null;
-        hiddenToolCallRefreshNeedsSync = false;
+    setHiddenToolCallRefreshTimer(window.setTimeout(async () => {
+        const shouldSync = getHiddenToolCallRefreshNeedsSync();
+        setHiddenToolCallRefreshTimer(null);
+        setHiddenToolCallRefreshNeedsSync(false);
         await refreshHiddenToolCallMessages({ syncFlags: shouldSync });
-    }, 50);
+    }, 50));
 }
 
 function applyHiddenToolCallVisibility(messageIndex, shouldHide) {
@@ -1391,1340 +1267,146 @@ function areTunnelVisionInvocations(invocations) {
         && invocations.every(invocation => ALL_TOOL_NAMES.includes(invocation?.name));
 }
 
-// ── World State View ──
+// ── Persistence (chat metadata) ─────────────────────────────────
 
-function toggleWorldStateView() {
-    if (showingWorldState) {
-        exitWorldStateView();
-    } else {
-        enterWorldStateView();
-    }
-}
-
-function enterWorldStateView() {
-    showingWorldState = true;
-    showingTimeline = false;
-    showingArcs = false;
-    showingHealth = false;
-    if (panelTabs) panelTabs.style.display = 'none';
-    panelEl?.querySelector('.tv-ws-btn')?.classList.add('tv-ws-active');
-    panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
-    panelEl?.querySelector('.tv-arcs-btn')?.classList.remove('tv-arcs-active');
-    panelEl?.querySelector('.tv-health-btn')?.classList.remove('tv-health-active');
-    renderWorldStateView();
-}
-
-function exitWorldStateView() {
-    showingWorldState = false;
-    if (panelTabs) panelTabs.style.display = '';
-    panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
-    if (showingTimeline) {
-        renderTimelineView();
-    } else {
-        renderAllItems();
-    }
-}
-
-function renderWorldStateView() {
-    if (!panelBody) return;
-    panelBody.replaceChildren();
-
-    const text = getWorldStateText();
-    const container = el('div', 'tv-ws-view');
-    container.style.cssText = 'padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; height: 100%;';
-
-    // Header row
-    const headerRow = el('div', '');
-    headerRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between;';
-
-    const titleEl = el('span', '', 'Rolling World State');
-    titleEl.style.cssText = 'font-weight: 600; font-size: 0.9em;';
-    headerRow.appendChild(titleEl);
-
-    const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
-    backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
-    backBtn.addEventListener('click', exitWorldStateView);
-    headerRow.appendChild(backBtn);
-    container.appendChild(headerRow);
-
-    if (!text) {
-        // Empty state
-        const emptyMsg = el('div', 'tv-float-empty');
-        emptyMsg.style.cssText = 'flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;';
-        emptyMsg.appendChild(icon('fa-globe'));
-        emptyMsg.appendChild(el('span', null, 'No world state yet'));
-        emptyMsg.appendChild(el('span', 'tv-float-empty-sub', 'Enable Rolling World State in settings, or click Refresh to generate one now.'));
-
-        const refreshBtn = el('button', 'tv-float-panel-btn');
-        refreshBtn.style.cssText = 'margin-top: 8px; padding: 4px 12px; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;';
-        refreshBtn.textContent = 'Refresh Now';
-        refreshBtn.addEventListener('click', () => onWorldStateRefreshFromFeed(refreshBtn));
-        emptyMsg.appendChild(refreshBtn);
-
-        container.appendChild(emptyMsg);
-    } else {
-        // Content display
-        const contentEl = el('div', 'tv-ws-content');
-        contentEl.style.cssText = 'flex: 1; overflow-y: auto; white-space: pre-wrap; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; background: rgba(0,0,0,0.1); max-height: 260px;';
-        contentEl.textContent = text;
-        container.appendChild(contentEl);
-
-        // Action buttons
-        const actions = el('div', '');
-        actions.style.cssText = 'display: flex; gap: 6px; flex-wrap: wrap;';
-
-        const editBtn = el('button', 'tv-float-panel-btn');
-        editBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;';
-        editBtn.appendChild(icon('fa-pen-to-square'));
-        editBtn.append(' Edit');
-        editBtn.addEventListener('click', () => renderWorldStateEditor(text));
-        actions.appendChild(editBtn);
-
-        const refreshBtn = el('button', 'tv-float-panel-btn');
-        refreshBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;';
-        refreshBtn.appendChild(icon('fa-arrows-rotate'));
-        refreshBtn.append(' Refresh');
-        refreshBtn.addEventListener('click', () => onWorldStateRefreshFromFeed(refreshBtn));
-        actions.appendChild(refreshBtn);
-
-        if (hasPreviousWorldState()) {
-            const revertBtn = el('button', 'tv-float-panel-btn');
-            revertBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #e17055;';
-            revertBtn.appendChild(icon('fa-rotate-left'));
-            revertBtn.append(' Revert');
-            revertBtn.addEventListener('click', () => {
-                if (revertWorldState()) {
-                    toastr.info('World state reverted to previous version', 'TunnelVision');
-                    renderWorldStateView();
-                } else {
-                    toastr.warning('No previous version available', 'TunnelVision');
-                }
-            });
-            actions.appendChild(revertBtn);
-        }
-
-        const clearBtn = el('button', 'tv-float-panel-btn');
-        clearBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #ef4444;';
-        clearBtn.appendChild(icon('fa-trash-can'));
-        clearBtn.append(' Clear');
-        clearBtn.addEventListener('click', () => {
-            clearWorldState();
-            toastr.info('World state cleared', 'TunnelVision');
-            renderWorldStateView();
-        });
-        actions.appendChild(clearBtn);
-
-        container.appendChild(actions);
-    }
-
-    panelBody.appendChild(container);
-}
-
-function renderWorldStateEditor(currentText) {
-    if (!panelBody) return;
-    panelBody.replaceChildren();
-
-    const container = el('div', 'tv-ws-editor');
-    container.style.cssText = 'padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; height: 100%;';
-
-    const headerRow = el('div', '');
-    headerRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between;';
-    const titleEl = el('span', '', 'Edit World State');
-    titleEl.style.cssText = 'font-weight: 600; font-size: 0.9em;';
-    headerRow.appendChild(titleEl);
-    container.appendChild(headerRow);
-
-    const textarea = document.createElement('textarea');
-    textarea.className = 'tv-ws-textarea';
-    textarea.style.cssText = 'flex: 1; min-height: 200px; max-height: 280px; resize: vertical; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; background: rgba(0,0,0,0.2); color: inherit; font-family: inherit;';
-    textarea.value = currentText;
-    container.appendChild(textarea);
-
-    const actions = el('div', '');
-    actions.style.cssText = 'display: flex; gap: 6px;';
-
-    const saveBtn = el('button', 'tv-float-panel-btn');
-    saveBtn.style.cssText = 'padding: 4px 14px; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; background: rgba(108,92,231,0.3);';
-    saveBtn.textContent = 'Save';
-    saveBtn.addEventListener('click', () => {
-        const newText = textarea.value.trim();
-        if (newText) {
-            saveWorldStateFromEditor(newText);
-            toastr.success('World state saved', 'TunnelVision');
-        } else {
-            clearWorldState();
-            toastr.info('World state cleared', 'TunnelVision');
-        }
-        renderWorldStateView();
-    });
-    actions.appendChild(saveBtn);
-
-    const cancelBtn = el('button', 'tv-float-panel-btn');
-    cancelBtn.style.cssText = 'padding: 4px 14px; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;';
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.addEventListener('click', renderWorldStateView);
-    actions.appendChild(cancelBtn);
-
-    container.appendChild(actions);
-    panelBody.appendChild(container);
-
-    textarea.focus();
-}
-
-function saveWorldStateFromEditor(text) {
+function saveFeed() {
     try {
         const context = getContext();
-        if (!context.chatMetadata) return;
-        const key = 'tunnelvision_worldstate';
-        const existing = context.chatMetadata[key] || {};
-        context.chatMetadata[key] = {
-            ...existing,
-            lastUpdated: Date.now(),
-            lastUpdateMsgIdx: existing.lastUpdateMsgIdx ?? ((context.chat?.length || 1) - 1),
-            text,
-        };
+        if (!context.chatMetadata || !context.chatId) return;
+        if (getActiveChatId() && context.chatId !== getActiveChatId()) return;
+        context.chatMetadata[METADATA_KEY] = { items: getFeedItemsRaw(), nextId: getNextId() };
         context.saveMetadataDebounced?.();
-    } catch { /* metadata not available */ }
+    } catch { /* no active chat */ }
 }
 
-async function onWorldStateRefreshFromFeed(btn) {
-    if (isWorldStateUpdating()) {
-        toastr.info('World state update already in progress', 'TunnelVision');
-        return;
-    }
-
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Updating...';
-
+function loadFeed() {
+    setFeedItems([]);
+    setNextId(0);
+    setActiveChatId(null);
     try {
-        const result = await updateWorldState(true);
-        if (result) {
-            toastr.success('World state updated', 'TunnelVision');
-        } else {
-            toastr.warning('No result. Ensure you have an active chat with enough messages.', 'TunnelVision');
+        const context = getContext();
+        if (!context.chatId) return;
+        setActiveChatId(context.chatId);
+        const data = context.chatMetadata?.[METADATA_KEY];
+        if (data && Array.isArray(data.items)) {
+            setFeedItems(data.items);
+            setNextId(typeof data.nextId === 'number' ? data.nextId : data.items.length);
+            migrateFeedItems(getFeedItemsRaw());
         }
-    } catch (e) {
-        toastr.error(`Update failed: ${e.message}`, 'TunnelVision');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = originalText;
-        if (showingWorldState) renderWorldStateView();
-    }
-}
-
-// ── Timeline View ──────────────────────────────────────────────
-
-function toggleTimelineView() {
-    if (showingTimeline) {
-        exitTimelineView();
-    } else {
-        enterTimelineView();
-    }
-}
-
-function enterTimelineView() {
-    showingTimeline = true;
-    showingWorldState = false;
-    showingArcs = false;
-    showingHealth = false;
-    if (panelTabs) panelTabs.style.display = 'none';
-    panelEl?.querySelector('.tv-timeline-btn')?.classList.add('tv-timeline-active');
-    panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
-    panelEl?.querySelector('.tv-arcs-btn')?.classList.remove('tv-arcs-active');
-    panelEl?.querySelector('.tv-health-btn')?.classList.remove('tv-health-active');
-    renderTimelineView();
-}
-
-function exitTimelineView() {
-    showingTimeline = false;
-    if (panelTabs) panelTabs.style.display = '';
-    panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
-    renderAllItems();
+    } catch { /* no active chat */ }
 }
 
 /**
- * Parse a `[Day X, time]` or `[Day X]` prefix from entry content.
- * Returns { day: number|null, timeLabel: string, rest: string }.
+ * Backfill missing properties on old feed items so they gain
+ * UI affordances that were added after they were originally persisted.
  */
-export function parseTimestamp(content) {
-    if (!content) return { day: null, timeLabel: '', rest: content || '' };
-    const match = content.match(/^\[([^\]]+)\]\s*/);
-    if (!match) return { day: null, timeLabel: '', rest: content };
-
-    const tag = match[1].trim();
-    const dayMatch = tag.match(/Day\s+(\d+)/i);
-    const day = dayMatch ? parseInt(dayMatch[1], 10) : null;
-    const rest = content.slice(match[0].length);
-    return { day, timeLabel: tag, rest };
-}
-
-/**
- * Load all fact/summary entries from active TV lorebooks and group by day.
- * Returns a sorted array of { day, timeLabel, entries[] } groups.
- */
-export async function loadTimelineEntries() {
-    const activeBooks = getActiveTunnelVisionBooks();
-    const items = [];
-
-    for (const bookName of activeBooks) {
-        try {
-            const bookData = await getCachedWorldInfo(bookName);
-            if (!bookData?.entries) continue;
-            for (const key of Object.keys(bookData.entries)) {
-                const entry = bookData.entries[key];
-                if (entry.disable) continue;
-                const title = entry.comment || '';
-                if (isTrackerTitle(title)) continue;
-
-                const isSummary = isSummaryTitle(title);
-                const { day, timeLabel, rest } = parseTimestamp(entry.content || '');
-                items.push({
-                    uid: entry.uid ?? null,
-                    title,
-                    content: rest,
-                    timeLabel,
-                    day,
-                    isSummary,
-                    lorebook: bookName,
-                });
-            }
-        } catch { /* skip unavailable books */ }
-    }
-
-    // Sort: entries with a day come first (ascending), then entries without a day
-    items.sort((a, b) => {
-        if (a.day != null && b.day != null) return a.day - b.day;
-        if (a.day != null) return -1;
-        if (b.day != null) return 1;
-        return 0;
-    });
-
-    // Group by day
-    const groups = [];
-    let currentGroup = null;
+function migrateFeedItems(items) {
+    let mutated = false;
     for (const item of items) {
-        const groupKey = item.day ?? -1;
-        if (!currentGroup || currentGroup.dayKey !== groupKey) {
-            currentGroup = { dayKey: groupKey, day: item.day, entries: [] };
-            groups.push(currentGroup);
-        }
-        currentGroup.entries.push(item);
-    }
-
-    return groups;
-}
-
-async function renderTimelineView() {
-    if (!panelBody) return;
-    panelBody.replaceChildren();
-
-    const container = el('div', 'tv-timeline-view');
-
-    // Header row
-    const headerRow = el('div', 'tv-timeline-header');
-    const titleEl = el('span', 'tv-timeline-title');
-    titleEl.appendChild(icon('fa-clock-rotate-left'));
-    titleEl.append(' Timeline');
-    headerRow.appendChild(titleEl);
-
-    const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
-    backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
-    backBtn.addEventListener('click', exitTimelineView);
-    headerRow.appendChild(backBtn);
-    container.appendChild(headerRow);
-
-    // Loading state
-    const loadingEl = el('div', 'tv-timeline-loading');
-    loadingEl.appendChild(el('span', 'tv_loading'));
-    loadingEl.appendChild(el('span', null, 'Loading entries...'));
-    container.appendChild(loadingEl);
-    panelBody.appendChild(container);
-
-    try {
-        const groups = await loadTimelineEntries();
-        loadingEl.remove();
-
-        if (groups.length === 0) {
-            const emptyEl = el('div', 'tv-float-empty');
-            emptyEl.style.cssText = 'flex: 1;';
-            emptyEl.appendChild(icon('fa-clock-rotate-left'));
-            emptyEl.appendChild(el('span', null, 'No facts or summaries yet'));
-            emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Facts and summaries will appear here grouped chronologically by their [Day X] timestamps'));
-            container.appendChild(emptyEl);
-            return;
-        }
-
-        // Stats line
-        let totalFacts = 0, totalSummaries = 0;
-        for (const g of groups) {
-            for (const e of g.entries) {
-                e.isSummary ? totalSummaries++ : totalFacts++;
+        if (item.type === 'background' && item.verb === 'Tracker suggested' && !item.action && item.summary) {
+            const m = item.summary.match(TRACKER_SUGGESTION_NAME_RE);
+            if (m) {
+                item.action = { type: 'create-tracker', label: 'Create Tracker', icon: 'fa-address-card', characterName: m[1] };
+                mutated = true;
             }
         }
-        const statsEl = el('div', 'tv-timeline-stats');
-        statsEl.textContent = `${totalFacts} fact${totalFacts !== 1 ? 's' : ''}, ${totalSummaries} summar${totalSummaries !== 1 ? 'ies' : 'y'} across ${groups.length} group${groups.length !== 1 ? 's' : ''}`;
-        container.appendChild(statsEl);
-
-        // Timeline body
-        const timelineBody = el('div', 'tv-timeline-body');
-
-        for (const group of groups) {
-            // Day header
-            const dayHeader = el('div', 'tv-timeline-day-header');
-            const dayDot = el('div', 'tv-timeline-day-dot');
-            dayHeader.appendChild(dayDot);
-            const dayLabel = group.day != null
-                ? `Day ${group.day}`
-                : 'Undated';
-            dayHeader.appendChild(el('span', 'tv-timeline-day-label', dayLabel));
-            dayHeader.appendChild(el('span', 'tv-timeline-day-count', `${group.entries.length}`));
-            timelineBody.appendChild(dayHeader);
-
-            // Entries for this day
-            const entriesContainer = el('div', 'tv-timeline-entries');
-            for (const entry of group.entries) {
-                entriesContainer.appendChild(buildTimelineEntry(entry));
-            }
-            timelineBody.appendChild(entriesContainer);
-        }
-
-        container.appendChild(timelineBody);
-    } catch (err) {
-        loadingEl.remove();
-        container.appendChild(el('div', 'tv-feed-expand-empty', `Failed to load timeline: ${err.message}`));
     }
+    if (mutated) saveFeed();
 }
 
-function buildTimelineEntry(entry) {
-    const row = el('div', `tv-timeline-entry${entry.isSummary ? ' tv-timeline-summary' : ''}`);
+// ── Public API ──────────────────────────────────────────────────
 
-    // Timeline connector
-    const connector = el('div', 'tv-timeline-connector');
-    const dot = el('div', 'tv-timeline-dot');
-    if (entry.isSummary) {
-        dot.classList.add('tv-timeline-dot-summary');
-    }
-    connector.appendChild(dot);
-    row.appendChild(connector);
-
-    // Entry content
-    const body = el('div', 'tv-timeline-entry-body');
-
-    // Title bar
-    const titleRow = el('div', 'tv-timeline-entry-title-row');
-    const entryIcon = entry.isSummary
-        ? icon('fa-file-lines')
-        : icon('fa-brain');
-    entryIcon.classList.add('tv-timeline-entry-icon');
-    entryIcon.style.color = entry.isSummary ? '#fdcb6e' : '#6c5ce7';
-    titleRow.appendChild(entryIcon);
-    titleRow.appendChild(el('span', 'tv-timeline-entry-title', truncate(entry.title, 60)));
-    if (entry.timeLabel) {
-        titleRow.appendChild(el('span', 'tv-timeline-entry-time', entry.timeLabel));
-    }
-    body.appendChild(titleRow);
-
-    // Content preview (collapsible)
-    const preview = el('div', 'tv-timeline-entry-preview');
-    preview.textContent = truncate(entry.content, 120);
-    body.appendChild(preview);
-
-    // Expandable full content (hidden by default)
-    const fullContent = el('div', 'tv-timeline-entry-full');
-    fullContent.textContent = entry.content;
-    fullContent.style.display = 'none';
-    body.appendChild(fullContent);
-
-    // Click to toggle expand
-    row.addEventListener('click', () => {
-        const isExpanded = row.classList.toggle('tv-timeline-expanded');
-        preview.style.display = isExpanded ? 'none' : '';
-        fullContent.style.display = isExpanded ? '' : 'none';
-    });
-
-    row.appendChild(body);
-    return row;
-}
-
-// ── Arcs View ──────────────────────────────────────────────────
-
-function toggleArcsView() {
-    if (showingArcs) {
-        exitArcsView();
-    } else {
-        enterArcsView();
-    }
-}
-
-function enterArcsView() {
-    showingArcs = true;
-    showingWorldState = false;
-    showingTimeline = false;
-    showingHealth = false;
-    if (panelTabs) panelTabs.style.display = 'none';
-    panelEl?.querySelector('.tv-arcs-btn')?.classList.add('tv-arcs-active');
-    panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
-    panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
-    panelEl?.querySelector('.tv-health-btn')?.classList.remove('tv-health-active');
-    renderArcsView();
-}
-
-function exitArcsView() {
-    showingArcs = false;
-    if (panelTabs) panelTabs.style.display = '';
-    panelEl?.querySelector('.tv-arcs-btn')?.classList.remove('tv-arcs-active');
-    renderAllItems();
-}
-
-function renderArcsView() {
-    if (!panelBody) return;
-    panelBody.replaceChildren();
-
-    const container = el('div', 'tv-arcs-view');
-
-    // Header
-    const headerRow = el('div', 'tv-arcs-header');
-    const titleEl = el('span', 'tv-arcs-title');
-    titleEl.appendChild(icon('fa-diagram-project'));
-    titleEl.append(' Narrative Arcs');
-    headerRow.appendChild(titleEl);
-
-    const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
-    backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
-    backBtn.addEventListener('click', exitArcsView);
-    headerRow.appendChild(backBtn);
-    container.appendChild(headerRow);
-
-    const arcs = getAllArcs();
-
-    if (arcs.length === 0) {
-        const emptyEl = el('div', 'tv-float-empty');
-        emptyEl.style.cssText = 'flex: 1;';
-        emptyEl.appendChild(icon('fa-diagram-project'));
-        emptyEl.appendChild(el('span', null, 'No narrative arcs yet'));
-        emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Story arcs will be detected and tracked automatically by the post-turn processor as the narrative progresses'));
-        container.appendChild(emptyEl);
-        panelBody.appendChild(container);
-        return;
-    }
-
-    // Stats
-    const active = arcs.filter(a => a.status === 'active').length;
-    const stalled = arcs.filter(a => a.status === 'stalled').length;
-    const resolved = arcs.filter(a => a.status === 'resolved' || a.status === 'abandoned').length;
-    const statsEl = el('div', 'tv-arcs-stats');
-    statsEl.textContent = `${active} active, ${stalled} stalled, ${resolved} resolved`;
-    container.appendChild(statsEl);
-
-    // Arc list
-    const arcList = el('div', 'tv-arcs-list');
-
-    const statusOrder = { active: 0, stalled: 1, resolved: 2, abandoned: 3 };
-    const sorted = [...arcs].sort((a, b) => (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9));
-
-    for (const arc of sorted) {
-        arcList.appendChild(buildArcCard(arc));
-    }
-
-    container.appendChild(arcList);
-    panelBody.appendChild(container);
-}
-
-const ARC_STATUS_COLORS = {
-    active: '#00b894',
-    stalled: '#fdcb6e',
-    resolved: '#636e72',
-    abandoned: '#d63031',
-};
-
-const ARC_STATUS_ICONS = {
-    active: 'fa-circle-play',
-    stalled: 'fa-circle-pause',
-    resolved: 'fa-circle-check',
-    abandoned: 'fa-circle-xmark',
-};
-
-function buildArcCard(arc) {
-    const card = el('div', `tv-arc-card tv-arc-${arc.status}`);
-
-    const statusColor = ARC_STATUS_COLORS[arc.status] || '#636e72';
-    const statusIcon = ARC_STATUS_ICONS[arc.status] || 'fa-circle-question';
-
-    // Title row
-    const titleRow = el('div', 'tv-arc-title-row');
-    const arcIcon = icon(statusIcon);
-    arcIcon.style.color = statusColor;
-    titleRow.appendChild(arcIcon);
-    titleRow.appendChild(el('span', 'tv-arc-title', arc.title));
-    const statusBadge = el('span', 'tv-arc-status');
-    statusBadge.textContent = arc.status;
-    statusBadge.style.color = statusColor;
-    titleRow.appendChild(statusBadge);
-    card.appendChild(titleRow);
-
-    // Progression
-    if (arc.progression) {
-        const progEl = el('div', 'tv-arc-progression');
-        progEl.textContent = arc.progression;
-        card.appendChild(progEl);
-    }
-
-    // Timestamp
-    const timeEl = el('div', 'tv-arc-time');
-    const updatedDate = new Date(arc.updatedAt);
-    timeEl.textContent = `Updated ${updatedDate.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-    card.appendChild(timeEl);
-
-    // Click to expand history
-    if (arc.history && arc.history.length > 0) {
-        card.classList.add('tv-feed-clickable');
-        card.addEventListener('click', () => {
-            const existing = card.querySelector('.tv-arc-history');
-            if (existing) {
-                existing.remove();
-                card.classList.remove('expanded');
-                return;
-            }
-            card.classList.add('expanded');
-            const historyEl = el('div', 'tv-arc-history');
-            const histHeader = el('div', 'tv-arc-history-header', 'History');
-            historyEl.appendChild(histHeader);
-
-            for (const h of [...arc.history].reverse()) {
-                const hRow = el('div', 'tv-arc-history-item');
-                const hStatus = el('span', 'tv-arc-history-status');
-                hStatus.textContent = h.status;
-                hStatus.style.color = ARC_STATUS_COLORS[h.status] || '#636e72';
-                hRow.appendChild(hStatus);
-                hRow.appendChild(el('span', 'tv-arc-history-text', h.progression || '(no note)'));
-                if (h.timestamp) {
-                    const hTime = new Date(h.timestamp);
-                    hRow.appendChild(el('span', 'tv-arc-history-time', hTime.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })));
-                }
-                historyEl.appendChild(hRow);
-            }
-            card.appendChild(historyEl);
-        });
-    }
-
-    return card;
-}
-
-// ── Health Dashboard View ───────────────────────────────────────
-
-function toggleHealthView() {
-    if (showingHealth) {
-        exitHealthView();
-    } else {
-        enterHealthView();
-    }
-}
-
-function enterHealthView() {
-    showingHealth = true;
-    showingWorldState = false;
-    showingTimeline = false;
-    showingArcs = false;
-    if (panelTabs) panelTabs.style.display = 'none';
-    panelEl?.querySelector('.tv-health-btn')?.classList.add('tv-health-active');
-    panelEl?.querySelector('.tv-ws-btn')?.classList.remove('tv-ws-active');
-    panelEl?.querySelector('.tv-timeline-btn')?.classList.remove('tv-timeline-active');
-    panelEl?.querySelector('.tv-arcs-btn')?.classList.remove('tv-arcs-active');
-    renderHealthView();
-}
-
-function exitHealthView() {
-    showingHealth = false;
-    if (panelTabs) panelTabs.style.display = '';
-    panelEl?.querySelector('.tv-health-btn')?.classList.remove('tv-health-active');
-    renderAllItems();
-}
-
-async function renderHealthView() {
-    if (!panelBody) return;
-    panelBody.replaceChildren();
-
-    const container = el('div', 'tv-health-view');
-
-    // Header
-    const headerRow = el('div', 'tv-health-header');
-    const titleEl = el('span', 'tv-health-title');
-    titleEl.appendChild(icon('fa-heart-pulse'));
-    titleEl.append(' Lorebook Health');
-    headerRow.appendChild(titleEl);
-
-    const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
-    backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
-    backBtn.addEventListener('click', exitHealthView);
-    headerRow.appendChild(backBtn);
-    container.appendChild(headerRow);
-
-    // Loading
-    const loadingEl = el('div', 'tv-health-loading');
-    loadingEl.appendChild(el('span', 'tv_loading'));
-    loadingEl.appendChild(el('span', null, 'Analyzing lorebook health...'));
-    container.appendChild(loadingEl);
-    panelBody.appendChild(container);
-
-    try {
-        const activeBooks = getActiveTunnelVisionBooks();
-        if (activeBooks.length === 0) {
-            loadingEl.remove();
-            const emptyEl = el('div', 'tv-float-empty');
-            emptyEl.style.cssText = 'flex: 1;';
-            emptyEl.appendChild(icon('fa-heart-pulse'));
-            emptyEl.appendChild(el('span', null, 'No active lorebooks'));
-            emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Enable a lorebook in TunnelVision settings to see health metrics'));
-            container.appendChild(emptyEl);
-            return;
-        }
-
-        // Merge reports across all active books
-        const mergedReport = {
-            totalEntries: 0, facts: 0, summaries: 0, trackers: 0, disabled: 0,
-            categoryDistribution: [],
-            staleEntries: [], orphanedEntries: [], noTimestamp: [],
-            avgLength: 0, outlierEntries: [], duplicateCandidates: [],
-            growthRate: 0, duplicateDensity: 0, compressionRatio: 1.0,
-            neverReferencedCount: 0, metadataSizes: [],
-        };
-        let totalLength = 0;
-        let totalDupUids = 0, totalForDensity = 0;
-        let compressionSum = 0, compressionCount = 0;
-
-        for (const bookName of activeBooks) {
-            try {
-                const bookData = await getCachedWorldInfo(bookName);
-                if (!bookData?.entries) continue;
-                const report = buildHealthReport(bookName, bookData);
-                mergedReport.totalEntries += report.totalEntries;
-                mergedReport.facts += report.facts;
-                mergedReport.summaries += report.summaries;
-                mergedReport.trackers += report.trackers;
-                mergedReport.disabled += report.disabled;
-                mergedReport.categoryDistribution.push(...report.categoryDistribution);
-                mergedReport.staleEntries.push(...report.staleEntries);
-                mergedReport.orphanedEntries.push(...report.orphanedEntries);
-                mergedReport.noTimestamp.push(...report.noTimestamp);
-                mergedReport.outlierEntries.push(...report.outlierEntries);
-                mergedReport.duplicateCandidates.push(...report.duplicateCandidates);
-                totalLength += report.avgLength * report.totalEntries;
-                mergedReport.neverReferencedCount += report.neverReferencedCount || 0;
-
-                if (report.growthRate > mergedReport.growthRate) mergedReport.growthRate = report.growthRate;
-                if (report.duplicateDensity > 0) {
-                    totalDupUids += report.duplicateDensity * report.totalEntries;
-                    totalForDensity += report.totalEntries;
-                }
-                if (report.compressionRatio !== 1.0) {
-                    compressionSum += report.compressionRatio;
-                    compressionCount++;
-                }
-                if (report.metadataSizes?.length > 0 && mergedReport.metadataSizes.length === 0) {
-                    mergedReport.metadataSizes = report.metadataSizes;
-                }
-            } catch { /* skip unavailable books */ }
-        }
-
-        mergedReport.avgLength = mergedReport.totalEntries > 0 ? Math.round(totalLength / mergedReport.totalEntries) : 0;
-        mergedReport.categoryDistribution.sort((a, b) => b.count - a.count);
-        mergedReport.duplicateCandidates.sort((a, b) => b.similarity - a.similarity);
-        mergedReport.outlierEntries.sort((a, b) => b.length - a.length);
-        if (totalForDensity > 0) mergedReport.duplicateDensity = Math.round((totalDupUids / totalForDensity) * 100) / 100;
-        if (compressionCount > 0) mergedReport.compressionRatio = Math.round((compressionSum / compressionCount) * 100) / 100;
-
-        loadingEl.remove();
-
-        // Build dashboard content
-        const body = el('div', 'tv-health-body');
-
-        // ── Entry type breakdown ──
-        const typeSection = el('div', 'tv-health-section');
-        typeSection.appendChild(el('div', 'tv-health-section-title', 'Entry Breakdown'));
-        const typeGrid = el('div', 'tv-health-type-grid');
-        addHealthStat(typeGrid, 'Total', mergedReport.totalEntries, '#a29bfe');
-        addHealthStat(typeGrid, 'Facts', mergedReport.facts, '#6c5ce7');
-        addHealthStat(typeGrid, 'Summaries', mergedReport.summaries, '#fdcb6e');
-        addHealthStat(typeGrid, 'Trackers', mergedReport.trackers, '#00b894');
-        if (mergedReport.disabled > 0) addHealthStat(typeGrid, 'Disabled', mergedReport.disabled, '#636e72');
-        typeSection.appendChild(typeGrid);
-
-        const avgLine = el('div', 'tv-health-avg');
-        avgLine.textContent = `Average entry length: ${mergedReport.avgLength} chars`;
-        typeSection.appendChild(avgLine);
-        body.appendChild(typeSection);
-
-        // ── Scalability Metrics ──
-        const scaleSection = el('div', 'tv-health-section');
-        scaleSection.appendChild(el('div', 'tv-health-section-title', 'Scalability Metrics'));
-        const scaleGrid = el('div', 'tv-health-type-grid');
-
-        addHealthStat(scaleGrid, 'Growth', `${mergedReport.growthRate}`, '#a29bfe');
-        scaleGrid.lastElementChild.title = `${mergedReport.growthRate} entries per 100 chat turns`;
-        scaleGrid.lastElementChild.querySelector('.tv-health-stat-label').textContent = '/100 turns';
-
-        const dupPctNum = mergedReport.duplicateDensity * 100;
-        const dupPct = dupPctNum.toFixed(0);
-        addHealthStat(scaleGrid, 'Dup Density', `${dupPct}%`, dupPctNum > 15 ? '#e17055' : dupPctNum > 5 ? '#fdcb6e' : '#00b894');
-        scaleGrid.lastElementChild.title = `${dupPct}% of entries share >70% similarity with another entry`;
-
-        const compRatio = mergedReport.compressionRatio;
-        const compLabel = `${(compRatio * 100).toFixed(0)}%`;
-        addHealthStat(scaleGrid, 'Compression', compLabel, compRatio < 0.8 ? '#00b894' : compRatio > 1.2 ? '#e17055' : '#fdcb6e');
-        scaleGrid.lastElementChild.title = `Current avg length is ${compLabel} of original avg length`;
-
-        addHealthStat(scaleGrid, 'Never Ref\'d', String(mergedReport.neverReferencedCount),
-            mergedReport.neverReferencedCount > 20 ? '#e17055' : mergedReport.neverReferencedCount > 5 ? '#fdcb6e' : '#636e72');
-        scaleGrid.lastElementChild.title = `${mergedReport.neverReferencedCount} entries have been injected but never referenced by the AI`;
-
-        scaleSection.appendChild(scaleGrid);
-
-        // Metadata size breakdown
-        if (mergedReport.metadataSizes?.length > 0) {
-            const metaRow = el('div', 'tv-health-meta-sizes');
-            const metaLabel = el('div', 'tv-health-avg');
-            const totalMeta = mergedReport.metadataSizes.reduce((s, m) => s + m.size, 0);
-            metaLabel.textContent = `Metadata: ${(totalMeta / 1024).toFixed(1)} KB total`;
-            metaRow.appendChild(metaLabel);
-
-            const metaColors = ['#e84393', '#6c5ce7', '#00b894', '#fdcb6e', '#0984e3', '#e17055', '#a29bfe'];
-
-            const metaBar = el('div', 'tv-budget-bar');
-            metaBar.style.marginTop = '4px';
-            for (let i = 0; i < mergedReport.metadataSizes.length; i++) {
-                const m = mergedReport.metadataSizes[i];
-                const pct = Math.max((m.size / totalMeta) * 100, 2);
-                const seg = el('div', 'tv-budget-seg');
-                seg.style.width = `${pct}%`;
-                seg.style.background = metaColors[i % metaColors.length];
-                seg.title = `${m.key}: ${(m.size / 1024).toFixed(1)} KB`;
-                metaBar.appendChild(seg);
-            }
-            metaRow.appendChild(metaBar);
-
-            const metaLegend = el('div', 'tv-budget-legend');
-            metaLegend.style.marginTop = '2px';
-            for (let i = 0; i < mergedReport.metadataSizes.length; i++) {
-                const m = mergedReport.metadataSizes[i];
-                const item = el('span', 'tv-budget-legend-item');
-                const dot = el('span', 'tv-budget-legend-dot');
-                dot.style.background = metaColors[i % metaColors.length];
-                item.appendChild(dot);
-                item.appendChild(document.createTextNode(`${m.key} ${(m.size / 1024).toFixed(1)}K`));
-                metaLegend.appendChild(item);
-            }
-            metaRow.appendChild(metaLegend);
-            scaleSection.appendChild(metaRow);
-        }
-
-        body.appendChild(scaleSection);
-
-        // ── Category distribution ──
-        if (mergedReport.categoryDistribution.length > 0) {
-            const catSection = el('div', 'tv-health-section');
-            catSection.appendChild(el('div', 'tv-health-section-title', 'Category Distribution'));
-            const maxCount = mergedReport.categoryDistribution[0]?.count || 1;
-            const catList = el('div', 'tv-health-cat-list');
-            for (const cat of mergedReport.categoryDistribution.slice(0, 12)) {
-                const catRow = el('div', 'tv-health-cat-row');
-                const catLabel = el('span', 'tv-health-cat-label', truncate(cat.label, 25));
-                catRow.appendChild(catLabel);
-                const barWrap = el('div', 'tv-health-cat-bar-wrap');
-                const bar = el('div', 'tv-health-cat-bar');
-                bar.style.width = `${(cat.count / maxCount) * 100}%`;
-                barWrap.appendChild(bar);
-                catRow.appendChild(barWrap);
-                catRow.appendChild(el('span', 'tv-health-cat-count', String(cat.count)));
-                catList.appendChild(catRow);
-            }
-            if (mergedReport.categoryDistribution.length > 12) {
-                catList.appendChild(el('div', 'tv-health-more', `+${mergedReport.categoryDistribution.length - 12} more categories`));
-            }
-            catSection.appendChild(catList);
-            body.appendChild(catSection);
-        }
-
-        // ── Issues ──
-        const issues = [];
-        if (mergedReport.staleEntries.length > 0) {
-            issues.push({
-                title: `${mergedReport.staleEntries.length} Stale Entries`,
-                icon: 'fa-ghost',
-                color: '#e17055',
-                desc: 'Injected 3+ times but never referenced by the AI',
-                items: mergedReport.staleEntries.slice(0, 10),
-            });
-        }
-        if (mergedReport.orphanedEntries.length > 0) {
-            issues.push({
-                title: `${mergedReport.orphanedEntries.length} Orphaned Entries`,
-                icon: 'fa-link-slash',
-                color: '#fdcb6e',
-                desc: 'Not assigned to any tree category',
-                items: mergedReport.orphanedEntries.slice(0, 10),
-            });
-        }
-        if (mergedReport.noTimestamp.length > 0) {
-            issues.push({
-                title: `${mergedReport.noTimestamp.length} Without Timestamps`,
-                icon: 'fa-calendar-xmark',
-                color: '#74b9ff',
-                desc: 'Fact entries missing [Day X] prefix',
-                items: mergedReport.noTimestamp.slice(0, 10),
-            });
-        }
-        if (mergedReport.outlierEntries.length > 0) {
-            issues.push({
-                title: `${mergedReport.outlierEntries.length} Oversized Entries`,
-                icon: 'fa-weight-hanging',
-                color: '#a29bfe',
-                desc: `Significantly longer than average (${mergedReport.avgLength} chars)`,
-                items: mergedReport.outlierEntries.slice(0, 10).map(e => ({
-                    ...e, title: `${e.title} (${e.length} chars)`,
-                })),
-            });
-        }
-        if (mergedReport.duplicateCandidates.length > 0) {
-            issues.push({
-                title: `${mergedReport.duplicateCandidates.length} Duplicate Candidates`,
-                icon: 'fa-clone',
-                color: '#e84393',
-                desc: 'Entries with high content similarity',
-                items: mergedReport.duplicateCandidates.slice(0, 10).map(d => ({
-                    uid: d.uidA,
-                    title: `${truncate(d.titleA, 20)} ↔ ${truncate(d.titleB, 20)} (${(d.similarity * 100).toFixed(0)}%)`,
-                    bookName: d.bookName,
-                })),
-            });
-        }
-
-        if (issues.length === 0) {
-            const healthyEl = el('div', 'tv-health-healthy');
-            healthyEl.appendChild(icon('fa-circle-check'));
-            healthyEl.appendChild(el('span', null, 'Lorebook looks healthy!'));
-            healthyEl.appendChild(el('span', 'tv-float-empty-sub', 'No stale entries, orphans, or duplicates detected'));
-            body.appendChild(healthyEl);
-        } else {
-            for (const issue of issues) {
-                body.appendChild(buildIssueSection(issue));
-            }
-        }
-
-        container.appendChild(body);
-    } catch (err) {
-        loadingEl.remove();
-        container.appendChild(el('div', 'tv-feed-expand-empty', `Health analysis failed: ${err.message}`));
-    }
-}
-
-function addHealthStat(container, label, value, color) {
-    const stat = el('div', 'tv-health-stat');
-    const valEl = el('div', 'tv-health-stat-value');
-    valEl.textContent = String(value);
-    valEl.style.color = color;
-    stat.appendChild(valEl);
-    stat.appendChild(el('div', 'tv-health-stat-label', label));
-    container.appendChild(stat);
-}
-
-function buildIssueSection(issue) {
-    const section = el('div', 'tv-health-issue');
-
-    const header = el('div', 'tv-health-issue-header');
-    const issueIcon = icon(issue.icon);
-    issueIcon.style.color = issue.color;
-    header.appendChild(issueIcon);
-    header.appendChild(el('span', 'tv-health-issue-title', issue.title));
-    section.appendChild(header);
-
-    section.appendChild(el('div', 'tv-health-issue-desc', issue.desc));
-
-    const list = el('div', 'tv-health-issue-list');
-    for (const item of issue.items) {
-        const row = el('div', 'tv-health-issue-item');
-        row.appendChild(el('span', 'tv-health-issue-uid', `#${item.uid}`));
-        row.appendChild(el('span', 'tv-health-issue-name', truncate(item.title, 45)));
-        list.appendChild(row);
-    }
-    const remaining = (issue.items.length < 10) ? 0 : 0;
-    section.appendChild(list);
-
-    section.classList.add('tv-feed-clickable');
-    const listEl = list;
-    listEl.style.display = 'none';
-    section.addEventListener('click', () => {
-        const expanded = section.classList.toggle('expanded');
-        listEl.style.display = expanded ? '' : 'none';
-    });
-
-    return section;
-}
-
-// ── Public API ──
-
-export function clearFeed() {
-    feedItems = [];
+function clearFeed() {
+    setFeedItems([]);
     saveFeed();
+    const triggerEl = getTriggerEl();
     if (triggerEl) triggerEl.setAttribute('data-tv-count', '0');
-    if (panelEl?.classList.contains('open')) renderAllItems();
+    if (getPanelEl()?.classList.contains('open')) renderAllItems();
 }
 
-export function getFeedItems() {
-    return [...feedItems];
+function getFeedItems() {
+    return [...getFeedItemsRaw()];
 }
 
-// ── Entry / Retrieved Entry Helpers ──
-
-function createEntryFeedItem({ source, lorebook = '', uid = null, title = '', keys = [], timestamp }) {
-    return {
-        id: nextId++,
-        type: 'entry',
-        source,
-        icon: 'fa-book-open',
-        verb: source === 'native' ? 'Triggered' : 'Injected',
-        color: source === 'native' ? '#e84393' : '#fdcb6e',
-        lorebook,
-        uid,
-        title,
-        keys,
-        timestamp,
-    };
-}
-
-function shouldIncludeLorebookForEntries() {
-    const lorebooks = new Set(
-        feedItems
-            .filter(item => item.type === 'entry' && typeof item.lorebook === 'string' && item.lorebook.trim())
-            .map(item => item.lorebook.trim()),
-    );
-    return lorebooks.size > 1;
-}
-
-function formatEntrySummary(item, includeLorebook) {
-    const title = truncate(item.title || `UID ${item.uid ?? '?'}`, includeLorebook ? 42 : 52);
-    const uidLabel = item.uid !== null && item.uid !== undefined ? `#${item.uid}` : '#?';
-
-    if (includeLorebook && item.lorebook) {
-        return `${item.lorebook}: ${title} (${uidLabel})`;
-    }
-
-    return `${title} (${uidLabel})`;
-}
-
-function formatRetrievedEntryLabel(entry, includeLorebook) {
-    const title = truncate(entry.title || `UID ${entry.uid ?? '?'}`, includeLorebook ? 42 : 52);
-    const uidLabel = entry.uid !== null && entry.uid !== undefined ? `#${entry.uid}` : '#?';
-
-    return includeLorebook
-        ? `${entry.lorebook}: ${title} (${uidLabel})`
-        : `${title} (${uidLabel})`;
-}
-
-// ── Retrieved Entry Parsing ──
-
-function parseInvocationParameters(parameters) {
-    if (!parameters) return {};
-    if (typeof parameters === 'object') return parameters;
-
-    try {
-        return JSON.parse(parameters);
-    } catch {
-        return {};
-    }
-}
-
-function extractRetrievedEntries(result) {
-    if (!result) return [];
-
-    const text = typeof result === 'string' ? result : JSON.stringify(result);
-    const entries = [];
-    const seen = new Set();
-
-    for (const line of text.split(/\r?\n/)) {
-        const entry = parseRetrievedEntryHeader(line.trim());
-        if (!entry) continue;
-
-        const key = `${entry.lorebook}:${entry.uid ?? '?'}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        entries.push(entry);
-    }
-
-    return entries;
-}
-
-export function parseRetrievedEntryHeader(line) {
-    if (!line.startsWith('[Lorebook: ') || !line.endsWith(']')) {
-        return null;
-    }
-
-    const body = line.slice(1, -1);
-    const parts = body.split(' | ');
-    if (parts.length < 3) {
-        return null;
-    }
-
-    const lorebook = parts[0].replace(/^Lorebook:\s*/, '').trim();
-    const uidRaw = parts[1].replace(/^UID:\s*/, '').trim();
-    const title = parts.slice(2).join(' | ').replace(/^Title:\s*/, '').trim();
-    const uid = parseInt(uidRaw, 10);
-
-    return {
-        lorebook,
-        uid: Number.isFinite(uid) ? uid : null,
-        title,
-    };
-}
-
-// ── Tool Summary Builder ──
-
-export function buildToolSummary(toolName, params, result, retrievedEntries = []) {
-    switch (toolName) {
-        case 'TunnelVision_Search': {
-            const action = params.action || 'retrieve';
-            const nodeIds = Array.isArray(params.node_ids) ? params.node_ids : (params.node_id ? [params.node_id] : []);
-            if (action === 'navigate') {
-                return nodeIds.length > 0 ? `navigate ${nodeIds[0]}` : 'navigate tree';
-            }
-            if (retrievedEntries.length > 0) {
-                if (retrievedEntries.length === 1) {
-                    const entry = retrievedEntries[0];
-                    return `retrieved "${truncate(entry.title || `UID ${entry.uid ?? '?'}`, 42)}"`;
-                }
-                const lorebooks = new Set(retrievedEntries.map(entry => entry.lorebook).filter(Boolean));
-                if (lorebooks.size === 1) {
-                    return `retrieved ${retrievedEntries.length} entries from ${Array.from(lorebooks)[0]}`;
-                }
-                return `retrieved ${retrievedEntries.length} entries from ${lorebooks.size} lorebooks`;
-            }
-            if (typeof result === 'string' && result.startsWith('Node(s) not found:')) {
-                return truncate(result, 60);
-            }
-            return nodeIds.length > 0 ? `retrieve ${nodeIds.join(', ')}` : 'search tree';
-        }
-        case 'TunnelVision_Remember': {
-            const title = params.title || '';
-            return title ? `"${truncate(title, 50)}"` : 'new entry';
-        }
-        case 'TunnelVision_Update': {
-            const uid = params.uid ?? '';
-            const title = params.title || '';
-            if (title) return `UID ${uid || '?'} -> "${truncate(title, 40)}"`;
-            return uid ? `UID ${uid}` : 'existing entry';
-        }
-        case 'TunnelVision_Forget': {
-            const uid = params.uid ?? '';
-            const reason = params.reason || '';
-            if (uid && reason) return `UID ${uid} (${truncate(reason, 30)})`;
-            return uid ? `UID ${uid}` : 'an entry';
-        }
-        case 'TunnelVision_Reorganize':
-            switch (params.action) {
-                case 'move':
-                    return `UID ${params.uid ?? '?'} -> ${params.target_node_id || '?'}`;
-                case 'create_category':
-                    return params.label ? `create "${truncate(params.label, 40)}"` : 'create category';
-                case 'list_entries':
-                    return params.node_id ? `list ${params.node_id}` : 'list entries';
-                default:
-                    return params.action || 'tree structure';
-            }
-        case 'TunnelVision_Summarize': {
-            const title = params.title || '';
-            return title ? `"${truncate(title, 50)}"` : 'scene summary';
-        }
-        case 'TunnelVision_MergeSplit': {
-            const action = params.action || '';
-            if (action === 'merge') {
-                return `merge ${params.keep_uid ?? '?'} + ${params.remove_uid ?? '?'}`;
-            }
-            if (action === 'split') {
-                return `split ${params.uid ?? '?'}`;
-            }
-            return 'entries';
-        }
-        case 'TunnelVision_Notebook': {
-            const action = params.action || 'write';
-            const title = params.title || '';
-            return title ? `${action}: "${truncate(title, 40)}"` : action;
-        }
-        case 'BlackBox_Pick': {
-            const dir = params.director || '?';
-            const mood = params.mood || '?';
-            return `${dir} × ${mood}`;
-        }
-        default:
-            return '';
-    }
-}
-
-// ── Diff Computation ──────────────────────────────────────────
-
-/**
- * Compute a simple line-level diff between two texts.
- * Returns an array of { type: 'same'|'add'|'remove', text } objects.
- */
-export function computeLineDiff(oldText, newText) {
-    const oldLines = (oldText || '').split('\n');
-    const newLines = (newText || '').split('\n');
-    const result = [];
-
-    // Greedy alignment: match lines exactly, with bounded lookahead
-    let oi = 0, ni = 0;
-    while (oi < oldLines.length && ni < newLines.length) {
-        if (oldLines[oi] === newLines[ni]) {
-            result.push({ type: 'same', text: oldLines[oi] });
-            oi++;
-            ni++;
-        } else {
-            // Look ahead in new for current old line
-            let foundInNew = -1;
-            for (let j = ni + 1; j < Math.min(ni + 5, newLines.length); j++) {
-                if (newLines[j] === oldLines[oi]) { foundInNew = j; break; }
-            }
-            // Look ahead in old for current new line
-            let foundInOld = -1;
-            for (let j = oi + 1; j < Math.min(oi + 5, oldLines.length); j++) {
-                if (oldLines[j] === newLines[ni]) { foundInOld = j; break; }
-            }
-
-            if (foundInNew >= 0 && (foundInOld < 0 || (foundInNew - ni) <= (foundInOld - oi))) {
-                while (ni < foundInNew) {
-                    result.push({ type: 'add', text: newLines[ni] });
-                    ni++;
-                }
-            } else if (foundInOld >= 0) {
-                while (oi < foundInOld) {
-                    result.push({ type: 'remove', text: oldLines[oi] });
-                    oi++;
-                }
-            } else {
-                result.push({ type: 'remove', text: oldLines[oi] });
-                result.push({ type: 'add', text: newLines[ni] });
-                oi++;
-                ni++;
-            }
-        }
-    }
-    while (oi < oldLines.length) {
-        result.push({ type: 'remove', text: oldLines[oi++] });
-    }
-    while (ni < newLines.length) {
-        result.push({ type: 'add', text: newLines[ni++] });
-    }
-
-    return result;
-}
-
-/**
- * Build a color-coded diff view element from two texts.
- */
-function buildDiffView(oldText, newText) {
-    const diff = computeLineDiff(oldText, newText);
-    const container = el('div', 'tv-diff-view');
-
-    for (const line of diff) {
-        const lineEl = el('div', `tv-diff-line tv-diff-${line.type}`);
-        const prefix = line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' ';
-        lineEl.textContent = `${prefix} ${line.text}`;
-        container.appendChild(lineEl);
-    }
-
-    return container;
-}
-
-// ── Version History Panel ──────────────────────────────────────
-
-function buildVersionHistoryPanel(versions, currentContent) {
-    const panel = el('div', 'tv-version-history');
-    const header = el('div', 'tv-version-history-header');
-    header.appendChild(icon('fa-clock-rotate-left'));
-    header.append(` Version History (${versions.length})`);
-    panel.appendChild(header);
-
-    // Show newest first
-    const reversed = [...versions].reverse();
-    for (let i = 0; i < reversed.length; i++) {
-        const ver = reversed[i];
-        const item = el('div', 'tv-version-history-item');
-
-        const meta = el('div', 'tv-version-history-meta');
-        const sourceBadge = el('span', 'tv-version-history-source', ver.source || 'unknown');
-        meta.appendChild(sourceBadge);
-        const time = new Date(ver.timestamp);
-        meta.appendChild(el('span', 'tv-version-history-time', time.toLocaleString([], {
-            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-        })));
-        item.appendChild(meta);
-
-        if (ver.previousTitle) {
-            const titleRow = el('div', 'tv-version-history-title');
-            titleRow.appendChild(el('span', 'tv-version-history-label', 'Title: '));
-            titleRow.appendChild(el('span', null, ver.previousTitle));
-            item.appendChild(titleRow);
-        }
-
-        if (ver.previousContent) {
-            // Determine what this version was changed TO:
-            // For the most recent version (i=0), it changed to the current content.
-            // For older versions, it changed to the next version's previousContent.
-            const changedTo = i === 0
-                ? (currentContent || null)
-                : (reversed[i - 1]?.previousContent || null);
-
-            if (changedTo) {
-                // Show diff toggle
-                const diffToggle = el('button', 'tv-btn tv-btn-xs tv-btn-secondary tv-diff-toggle');
-                diffToggle.appendChild(icon('fa-code-compare'));
-                diffToggle.append(' Show diff');
-                diffToggle.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    const existing = item.querySelector('.tv-diff-view');
-                    const existingRaw = item.querySelector('.tv-version-history-content');
-                    if (existing) {
-                        existing.remove();
-                        diffToggle.replaceChildren(icon('fa-code-compare'));
-                        diffToggle.append(' Show diff');
-                        if (existingRaw) existingRaw.style.display = '';
-                    } else {
-                        if (existingRaw) existingRaw.style.display = 'none';
-                        diffToggle.replaceChildren(icon('fa-code'));
-                        diffToggle.append(' Show raw');
-                        item.appendChild(buildDiffView(ver.previousContent, changedTo));
-                    }
-                });
-                item.appendChild(diffToggle);
-            }
-
-            const contentDiv = el('div', 'tv-version-history-content');
-            contentDiv.textContent = ver.previousContent;
-            item.appendChild(contentDiv);
-        }
-
-        panel.appendChild(item);
-    }
-
-    return panel;
-}
-
-function truncate(str, max) {
-    if (!str) return '';
-    return str.length > max ? str.substring(0, max) + '...' : str;
-}
-
-function formatTime(ts) {
-    const d = new Date(ts);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
+// ── Turn summary ────────────────────────────────────────────────
 
 /**
  * Print a concise console summary of all TV tool calls made this turn.
  * Fires on MESSAGE_RECEIVED (after all tool recursion completes).
  */
 function printTurnSummary() {
+    const turnToolCalls = getTurnToolCalls();
     if (turnToolCalls.length === 0) return;
-    const lines = turnToolCalls.map((tc, i) => `  ${i + 1}. ${tc.verb} ${tc.summary}`);
+    const lines = turnToolCalls.map((tc, i) => `${i + 1}. ${tc.verb} ${tc.summary}`);
     console.log(`[TunnelVision] Turn summary (${turnToolCalls.length} tool calls):\n${lines.join('\n')}`);
-    turnToolCalls = [];
+    setTurnToolCalls([]);
+}
+
+// ── Initialization ──────────────────────────────────────────────
+
+/**
+ * Initialize the activity feed — create floating widget and bind events.
+ * Called once from index.js init.
+ */
+function initActivityFeed() {
+    if (getFeedInitialized()) return;
+    setFeedInitialized(true);
+
+    loadFeed();
+    createTriggerButton();
+    createPanel();
+
+    // Wire up the view sub-module so it can call back to renderAllItems
+    registerViewCallbacks({ renderAllItems });
+
+    _registerFeedCallbacks({
+        addFeedItems,
+        setTriggerActive: (active) => {
+            const triggerEl = getTriggerEl();
+            if (!triggerEl) return;
+            triggerEl.classList.toggle('tv-bg-active', active);
+        },
+        refreshTasksUI: refreshActiveTasksInPanel,
+        getFeedItems: () => getFeedItemsRaw(),
+    });
+
+    // Listen for WI activations (primary — shows what entries triggered)
+    if (event_types.WORLD_INFO_ACTIVATED) {
+        eventSource.on(event_types.WORLD_INFO_ACTIVATED, onWorldInfoActivated);
+    }
+
+    // Listen for TV tool calls (secondary)
+    if (event_types.TOOL_CALLS_PERFORMED) {
+        eventSource.on(event_types.TOOL_CALLS_PERFORMED, onToolCallsPerformed);
+    }
+
+    // Listen for tool call rendering to apply visual hiding
+    if (event_types.TOOL_CALLS_RENDERED) {
+        eventSource.on(event_types.TOOL_CALLS_RENDERED, onToolCallsRendered);
+    }
+
+    // Reload feed from chat metadata on chat switch
+    if (event_types.CHAT_CHANGED) {
+        eventSource.on(event_types.CHAT_CHANGED, () => {
+            loadFeed();
+            setShowingWorldState(false);
+            setShowingTimeline(false);
+            setShowingArcs(false);
+            setShowingHealth(false);
+            const panelTabs = getPanelTabs();
+            if (panelTabs) panelTabs.style.display = '';if (getPanelEl()?.classList.contains('open')) renderAllItems();
+            queueHiddenToolCallRefresh(false);
+        });
+    }
+
+    // Reset turn accumulator each generation
+    if (event_types.GENERATION_STARTED) {
+        eventSource.on(event_types.GENERATION_STARTED, () => {
+            setTurnToolCalls([]);});
+    }
+    if (event_types.MESSAGE_RECEIVED) {
+        eventSource.on(event_types.MESSAGE_RECEIVED, printTurnSummary);
+    }
+
+    queueHiddenToolCallRefresh(false);
 }

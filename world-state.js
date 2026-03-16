@@ -14,6 +14,7 @@
  */
 
 import { eventSource, event_types, generateQuietPrompt } from '../../../../script.js';
+import { MAX_EXCERPT_CHARS } from './constants.js';
 import { getContext } from '../../../st-context.js';
 import { getSettings, isSummaryTitle, isTrackerTitle } from './tree-store.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
@@ -23,7 +24,6 @@ import { addBackgroundEvent, registerBackgroundTask } from './background-events.
 import { buildArcsSummary } from './arc-tracker.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
-const MAX_EXCERPT_CHARS = 20_000;
 
 /** Default injection header wrapping the world state text in the AI's context. */
 export const DEFAULT_WS_INJECTION_PROMPT = [

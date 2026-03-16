@@ -30,14 +30,35 @@
  *   - Embedding similarity (5B): cached embeddings with cosine matching
  */
 
-import { eventSource, event_types } from '../../../../script.js';
-import { getContext } from '../../../st-context.js';
-import { getSettings, getTrackerUids, getTree } from './tree-store.js';
-import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { getCachedWorldInfoSync, getCachedWorldInfo } from './entry-manager.js';
-import { getEntryTitle, getMaxContextTokens } from './agent-utils.js';
-import { getWorldStateSections } from './world-state.js';
-import { getActiveArcs } from './arc-tracker.js';
+import { eventSource, event_types } from "../../../../script.js";
+import { getContext } from "../../../st-context.js";
+import { getSettings, getTrackerUids, getTree } from "./tree-store.js";
+import { getActiveTunnelVisionBooks } from "./tool-registry.js";
+import { getCachedWorldInfoSync, getCachedWorldInfo } from "./entry-manager.js";
+import { getEntryTitle, getMaxContextTokens } from "./agent-utils.js";
+import { getWorldStateSections } from "./world-state.js";
+import { getActiveArcs } from "./arc-tracker.js";
+import {
+  shuffleArray,
+  isActSummaryEntry,
+  isStorySummaryEntry,
+  isSummaryEntry,
+  isTrackerEntry,
+} from "./shared-utils.js";
+import {
+  HOT_RECENCY_MS,
+  WARM_RECENCY_MS,
+  COOLDOWN_WINDOW_TURNS as COOLDOWN_WINDOW,
+  COOLDOWN_PENALTY_PER_TURN,
+  STALE_INJECTION_THRESHOLD,
+  STALE_INJECTION_PENALTY,
+  DYNAMIC_BUDGET_MAX_RATIO,
+  DYNAMIC_BUDGET_MIN_RATIO,
+  HIGH_CONFIDENCE_SCORE_THRESHOLD,
+  HIGH_CONFIDENCE_CAP,
+  LOW_CONFIDENCE_BUDGET_MULTIPLIER,
+  PHASE_BUDGET_MULTIPLIERS,
+} from "./constants.js";
 
 // ── Summary Hierarchy (5A) lazy accessor ─────────────────────────
 
@@ -47,7 +68,8 @@ let _getRolledUpSceneUids = () => new Set();
  * Initialize hierarchy references. Called once after module load to avoid circular imports.
  */
 export function initHierarchyRefs(refs) {
-    if (refs.getRolledUpSceneUids) _getRolledUpSceneUids = refs.getRolledUpSceneUids;
+  if (refs.getRolledUpSceneUids)
+    _getRolledUpSceneUids = refs.getRolledUpSceneUids;
 }
 
 // ── Pre-Warming Cache ────────────────────────────────────────────
@@ -58,24 +80,24 @@ let _preWarmedCandidates = null;
 let _preWarmCacheKey = null;
 
 function buildPreWarmCacheKey() {
-    try {
-        const chatLen = getContext().chat?.length || 0;
-        const books = getActiveTunnelVisionBooks().sort().join(',');
-        return `${chatLen}:${books}`;
-    } catch {
-        return null;
-    }
+  try {
+    const chatLen = getContext().chat?.length || 0;
+    const books = getActiveTunnelVisionBooks().sort().join(",");
+    return `${chatLen}:${books}`;
+  } catch {
+    return null;
+  }
 }
 
 /** Invalidate the pre-warming cache when entries change or books are modified. */
 export function invalidatePreWarmCache() {
-    _preWarmedCandidates = null;
-    _preWarmCacheKey = null;
-    _derivedKeyCache.clear();
+  _preWarmedCandidates = null;
+  _preWarmCacheKey = null;
+  _derivedKeyCache.clear();
 }
 
-const RELEVANCE_KEY = 'tunnelvision_relevance';
-const FEEDBACK_KEY = 'tunnelvision_feedback';
+const RELEVANCE_KEY = "tunnelvision_relevance";
+const FEEDBACK_KEY = "tunnelvision_feedback";
 
 /** Entries injected during the most recent GENERATION_STARTED. */
 let _lastInjectedEntries = [];
@@ -86,7 +108,8 @@ let _scInitialized = false;
 /** Transient cache: entry UID → derived alias keys. Cleared on invalidatePreWarmCache. */
 const _derivedKeyCache = new Map();
 
-const ROLE_DESCRIPTOR_RE = /\b(?:a|an|the)\s+([\w\s-]{3,30}?)(?:\s+(?:who|that|of|from|in|at|with|,|\.|\)|$))/gi;
+const ROLE_DESCRIPTOR_RE =
+  /\b(?:a|an|the)\s+([\w\s-]{3,30}?)(?:\s+(?:who|that|of|from|in|at|with|,|\.|\)|$))/gi;
 const PROPER_NOUN_PHRASE_RE = /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/g;
 
 /**
@@ -96,61 +119,59 @@ const PROPER_NOUN_PHRASE_RE = /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/g;
  * @returns {string[]} Lowercase alias keys
  */
 function deriveAliasKeys(entry) {
-    const cached = _derivedKeyCache.get(entry.uid);
-    if (cached !== undefined) return cached;
+  const cached = _derivedKeyCache.get(entry.uid);
+  if (cached !== undefined) return cached;
 
-    const content = (entry.content || '').trim();
-    if (!content) {
-        _derivedKeyCache.set(entry.uid, []);
-        return [];
+  const content = (entry.content || "").trim();
+  if (!content) {
+    _derivedKeyCache.set(entry.uid, []);
+    return [];
+  }
+
+  const firstSentenceMatch = content.match(/^[^.!?\n]+[.!?]?/);
+  if (!firstSentenceMatch) {
+    _derivedKeyCache.set(entry.uid, []);
+    return [];
+  }
+
+  const origFirstSentence = firstSentenceMatch[0];
+  const lowerFirstSentence = origFirstSentence.toLowerCase();
+  const aliases = [];
+
+  ROLE_DESCRIPTOR_RE.lastIndex = 0;
+  let m;
+  while ((m = ROLE_DESCRIPTOR_RE.exec(lowerFirstSentence)) !== null) {
+    const role = m[1].trim();
+    if (role.length >= 3 && role.split(/\s+/).length <= 4) {
+      aliases.push(role);
     }
+  }
 
-    const firstSentenceMatch = content.match(/^[^.!?\n]+[.!?]?/);
-    if (!firstSentenceMatch) {
-        _derivedKeyCache.set(entry.uid, []);
-        return [];
+  PROPER_NOUN_PHRASE_RE.lastIndex = 0;
+  while ((m = PROPER_NOUN_PHRASE_RE.exec(origFirstSentence)) !== null) {
+    const name = m[1].trim().toLowerCase();
+    if (name.length >= 3) aliases.push(name);
+  }
+
+  const words = origFirstSentence.split(/\s+/);
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i].replace(/[^a-zA-Z]/g, "");
+    if (word.length >= 3 && /^[A-Z][a-z]+$/.test(word)) {
+      aliases.push(word.toLowerCase());
     }
+  }
 
-    const origFirstSentence = firstSentenceMatch[0];
-    const lowerFirstSentence = origFirstSentence.toLowerCase();
-    const aliases = [];
-
-    ROLE_DESCRIPTOR_RE.lastIndex = 0;
-    let m;
-    while ((m = ROLE_DESCRIPTOR_RE.exec(lowerFirstSentence)) !== null) {
-        const role = m[1].trim();
-        if (role.length >= 3 && role.split(/\s+/).length <= 4) {
-            aliases.push(role);
-        }
-    }
-
-    PROPER_NOUN_PHRASE_RE.lastIndex = 0;
-    while ((m = PROPER_NOUN_PHRASE_RE.exec(origFirstSentence)) !== null) {
-        const name = m[1].trim().toLowerCase();
-        if (name.length >= 3) aliases.push(name);
-    }
-
-    const words = origFirstSentence.split(/\s+/);
-    for (let i = 1; i < words.length; i++) {
-        const word = words[i].replace(/[^a-zA-Z]/g, '');
-        if (word.length >= 3 && /^[A-Z][a-z]+$/.test(word)) {
-            aliases.push(word.toLowerCase());
-        }
-    }
-
-    const uniqueAliases = [...new Set(aliases)];
-    _derivedKeyCache.set(entry.uid, uniqueAliases);
-    return uniqueAliases;
+  const uniqueAliases = [...new Set(aliases)];
+  _derivedKeyCache.set(entry.uid, uniqueAliases);
+  return uniqueAliases;
 }
 
 // ── Tiered Memory Architecture (3A) ──────────────────────────────
 
-export const TIER_HOT = 'hot';
-export const TIER_WARM = 'warm';
-export const TIER_COLD = 'cold';
+export const TIER_HOT = "hot";
+export const TIER_WARM = "warm";
+export const TIER_COLD = "cold";
 
-const HOT_RECENCY_MS = 2 * 60 * 60 * 1000;
-const WARM_RECENCY_MS = 12 * 60 * 60 * 1000;
 
 /**
  * Classify an entry into a memory tier based on its role, recency, and engagement.
@@ -170,71 +191,89 @@ const WARM_RECENCY_MS = 12 * 60 * 60 * 1000;
  * @param {number} [opts.arcOverlap] - Non-zero if entry overlaps an active arc
  * @returns {'hot'|'warm'|'cold'}
  */
-export function computeEntryTier(entry, { isTracker, isSummary, feedbackMap, relevanceMap, chatLength, maxUid, arcOverlap = 0 }) {
-    if (isTracker) return TIER_HOT;
+export function computeEntryTier(
+  entry,
+  {
+    isTracker,
+    isSummary,
+    feedbackMap,
+    relevanceMap,
+    chatLength,
+    maxUid,
+    arcOverlap = 0,
+  },
+) {
+  if (isTracker) return TIER_HOT;
 
-    // 5A: Story summary is always hot; act summaries are warm
-    const lc = (entry.comment || '').toLowerCase();
-    if (lc.startsWith('[story summary]')) return TIER_HOT;
-    if (lc.startsWith('[act summary]')) return TIER_WARM;
+  // 5A: Story summary is always hot; act summaries are warm
+  if (isStorySummaryEntry(entry)) return TIER_HOT;
+  if (isActSummaryEntry(entry)) return TIER_WARM;
 
-    const fb = feedbackMap?.[entry.uid];
-    const lastRef = fb?.lastReferenced || 0;
-    const lastSeen = relevanceMap?.[entry.uid] || 0;
-    const mostRecent = Math.max(lastRef, lastSeen);
-    const elapsed = mostRecent > 0 ? Date.now() - mostRecent : Infinity;
+  const fb = feedbackMap?.[entry.uid];
+  const lastRef = fb?.lastReferenced || 0;
+  const lastSeen = relevanceMap?.[entry.uid] || 0;
+  const mostRecent = Math.max(lastRef, lastSeen);
+  const elapsed = mostRecent > 0 ? Date.now() - mostRecent : Infinity;
 
-    if (elapsed < HOT_RECENCY_MS) return TIER_HOT;
-    if (arcOverlap > 0 && elapsed < WARM_RECENCY_MS) return TIER_HOT;
+  if (elapsed < HOT_RECENCY_MS) return TIER_HOT;
+  if (arcOverlap > 0 && elapsed < WARM_RECENCY_MS) return TIER_HOT;
 
-    const uidRatio = maxUid > 0 ? entry.uid / maxUid : 1;
-    const warmUidThreshold = chatLength > 0
-        ? Math.max(1 - (100 / chatLength), 0.5)
-        : 0.8;
+  const uidRatio = maxUid > 0 ? entry.uid / maxUid : 1;
+  const warmUidThreshold =
+    chatLength > 0 ? Math.max(1 - 100 / chatLength, 0.5) : 0.8;
 
-    if (uidRatio > warmUidThreshold) return TIER_WARM;
-    if (elapsed < WARM_RECENCY_MS) return TIER_WARM;
-    if (fb && fb.references > 0 && fb.injections > 0 && fb.references / fb.injections > 0.3) return TIER_WARM;
+  if (uidRatio > warmUidThreshold) return TIER_WARM;
+  if (elapsed < WARM_RECENCY_MS) return TIER_WARM;
+  if (
+    fb &&
+    fb.references > 0 &&
+    fb.injections > 0 &&
+    fb.references / fb.injections > 0.3
+  )
+    return TIER_WARM;
 
-    return TIER_COLD;
+  return TIER_COLD;
 }
 
 const TIER_SCORE_ADJUST = {
-    [TIER_HOT]: { thresholdOverride: 1, bonus: 3 },
-    [TIER_WARM]: { thresholdOverride: null, bonus: 0 },
-    [TIER_COLD]: { thresholdOverride: null, bonus: -5 },
+  [TIER_HOT]: { thresholdOverride: 1, bonus: 3 },
+  [TIER_WARM]: { thresholdOverride: null, bonus: 0 },
+  [TIER_COLD]: { thresholdOverride: null, bonus: -5 },
 };
 
 // ── Injection Cooldown (1B) ──────────────────────────────────────
 
-const COOLDOWN_WINDOW = 3;
-const COOLDOWN_PENALTY_PER_TURN = -5;
 /** @type {Set<number>[]} Ring buffer of UID sets from last N turns' injections. */
 const _recentInjections = [];
 
 function cooldownPenalty(uid) {
-    let penalty = 0;
-    for (const turnSet of _recentInjections) {
-        if (turnSet.has(uid)) penalty += COOLDOWN_PENALTY_PER_TURN;
-    }
-    return penalty;
+  let penalty = 0;
+  for (const turnSet of _recentInjections) {
+    if (turnSet.has(uid)) penalty += COOLDOWN_PENALTY_PER_TURN;
+  }
+  return penalty;
 }
 
 function recordInjections(uids) {
-    _recentInjections.push(new Set(uids));
-    while (_recentInjections.length > COOLDOWN_WINDOW) {
-        _recentInjections.shift();
-    }
+  _recentInjections.push(new Set(uids));
+  while (_recentInjections.length > COOLDOWN_WINDOW) {
+    _recentInjections.shift();
+  }
 }
 
 // ── Conversation Phase Detection (2A) ────────────────────────────
 
 const PHASE_PATTERNS = {
-    combat: /\b(attack|strike|slash|defend|dodge|block|wound|bleed|fight|battle|sword|spell|cast|charge|arrow|shield|kill|weapon|dagger|punch|kick)\b/gi,
-    dialogue: /\b(said|asked|replied|whispered|shouted|explained|told|spoke|talked|murmured|stammered|declared|suggested|argued|agreed)\b/gi,
-    exploration: /\b(explore|discover|travel|journey|arrive|enter|examine|inspect|investigate|search|find|open|door|cave|forest|mountain|path|road|village|city)\b/gi,
-    downtime: /\b(rest|sleep|eat|drink|cook|read|study|practice|train|meditate|relax|bathe|dress|prepare|morning|evening|bed|home|routine)\b/gi,
-    emotional: /\b(cry|tears|sob|laugh|embrace|hug|kiss|love|hate|grieve|mourn|comfort|console|confess|fear|angry|rage|despair|joy|happy)\b/gi,
+  combat:
+    /\b(attack|strike|slash|defend|dodge|block|wound|bleed|fight|battle|sword|spell|cast|charge|arrow|shield|kill|weapon|dagger|punch|kick)\b/gi,
+  dialogue:
+    /\b(said|asked|replied|whispered|shouted|explained|told|spoke|talked|murmured|stammered|declared|suggested|argued|agreed)\b/gi,
+  exploration:
+    /\b(explore|discover|travel|journey|arrive|enter|examine|inspect|investigate|search|find|open|door|cave|forest|mountain|path|road|village|city)\b/gi,
+  downtime:
+    /\b(rest|sleep|eat|drink|cook|read|study|practice|train|meditate|relax|bathe|dress|prepare|morning|evening|bed|home|routine)\b/gi,
+  emotional:
+    /\b(cry|tears|sob|laugh|embrace|hug|kiss|love|hate|grieve|mourn|comfort|console|confess|fear|angry|rage|despair|joy|happy)\b/gi,
 };
 
 /**
@@ -243,17 +282,17 @@ const PHASE_PATTERNS = {
  * @returns {'combat'|'dialogue'|'exploration'|'downtime'|'emotional'}
  */
 function detectConversationPhase(recentText) {
-    let best = 'dialogue';
-    let bestCount = 0;
-    for (const [phase, pattern] of Object.entries(PHASE_PATTERNS)) {
-        pattern.lastIndex = 0;
-        const matches = (recentText.match(pattern) || []).length;
-        if (matches > bestCount) {
-            bestCount = matches;
-            best = phase;
-        }
+  let best = "dialogue";
+  let bestCount = 0;
+  for (const [phase, pattern] of Object.entries(PHASE_PATTERNS)) {
+    pattern.lastIndex = 0;
+    const matches = (recentText.match(pattern) || []).length;
+    if (matches > bestCount) {
+      bestCount = matches;
+      best = phase;
     }
-    return best;
+  }
+  return best;
 }
 
 /**
@@ -263,25 +302,49 @@ function detectConversationPhase(recentText) {
  * @returns {number}
  */
 function phaseBoost(entry, phase) {
-    const weights = {
-        combat:      { location: 3, ability: 4, relationship: 0, lore: 1 },
-        dialogue:    { location: 0, ability: 0, relationship: 4, lore: 2 },
-        exploration: { location: 5, ability: 1, relationship: 0, lore: 3 },
-        downtime:    { location: 1, ability: 0, relationship: 3, lore: 1 },
-        emotional:   { location: 0, ability: 0, relationship: 5, lore: 1 },
-    };
-    const w = weights[phase];
-    if (!w) return 0;
+  const weights = {
+    combat: { location: 3, ability: 4, relationship: 0, lore: 1 },
+    dialogue: { location: 0, ability: 0, relationship: 4, lore: 2 },
+    exploration: { location: 5, ability: 1, relationship: 0, lore: 3 },
+    downtime: { location: 1, ability: 0, relationship: 3, lore: 1 },
+    emotional: { location: 0, ability: 0, relationship: 5, lore: 1 },
+  };
+  const w = weights[phase];
+  if (!w) return 0;
 
-    const text = ((entry.comment || '') + ' ' + (entry.content || '').substring(0, 300)).toLowerCase();
-    let boost = 0;
+  const text = (
+    (entry.comment || "") +
+    " " +
+    (entry.content || "").substring(0, 300)
+  ).toLowerCase();
+  let boost = 0;
 
-    if (/\b(location|place|city|town|forest|building|room|castle|tavern|map|region|territory)\b/.test(text)) boost += w.location;
-    if (/\b(ability|spell|skill|power|weapon|technique|magic|combat|strength|attack)\b/.test(text)) boost += w.ability;
-    if (/\b(relationship|friend|enemy|ally|lover|family|marriage|trust|bond|companion)\b/.test(text)) boost += w.relationship;
-    if (/\b(history|legend|prophecy|tradition|custom|law|rule|origin|ancient|lore)\b/.test(text)) boost += w.lore;
+  if (
+    /\b(location|place|city|town|forest|building|room|castle|tavern|map|region|territory)\b/.test(
+      text,
+    )
+  )
+    boost += w.location;
+  if (
+    /\b(ability|spell|skill|power|weapon|technique|magic|combat|strength|attack)\b/.test(
+      text,
+    )
+  )
+    boost += w.ability;
+  if (
+    /\b(relationship|friend|enemy|ally|lover|family|marriage|trust|bond|companion)\b/.test(
+      text,
+    )
+  )
+    boost += w.relationship;
+  if (
+    /\b(history|legend|prophecy|tradition|custom|law|rule|origin|ancient|lore)\b/.test(
+      text,
+    )
+  )
+    boost += w.lore;
 
-    return boost;
+  return boost;
 }
 
 // ── Tree Proximity Scoring (2B) ──────────────────────────────────
@@ -299,70 +362,85 @@ const TREE_PROXIMITY_SAMPLE_SIZE = 50;
  * @returns {Map<number, number>} UID → bonus score
  */
 function computeTreeProximityBoosts(candidates, activeBooks) {
-    const boostMap = new Map();
+  const boostMap = new Map();
 
-    for (const bookName of activeBooks) {
-        const tree = getTree(bookName);
-        if (!tree?.root) continue;
+  for (const bookName of activeBooks) {
+    const tree = getTree(bookName);
+    if (!tree?.root) continue;
 
-        const uidNodeMap = new Map();
-        const nodeParentMap = new Map();
-        (function walk(node, parent) {
-            for (const uid of (node.entryUids || [])) {
-                uidNodeMap.set(uid, node.id);
-            }
-            if (parent) nodeParentMap.set(node.id, parent.id);
-            for (const child of (node.children || [])) walk(child, node);
-        })(tree.root, null);
+    const uidNodeMap = new Map();
+    const nodeParentMap = new Map();
+    (function walk(node, parent) {
+      for (const uid of node.entryUids || []) {
+        uidNodeMap.set(uid, node.id);
+      }
+      if (parent) nodeParentMap.set(node.id, parent.id);
+      for (const child of node.children || []) walk(child, node);
+    })(tree.root, null);
 
-        const bookCandidates = candidates.filter(c => c.bookName === bookName);
+    const bookCandidates = candidates.filter((c) => c.bookName === bookName);
 
-        // Cap high scorers to top-K by score
-        const highScorers = bookCandidates
-            .filter(c => c.score >= 10)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, TREE_PROXIMITY_TOP_K);
+    // Cap high scorers to top-K by score
+    const highScorers = bookCandidates
+      .filter((c) => c.score >= 10)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, TREE_PROXIMITY_TOP_K);
 
-        if (highScorers.length === 0) continue;
+    if (highScorers.length === 0) continue;
 
-        // Sample candidates if too many, to keep cost bounded
-        let targetCandidates = bookCandidates;
-        if (bookCandidates.length > TREE_PROXIMITY_SAMPLE_SIZE) {
-            const highScorerUids = new Set(highScorers.map(h => h.entry.uid));
-            const rest = bookCandidates.filter(c => !highScorerUids.has(c.entry.uid));
-            for (let i = rest.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [rest[i], rest[j]] = [rest[j], rest[i]];
-            }
-            targetCandidates = [...highScorers, ...rest.slice(0, TREE_PROXIMITY_SAMPLE_SIZE - highScorers.length)];
-        }
-
-        for (const hs of highScorers) {
-            const nodeId = uidNodeMap.get(hs.entry.uid);
-            if (!nodeId) continue;
-            const parentId = nodeParentMap.get(nodeId);
-
-            for (const c of targetCandidates) {
-                if (c.entry.uid === hs.entry.uid) continue;
-                const cNodeId = uidNodeMap.get(c.entry.uid);
-                if (!cNodeId) continue;
-
-                if (cNodeId === nodeId) {
-                    boostMap.set(c.entry.uid, Math.max(boostMap.get(c.entry.uid) || 0, 4));
-                } else if (parentId && nodeParentMap.get(cNodeId) === parentId) {
-                    boostMap.set(c.entry.uid, Math.max(boostMap.get(c.entry.uid) || 0, 2));
-                } else if (parentId) {
-                    const grandParentId = nodeParentMap.get(parentId);
-                    const cParentId = nodeParentMap.get(cNodeId);
-                    if (grandParentId && cParentId && nodeParentMap.get(cParentId) === grandParentId) {
-                        boostMap.set(c.entry.uid, Math.max(boostMap.get(c.entry.uid) || 0, 1));
-                    }
-                }
-            }
-        }
+    // Sample candidates if too many, to keep cost bounded
+    let targetCandidates = bookCandidates;
+    if (bookCandidates.length > TREE_PROXIMITY_SAMPLE_SIZE) {
+      const highScorerUids = new Set(highScorers.map((h) => h.entry.uid));
+      const rest = bookCandidates.filter(
+        (c) => !highScorerUids.has(c.entry.uid),
+      );
+      shuffleArray(rest);
+      targetCandidates = [
+        ...highScorers,
+        ...rest.slice(0, TREE_PROXIMITY_SAMPLE_SIZE - highScorers.length),
+      ];
     }
 
-    return boostMap;
+    for (const hs of highScorers) {
+      const nodeId = uidNodeMap.get(hs.entry.uid);
+      if (!nodeId) continue;
+      const parentId = nodeParentMap.get(nodeId);
+
+      for (const c of targetCandidates) {
+        if (c.entry.uid === hs.entry.uid) continue;
+        const cNodeId = uidNodeMap.get(c.entry.uid);
+        if (!cNodeId) continue;
+
+        if (cNodeId === nodeId) {
+          boostMap.set(
+            c.entry.uid,
+            Math.max(boostMap.get(c.entry.uid) || 0, 4),
+          );
+        } else if (parentId && nodeParentMap.get(cNodeId) === parentId) {
+          boostMap.set(
+            c.entry.uid,
+            Math.max(boostMap.get(c.entry.uid) || 0, 2),
+          );
+        } else if (parentId) {
+          const grandParentId = nodeParentMap.get(parentId);
+          const cParentId = nodeParentMap.get(cNodeId);
+          if (
+            grandParentId &&
+            cParentId &&
+            nodeParentMap.get(cParentId) === grandParentId
+          ) {
+            boostMap.set(
+              c.entry.uid,
+              Math.max(boostMap.get(c.entry.uid) || 0, 1),
+            );
+          }
+        }
+      }
+    }
+  }
+
+  return boostMap;
 }
 
 // ── Negative Signal Integration (2C) ─────────────────────────────
@@ -374,12 +452,12 @@ function computeTreeProximityBoosts(candidates, activeBooks) {
  * @returns {number} Negative penalty (0 or less)
  */
 function negativeSignalPenalty(entry, feedbackMap) {
-    let penalty = 0;
-    const fb = feedbackMap[entry.uid];
-    if (fb && fb.injections >= 3 && fb.references === 0) {
-        penalty -= 3;
-    }
-    return penalty;
+  let penalty = 0;
+  const fb = feedbackMap[entry.uid];
+  if (fb && fb.injections >= STALE_INJECTION_THRESHOLD && fb.references === 0) {
+    penalty += STALE_INJECTION_PENALTY;
+  }
+  return penalty;
 }
 
 // ── Arc-Aware Boosting (2D) ──────────────────────────────────────
@@ -393,57 +471,62 @@ let _cachedActiveArcs = null;
  * @returns {number} Bonus score
  */
 function arcBoost(entry) {
-    if (!_cachedActiveArcs) _cachedActiveArcs = getActiveArcs();
-    const arcs = _cachedActiveArcs;
-    if (arcs.length === 0) return 0;
+  if (!_cachedActiveArcs) _cachedActiveArcs = getActiveArcs();
+  const arcs = _cachedActiveArcs;
+  if (arcs.length === 0) return 0;
 
-    const title = (entry.comment || '').toLowerCase();
-    const keys = (entry.key || []).map(k => String(k).trim().toLowerCase());
-    const searchable = [title, ...keys];
+  const title = (entry.comment || "").toLowerCase();
+  const keys = (entry.key || []).map((k) => String(k).trim().toLowerCase());
+  const searchable = [title, ...keys];
 
-    let boost = 0;
-    for (const arc of arcs) {
-        const arcWords = (arc.title || '').toLowerCase().split(/\s+/).filter(w => w.length >= 3);
-        const arcProgression = (arc.progression || '').toLowerCase();
+  let boost = 0;
+  for (const arc of arcs) {
+    const arcWords = (arc.title || "")
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length >= 3);
+    const arcProgression = (arc.progression || "").toLowerCase();
 
-        for (const term of searchable) {
-            if (term.length < 3) continue;
-            if (arcProgression.includes(term)) {
-                boost += 4;
-                break;
-            }
-            if (arcWords.some(w => term.includes(w) || w.includes(term))) {
-                boost += 2;
-                break;
-            }
-        }
+    for (const term of searchable) {
+      if (term.length < 3) continue;
+      if (arcProgression.includes(term)) {
+        boost += 4;
+        break;
+      }
+      if (arcWords.some((w) => term.includes(w) || w.includes(term))) {
+        boost += 2;
+        break;
+      }
     }
+  }
 
-    return Math.min(boost, 10);
+  return Math.min(boost, 10);
 }
 
 // ── Predictive Pre-Warming (3B) ──────────────────────────────────
 
-const MENTION_HISTORY_KEY = 'tunnelvision_mention_history';
+const MENTION_HISTORY_KEY = "tunnelvision_mention_history";
 /** @type {Map<string, Map<string, number>>} entityA → (entityB → co-occurrence count) */
 const _bigramModel = new Map();
 
 function buildBigramModel() {
-    try {
-        const history = getContext().chatMetadata?.[MENTION_HISTORY_KEY] || [];
-        _bigramModel.clear();
-        for (let i = 0; i < history.length - 1; i++) {
-            const current = history[i];
-            const next = history[i + 1];
-            for (const a of current) {
-                if (!_bigramModel.has(a)) _bigramModel.set(a, new Map());
-                const followers = _bigramModel.get(a);
-                for (const b of next) {
-                    followers.set(b, (followers.get(b) || 0) + 1);
-                }
-            }
+  try {
+    const history = getContext().chatMetadata?.[MENTION_HISTORY_KEY] || [];
+    _bigramModel.clear();
+    for (let i = 0; i < history.length - 1; i++) {
+      const current = history[i];
+      const next = history[i + 1];
+      for (const a of current) {
+        if (!_bigramModel.has(a)) _bigramModel.set(a, new Map());
+        const followers = _bigramModel.get(a);
+        for (const b of next) {
+          followers.set(b, (followers.get(b) || 0) + 1);
         }
-    } catch { /* ignore */ }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -452,30 +535,32 @@ function buildBigramModel() {
  * @returns {Map<string, number>} entity → confidence score
  */
 function predictNextEntities(currentMentions) {
-    const predicted = new Map();
-    const mentionSet = new Set(currentMentions);
-    for (const mention of currentMentions) {
-        const followers = _bigramModel.get(mention);
-        if (!followers) continue;
-        for (const [entity, count] of followers) {
-            if (!mentionSet.has(entity)) {
-                predicted.set(entity, (predicted.get(entity) || 0) + count);
-            }
-        }
+  const predicted = new Map();
+  const mentionSet = new Set(currentMentions);
+  for (const mention of currentMentions) {
+    const followers = _bigramModel.get(mention);
+    if (!followers) continue;
+    for (const [entity, count] of followers) {
+      if (!mentionSet.has(entity)) {
+        predicted.set(entity, (predicted.get(entity) || 0) + count);
+      }
     }
-    return predicted;
+  }
+  return predicted;
 }
 
 function recordMentions(mentionedKeys) {
-    try {
-        const context = getContext();
-        if (!context.chatMetadata) return;
-        const history = context.chatMetadata[MENTION_HISTORY_KEY] || [];
-        history.push(mentionedKeys);
-        if (history.length > 50) history.splice(0, history.length - 50);
-        context.chatMetadata[MENTION_HISTORY_KEY] = history;
-        context.saveMetadataDebounced?.();
-    } catch { /* metadata not available */ }
+  try {
+    const context = getContext();
+    if (!context.chatMetadata) return;
+    const history = context.chatMetadata[MENTION_HISTORY_KEY] || [];
+    history.push(mentionedKeys);
+    if (history.length > 50) history.splice(0, history.length - 50);
+    context.chatMetadata[MENTION_HISTORY_KEY] = history;
+    context.saveMetadataDebounced?.();
+  } catch {
+    /* metadata not available */
+  }
 }
 
 // ── Dynamic Budget Allocation (3C) ───────────────────────────────
@@ -489,25 +574,26 @@ function recordMentions(mentionedKeys) {
  * @returns {number}
  */
 function computeDynamicBudget(candidates, settings, phase) {
-    const maxContextTokens = getMaxContextTokens();
-    const baseBudget = settings.smartContextMaxChars || 4000;
+  const maxContextTokens = getMaxContextTokens();
+  const baseBudget = settings.smartContextMaxChars || 4000;
 
-    if (maxContextTokens <= 0) return baseBudget;
+  if (maxContextTokens <= 0) return baseBudget;
 
-    const maxContextChars = maxContextTokens * 4;
-    const dynamicMax = Math.floor(maxContextChars * 0.10);
-    const dynamicMin = Math.floor(maxContextChars * 0.03);
+  const maxContextChars = maxContextTokens * 4;
+  const dynamicMax = Math.floor(maxContextChars * DYNAMIC_BUDGET_MAX_RATIO);
+  const dynamicMin = Math.floor(maxContextChars * DYNAMIC_BUDGET_MIN_RATIO);
 
-    const highConfidence = candidates.filter(c => c.score >= 15).length;
-    if (highConfidence <= 2) return Math.max(dynamicMin, Math.floor(baseBudget * 0.6));
+  const highConfidence = candidates.filter((c) => c.score >= HIGH_CONFIDENCE_SCORE_THRESHOLD).length;
+  if (highConfidence <= 2)
+    return Math.max(dynamicMin, Math.floor(baseBudget * LOW_CONFIDENCE_BUDGET_MULTIPLIER));
 
-    const confidenceRatio = Math.min(highConfidence / 5, 1);
-    let budget = dynamicMin + (dynamicMax - dynamicMin) * confidenceRatio;
+  const confidenceRatio = Math.min(highConfidence / HIGH_CONFIDENCE_CAP, 1);
+  let budget = dynamicMin + (dynamicMax - dynamicMin) * confidenceRatio;
 
-    if (phase === 'combat') budget *= 1.2;
-    else if (phase === 'downtime') budget *= 0.8;
+  if (phase === "combat") budget *= PHASE_BUDGET_MULTIPLIERS.combat;
+  else if (phase === "downtime") budget *= PHASE_BUDGET_MULTIPLIERS.downtime;
 
-    return Math.min(Math.round(budget), baseBudget * 2, dynamicMax);
+  return Math.min(Math.round(budget), baseBudget * 2, dynamicMax);
 }
 
 // ── Entity Extraction ────────────────────────────────────────────
@@ -520,17 +606,17 @@ function computeDynamicBudget(candidates, settings, phase) {
  * @returns {string} Lowercased combined text from recent messages
  */
 function extractMentionsFromChat(chat, lookback) {
-    const start = Math.max(0, chat.length - lookback);
-    const combinedText = [];
+  const start = Math.max(0, chat.length - lookback);
+  const combinedText = [];
 
-    for (let i = start; i < chat.length; i++) {
-        const msg = chat[i];
-        if (msg.is_system) continue;
-        const text = (msg.mes || '').trim();
-        if (text) combinedText.push(text);
-    }
+  for (let i = start; i < chat.length; i++) {
+    const msg = chat[i];
+    if (msg.is_system) continue;
+    const text = (msg.mes || "").trim();
+    if (text) combinedText.push(text);
+  }
 
-    return combinedText.join(' ').toLowerCase();
+  return combinedText.join(" ").toLowerCase();
 }
 
 /**
@@ -541,31 +627,31 @@ function extractMentionsFromChat(chat, lookback) {
  * @returns {Set<string>} All keys present in recentText
  */
 function buildPresentKeySet(activeBooks, recentText) {
-    const presentKeys = new Set();
-    for (const bookName of activeBooks) {
-        const bookData = getCachedWorldInfoSync(bookName);
-        if (!bookData?.entries) continue;
-        for (const key of Object.keys(bookData.entries)) {
-            const entry = bookData.entries[key];
-            if (entry.disable) continue;
-            const title = (entry.comment || '').trim().toLowerCase();
-            if (title && title.length >= 2 && recentText.includes(title)) {
-                presentKeys.add(title);
-            }
-            for (const k of (entry.key || [])) {
-                const kl = String(k).trim().toLowerCase();
-                if (kl.length >= 2 && recentText.includes(kl)) {
-                    presentKeys.add(kl);
-                }
-            }
-            for (const dk of deriveAliasKeys(entry)) {
-                if (dk.length >= 3 && recentText.includes(dk)) {
-                    presentKeys.add(dk);
-                }
-            }
+  const presentKeys = new Set();
+  for (const bookName of activeBooks) {
+    const bookData = getCachedWorldInfoSync(bookName);
+    if (!bookData?.entries) continue;
+    for (const key of Object.keys(bookData.entries)) {
+      const entry = bookData.entries[key];
+      if (entry.disable) continue;
+      const title = (entry.comment || "").trim().toLowerCase();
+      if (title && title.length >= 2 && recentText.includes(title)) {
+        presentKeys.add(title);
+      }
+      for (const k of entry.key || []) {
+        const kl = String(k).trim().toLowerCase();
+        if (kl.length >= 2 && recentText.includes(kl)) {
+          presentKeys.add(kl);
         }
+      }
+      for (const dk of deriveAliasKeys(entry)) {
+        if (dk.length >= 3 && recentText.includes(dk)) {
+          presentKeys.add(dk);
+        }
+      }
     }
-    return presentKeys;
+  }
+  return presentKeys;
 }
 
 /**
@@ -577,67 +663,79 @@ function buildPresentKeySet(activeBooks, recentText) {
  * @returns {number} Relevance score (0 = no match, higher = more relevant)
  */
 export function scoreEntry(entry, recentText, presentKeySet) {
-    if (!recentText) return 0;
+  if (!recentText) return 0;
 
-    const useFastPath = presentKeySet instanceof Set;
-    let score = 0;
+  const useFastPath = presentKeySet instanceof Set;
+  let score = 0;
 
-    const title = (entry.comment || '').trim();
-    const titleLower = title.toLowerCase();
-    if (title) {
-        if (useFastPath ? presentKeySet.has(titleLower) : recentText.includes(titleLower)) {
-            score += 10;
-        }
+  const title = (entry.comment || "").trim();
+  const titleLower = title.toLowerCase();
+  if (title) {
+    if (
+      useFastPath
+        ? presentKeySet.has(titleLower)
+        : recentText.includes(titleLower)
+    ) {
+      score += 10;
     }
+  }
 
-    const keys = entry.key || [];
-    for (const key of keys) {
-        const k = String(key).trim().toLowerCase();
-        if (k.length >= 2 && (useFastPath ? presentKeySet.has(k) : recentText.includes(k))) {
-            score += 3;
-        }
+  const keys = entry.key || [];
+  for (const key of keys) {
+    const k = String(key).trim().toLowerCase();
+    if (
+      k.length >= 2 &&
+      (useFastPath ? presentKeySet.has(k) : recentText.includes(k))
+    ) {
+      score += 3;
     }
+  }
 
-    const derivedKeys = deriveAliasKeys(entry);
-    for (const dk of derivedKeys) {
-        if (dk.length >= 3 && (useFastPath ? presentKeySet.has(dk) : recentText.includes(dk))) {
-            score += 2;
-        }
+  const derivedKeys = deriveAliasKeys(entry);
+  for (const dk of derivedKeys) {
+    if (
+      dk.length >= 3 &&
+      (useFastPath ? presentKeySet.has(dk) : recentText.includes(dk))
+    ) {
+      score += 2;
     }
+  }
 
-    return score;
+  return score;
 }
 
 // ── Relevance Tracking ───────────────────────────────────────────
 
 function getRelevanceMap() {
-    try {
-        return getContext().chatMetadata?.[RELEVANCE_KEY] || {};
-    } catch {
-        return {};
-    }
+  try {
+    return getContext().chatMetadata?.[RELEVANCE_KEY] || {};
+  } catch {
+    return {};
+  }
 }
 
 function touchRelevance(uids) {
-    try {
-        const context = getContext();
-        if (!context.chatMetadata) return;
-        const map = context.chatMetadata[RELEVANCE_KEY] || {};
-        const now = Date.now();
-        for (const uid of uids) map[uid] = now;
-        context.chatMetadata[RELEVANCE_KEY] = map;
-        context.saveMetadataDebounced?.();
-    } catch { /* metadata not available */ }
+  try {
+    const context = getContext();
+    if (!context.chatMetadata) return;
+    const map = context.chatMetadata[RELEVANCE_KEY] || {};
+    const now = Date.now();
+    for (const uid of uids) map[uid] = now;
+    context.chatMetadata[RELEVANCE_KEY] = map;
+    context.saveMetadataDebounced?.();
+  } catch {
+    /* metadata not available */
+  }
 }
 
 function relevanceDecay(uid, relevanceMap) {
-    const lastSeen = relevanceMap[uid];
-    if (!lastSeen) return 0;
-    const hoursAgo = (Date.now() - lastSeen) / (1000 * 60 * 60);
-    if (hoursAgo < 0.5) return 5;
-    if (hoursAgo < 2) return 3;
-    if (hoursAgo < 8) return 1;
-    return 0;
+  const lastSeen = relevanceMap[uid];
+  if (!lastSeen) return 0;
+  const hoursAgo = (Date.now() - lastSeen) / (1000 * 60 * 60);
+  if (hoursAgo < 0.5) return 5;
+  if (hoursAgo < 2) return 3;
+  if (hoursAgo < 8) return 1;
+  return 0;
 }
 
 // ── Relevance Feedback ───────────────────────────────────────────
@@ -648,20 +746,22 @@ function relevanceDecay(uid, relevanceMap) {
  * @returns {Record<string, {injections:number, references:number, missStreak:number, lastReferenced:number, valueSamples?:Array}>}
  */
 export function getFeedbackMap() {
-    try {
-        return getContext().chatMetadata?.[FEEDBACK_KEY] || {};
-    } catch {
-        return {};
-    }
+  try {
+    return getContext().chatMetadata?.[FEEDBACK_KEY] || {};
+  } catch {
+    return {};
+  }
 }
 
 function saveFeedbackMap(map) {
-    try {
-        const context = getContext();
-        if (!context.chatMetadata) return;
-        context.chatMetadata[FEEDBACK_KEY] = map;
-        context.saveMetadataDebounced?.();
-    } catch { /* metadata not available */ }
+  try {
+    const context = getContext();
+    if (!context.chatMetadata) return;
+    context.chatMetadata[FEEDBACK_KEY] = map;
+    context.saveMetadataDebounced?.();
+  } catch {
+    /* metadata not available */
+  }
 }
 
 /**
@@ -670,35 +770,36 @@ function saveFeedbackMap(map) {
  * Enhanced (3A): includes rolling value score from injection samples.
  */
 function feedbackBoost(uid) {
-    const map = getFeedbackMap();
-    const data = map[uid];
-    if (!data) return 0;
+  const map = getFeedbackMap();
+  const data = map[uid];
+  if (!data) return 0;
 
-    let boost = 0;
+  let boost = 0;
 
-    if (data.lastReferenced) {
-        const hoursAgo = (Date.now() - data.lastReferenced) / (1000 * 60 * 60);
-        if (hoursAgo < 1) boost += 5;
-        else if (hoursAgo < 4) boost += 3;
-        else if (hoursAgo < 12) boost += 1;
-    }
+  if (data.lastReferenced) {
+    const hoursAgo = (Date.now() - data.lastReferenced) / (1000 * 60 * 60);
+    if (hoursAgo < 1) boost += 5;
+    else if (hoursAgo < 4) boost += 3;
+    else if (hoursAgo < 12) boost += 1;
+  }
 
-    if (data.injections >= 3 && data.references / data.injections > 0.5) {
-        boost += 3;
-    }
+  if (data.injections >= 3 && data.references / data.injections > 0.5) {
+    boost += 3;
+  }
 
-    if (data.missStreak >= 5) boost -= 4;
-    else if (data.missStreak >= 3) boost -= 2;
+  if (data.missStreak >= 5) boost -= 4;
+  else if (data.missStreak >= 3) boost -= 2;
 
-    // 3A: Rolling value score from injection samples
-    if (Array.isArray(data.valueSamples) && data.valueSamples.length >= 3) {
-        const refRate = data.valueSamples.filter(s => s.ref).length / data.valueSamples.length;
-        if (refRate > 0.6) boost += 3;
-        else if (refRate > 0.3) boost += 1;
-        else if (refRate < 0.1) boost -= 2;
-    }
+  // 3A: Rolling value score from injection samples
+  if (Array.isArray(data.valueSamples) && data.valueSamples.length >= 3) {
+    const refRate =
+      data.valueSamples.filter((s) => s.ref).length / data.valueSamples.length;
+    if (refRate > 0.6) boost += 3;
+    else if (refRate > 0.3) boost += 1;
+    else if (refRate < 0.1) boost -= 2;
+  }
 
-    return boost;
+  return boost;
 }
 
 /**
@@ -706,21 +807,21 @@ function feedbackBoost(uid) {
  * Matches on title or on 2+ keys (or 1 substantial key of 4+ chars).
  */
 function isEntryReferenced(entry, responseText) {
-    const title = entry.title.toLowerCase();
-    if (title.length >= 3 && responseText.includes(title)) return true;
+  const title = entry.title.toLowerCase();
+  if (title.length >= 3 && responseText.includes(title)) return true;
 
-    let keyHits = 0;
-    let hasSubstantialHit = false;
-    for (const key of entry.keys) {
-        const k = key.toLowerCase();
-        if (k.length >= 2 && responseText.includes(k)) {
-            keyHits++;
-            if (k.length >= 4) hasSubstantialHit = true;
-            if (keyHits >= 2) return true;
-        }
+  let keyHits = 0;
+  let hasSubstantialHit = false;
+  for (const key of entry.keys) {
+    const k = key.toLowerCase();
+    if (k.length >= 2 && responseText.includes(k)) {
+      keyHits++;
+      if (k.length >= 4) hasSubstantialHit = true;
+      if (keyHits >= 2) return true;
     }
+  }
 
-    return keyHits >= 1 && hasSubstantialHit;
+  return keyHits >= 1 && hasSubstantialHit;
 }
 
 /**
@@ -729,47 +830,54 @@ function isEntryReferenced(entry, responseText) {
  * Enhanced (3A): tracks value samples for rolling quality correlation.
  */
 export function processRelevanceFeedback() {
-    if (_lastInjectedEntries.length === 0) return;
+  if (_lastInjectedEntries.length === 0) return;
 
-    const context = getContext();
-    const chat = context.chat;
-    if (!chat || chat.length < 2) return;
+  const context = getContext();
+  const chat = context.chat;
+  if (!chat || chat.length < 2) return;
 
-    const lastMsg = chat[chat.length - 1];
-    if (!lastMsg || lastMsg.is_user) return;
-    const responseText = (lastMsg.mes || '').toLowerCase();
-    if (!responseText) return;
+  const lastMsg = chat[chat.length - 1];
+  if (!lastMsg || lastMsg.is_user) return;
+  const responseText = (lastMsg.mes || "").toLowerCase();
+  if (!responseText) return;
 
-    const responseLen = responseText.length;
-    const feedbackMap = getFeedbackMap();
+  const responseLen = responseText.length;
+  const feedbackMap = getFeedbackMap();
 
-    for (const entry of _lastInjectedEntries) {
-        const uid = String(entry.uid);
-        if (!feedbackMap[uid]) {
-            feedbackMap[uid] = { injections: 0, references: 0, missStreak: 0, lastReferenced: 0, valueSamples: [] };
-        }
-
-        const data = feedbackMap[uid];
-        data.injections++;
-
-        const referenced = isEntryReferenced(entry, responseText);
-
-        // 3A: Track value sample
-        if (!data.valueSamples) data.valueSamples = [];
-        data.valueSamples.push({ len: responseLen, ref: referenced });
-        if (data.valueSamples.length > 10) data.valueSamples = data.valueSamples.slice(-10);
-
-        if (referenced) {
-            data.references++;
-            data.missStreak = 0;
-            data.lastReferenced = Date.now();
-        } else {
-            data.missStreak++;
-        }
+  for (const entry of _lastInjectedEntries) {
+    const uid = String(entry.uid);
+    if (!feedbackMap[uid]) {
+      feedbackMap[uid] = {
+        injections: 0,
+        references: 0,
+        missStreak: 0,
+        lastReferenced: 0,
+        valueSamples: [],
+      };
     }
 
-    saveFeedbackMap(feedbackMap);
-    _lastInjectedEntries = [];
+    const data = feedbackMap[uid];
+    data.injections++;
+
+    const referenced = isEntryReferenced(entry, responseText);
+
+    // 3A: Track value sample
+    if (!data.valueSamples) data.valueSamples = [];
+    data.valueSamples.push({ len: responseLen, ref: referenced });
+    if (data.valueSamples.length > 10)
+      data.valueSamples = data.valueSamples.slice(-10);
+
+    if (referenced) {
+      data.references++;
+      data.missStreak = 0;
+      data.lastReferenced = Date.now();
+    } else {
+      data.missStreak++;
+    }
+  }
+
+  saveFeedbackMap(feedbackMap);
+  _lastInjectedEntries = [];
 }
 
 // ── World State Boost ────────────────────────────────────────────
@@ -782,31 +890,31 @@ const WS_BOLD_NAME_RE = /\*\*([^*]+)\*\*/g;
  * @returns {{ presentCharacters: Set<string>, threadKeywords: Set<string> } | null}
  */
 function extractWorldStateBoostSignals() {
-    const sections = getWorldStateSections();
-    if (!sections) return null;
+  const sections = getWorldStateSections();
+  if (!sections) return null;
 
-    const presentCharacters = new Set();
-    const threadKeywords = new Set();
+  const presentCharacters = new Set();
+  const threadKeywords = new Set();
 
-    const sceneBody = sections['Current Scene'] || '';
-    const presentMatch = sceneBody.match(/Present:\s*(.+)/i);
-    if (presentMatch) {
-        for (const name of presentMatch[1].split(/[,;&]+/)) {
-            const trimmed = name.replace(/\*\*/g, '').trim().toLowerCase();
-            if (trimmed.length >= 2) presentCharacters.add(trimmed);
-        }
+  const sceneBody = sections["Current Scene"] || "";
+  const presentMatch = sceneBody.match(/Present:\s*(.+)/i);
+  if (presentMatch) {
+    for (const name of presentMatch[1].split(/[,;&]+/)) {
+      const trimmed = name.replace(/\*\*/g, "").trim().toLowerCase();
+      if (trimmed.length >= 2) presentCharacters.add(trimmed);
     }
+  }
 
-    const threadsBody = sections['Active Threads'] || '';
-    let m;
-    WS_BOLD_NAME_RE.lastIndex = 0;
-    while ((m = WS_BOLD_NAME_RE.exec(threadsBody)) !== null) {
-        const keyword = m[1].trim().toLowerCase();
-        if (keyword.length >= 2) threadKeywords.add(keyword);
-    }
+  const threadsBody = sections["Active Threads"] || "";
+  let m;
+  WS_BOLD_NAME_RE.lastIndex = 0;
+  while ((m = WS_BOLD_NAME_RE.exec(threadsBody)) !== null) {
+    const keyword = m[1].trim().toLowerCase();
+    if (keyword.length >= 2) threadKeywords.add(keyword);
+  }
 
-    if (presentCharacters.size === 0 && threadKeywords.size === 0) return null;
-    return { presentCharacters, threadKeywords };
+  if (presentCharacters.size === 0 && threadKeywords.size === 0) return null;
+  return { presentCharacters, threadKeywords };
 }
 
 /**
@@ -816,31 +924,208 @@ function extractWorldStateBoostSignals() {
  * @returns {number} Bonus score
  */
 function worldStateBoost(entry, signals) {
-    if (!signals) return 0;
+  if (!signals) return 0;
 
-    let boost = 0;
-    const title = (entry.comment || '').toLowerCase();
-    const keys = (entry.key || []).map(k => String(k).trim().toLowerCase());
-    const searchable = [title, ...keys];
+  let boost = 0;
+  const title = (entry.comment || "").toLowerCase();
+  const keys = (entry.key || []).map((k) => String(k).trim().toLowerCase());
+  const searchable = [title, ...keys];
 
-    for (const charName of signals.presentCharacters) {
-        if (searchable.some(s => s.includes(charName))) {
-            boost += 8;
-            break;
-        }
+  for (const charName of signals.presentCharacters) {
+    if (searchable.some((s) => s.includes(charName))) {
+      boost += 8;
+      break;
     }
+  }
 
-    for (const keyword of signals.threadKeywords) {
-        if (searchable.some(s => s.includes(keyword))) {
-            boost += 5;
-            break;
-        }
+  for (const keyword of signals.threadKeywords) {
+    if (searchable.some((s) => s.includes(keyword))) {
+      boost += 5;
+      break;
     }
+  }
 
-    return boost;
+  return boost;
 }
 
 // ── Scoring Pipeline ─────────────────────────────────────────────
+
+function computeScoringContext(activeBooks, recentText) {
+  const relevanceMap = getRelevanceMap();
+  const wsSignals = extractWorldStateBoostSignals();
+  const feedbackMap = getFeedbackMap();
+  const phase = detectConversationPhase(recentText);
+
+  let maxUid = 0;
+  for (const bookName of activeBooks) {
+    const bd = getCachedWorldInfoSync(bookName);
+    if (!bd?.entries) continue;
+    for (const key of Object.keys(bd.entries)) {
+      if (bd.entries[key].uid > maxUid) maxUid = bd.entries[key].uid;
+    }
+  }
+
+  const maxDecayBonus = 5;
+  const maxRecencyBonus = 3;
+  const maxWsBonus = wsSignals ? 13 : 0;
+  const maxFbBonus = 11;
+  const maxPhaseBonus = 9;
+  const maxArcBonus = 10;
+  const maxAllBonus =
+    maxDecayBonus +
+    maxRecencyBonus +
+    maxWsBonus +
+    maxFbBonus +
+    maxPhaseBonus +
+    maxArcBonus;
+
+  const chatLength = getContext().chat?.length || 0;
+
+  let rolledUpSceneUids;
+  try {
+    rolledUpSceneUids = _getRolledUpSceneUids();
+  } catch {
+    rolledUpSceneUids = new Set();
+  }
+
+  return {
+    relevanceMap,
+    wsSignals,
+    feedbackMap,
+    phase,
+    maxUid,
+    maxAllBonus,
+    chatLength,
+    rolledUpSceneUids,
+  };
+}
+
+function entryBaseThreshold(isTracker, isSummary, isActSummary) {
+  return isTracker ? 1 : isSummary || isActSummary ? 3 : 5;
+}
+
+function applySummaryHierarchyAdjustments(relevance, entry, isActSummary, isSummary, rolledUpSceneUids) {
+  if (isActSummary) {
+    return relevance + 5;
+  }
+  if (isSummary && rolledUpSceneUids.has(entry.uid)) {
+    return relevance - 10;
+  }
+  return relevance;
+}
+
+function collectMentionedEntryKeys(entry, presentKeySet, currentMentionKeys) {
+  const entryKeys = (entry.key || [])
+    .map((k) => String(k).trim().toLowerCase())
+    .filter((k) => k.length >= 2);
+  for (const k of entryKeys) {
+    if (presentKeySet.has(k)) currentMentionKeys.add(k);
+  }
+}
+
+function applyPrimaryScoringStages(relevance, entry, ctx) {
+  let score = relevance;
+  score += relevanceDecay(entry.uid, ctx.relevanceMap);
+  if (ctx.maxUid > 0 && entry.uid > ctx.maxUid * 0.9) score += 3;
+  score += worldStateBoost(entry, ctx.wsSignals);
+  score += feedbackBoost(entry.uid);
+  score += cooldownPenalty(entry.uid);
+  score += phaseBoost(entry, ctx.phase);
+  score += negativeSignalPenalty(entry, ctx.feedbackMap);
+  return score;
+}
+
+function computeTierAdjustedScore(relevance, entry, opts) {
+  const tier = computeEntryTier(entry, {
+    isTracker: opts.isTracker,
+    isSummary: opts.isSummary,
+    feedbackMap: opts.feedbackMap,
+    relevanceMap: opts.relevanceMap,
+    chatLength: opts.chatLength,
+    maxUid: opts.maxUid,
+    arcOverlap: opts.arcOverlap,
+  });
+  const tierAdj = TIER_SCORE_ADJUST[tier];
+  const score = relevance + tierAdj.bonus;
+  const effectiveThreshold =
+    tierAdj.thresholdOverride != null
+      ? tierAdj.thresholdOverride
+      : opts.threshold;
+  return { score, tier, effectiveThreshold };
+}
+
+function pushCandidateIfEligible(candidates, candidate, effectiveThreshold) {
+  const { entry, bookName, score, isTracker, isSummary, tier } = candidate;
+
+  if (isTracker && score > 0) {
+    candidates.push({
+      entry,
+      bookName,
+      score: score + 20,
+      isTracker: true,
+      isSummary: false,
+      tier,
+    });
+    return;
+  }
+
+  if (isSummary && score >= Math.min(effectiveThreshold, 3)) {
+    candidates.push({
+      entry,
+      bookName,
+      score: score + 2,
+      isTracker: false,
+      isSummary: true,
+      tier,
+    });
+    return;
+  }
+
+  if (score >= effectiveThreshold) {
+    candidates.push({
+      entry,
+      bookName,
+      score,
+      isTracker,
+      isSummary,
+      tier,
+    });
+  }
+}
+
+function applyTreeProximityBoosts(candidates, activeBooks) {
+  const proximityBoosts = computeTreeProximityBoosts(candidates, activeBooks);
+  for (const c of candidates) {
+    const bonus = proximityBoosts.get(c.entry.uid);
+    if (bonus) c.score += bonus;
+  }
+}
+
+function applyPredictiveBoosts(candidates, currentMentionKeys) {
+  const mentionKeysArray = [...currentMentionKeys];
+  const predicted = predictNextEntities(mentionKeysArray);
+  if (predicted.size > 0) {
+    for (const c of candidates) {
+      const entryKeys = (c.entry.key || []).map((k) =>
+        String(k).trim().toLowerCase(),
+      );
+      const entryTitle = (c.entry.comment || "").toLowerCase();
+      for (const [entity, confidence] of predicted) {
+        if (
+          entryTitle.includes(entity) ||
+          entryKeys.some((k) => k.includes(entity))
+        ) {
+          c.score += Math.min(confidence, 5);
+          break;
+        }
+      }
+    }
+  }
+
+  if (currentMentionKeys.size > 0) {
+    recordMentions(mentionKeysArray);
+  }
+}
 
 /**
  * Score all active entries against recent chat text and sort by relevance.
@@ -852,154 +1137,94 @@ function worldStateBoost(entry, signals) {
  * @returns {Array<{entry: Object, bookName: string, score: number, isTracker: boolean, isSummary: boolean, tier: string}>}
  */
 function scoreCandidates(activeBooks, recentText) {
-    const candidates = [];
-    const relevanceMap = getRelevanceMap();
-    const wsSignals = extractWorldStateBoostSignals();
-    const feedbackMap = getFeedbackMap();
-    const phase = detectConversationPhase(recentText);
-    _cachedActiveArcs = null;
+  const candidates = [];
+  const currentMentionKeys = new Set();
 
-    buildBigramModel();
-    const currentMentionKeys = new Set();
+  _cachedActiveArcs = null;
+  buildBigramModel();
 
-    // Pre-build set of all keys/derived-keys present in recentText (one O(keys*L) pass)
-    const presentKeySet = buildPresentKeySet(activeBooks, recentText);
+  const presentKeySet = buildPresentKeySet(activeBooks, recentText);
+  const ctx = computeScoringContext(activeBooks, recentText);
 
-    let maxUid = 0;
-    for (const bookName of activeBooks) {
-        const bd = getCachedWorldInfoSync(bookName);
-        if (!bd?.entries) continue;
-        for (const key of Object.keys(bd.entries)) {
-            if (bd.entries[key].uid > maxUid) maxUid = bd.entries[key].uid;
-        }
+  for (const bookName of activeBooks) {
+    const bookData = getCachedWorldInfoSync(bookName);
+    if (!bookData?.entries) continue;
+
+    const trackerSet = new Set(getTrackerUids(bookName));
+
+    for (const key of Object.keys(bookData.entries)) {
+      const entry = bookData.entries[key];
+      if (entry.disable) continue;
+      if (!entry.content || !entry.content.trim()) continue;
+
+      const isTracker = trackerSet.has(entry.uid);
+      const isActSummary = isActSummaryEntry(entry);
+      const isStorySummary = isStorySummaryEntry(entry);
+      const isSummary = isSummaryEntry(entry);
+
+      if (isStorySummary) {
+        candidates.push({
+          entry,
+          bookName,
+          score: 50,
+          isTracker: false,
+          isSummary: true,
+          tier: TIER_HOT,
+        });
+        continue;
+      }
+
+      let relevance = scoreEntry(entry, recentText, presentKeySet);
+      relevance = applySummaryHierarchyAdjustments(
+        relevance,
+        entry,
+        isActSummary,
+        isSummary,
+        ctx.rolledUpSceneUids,
+      );
+
+      const threshold = entryBaseThreshold(isTracker, isSummary, isActSummary);
+      if (relevance + ctx.maxAllBonus < threshold) continue;
+
+      if (relevance > 0) {
+        collectMentionedEntryKeys(entry, presentKeySet, currentMentionKeys);
+      }
+
+      relevance = applyPrimaryScoringStages(relevance, entry, ctx);
+      const entryArcBoost = arcBoost(entry);
+      relevance += entryArcBoost;
+
+      const tierResult = computeTierAdjustedScore(relevance, entry, {
+        isTracker,
+        isSummary,
+        feedbackMap: ctx.feedbackMap,
+        relevanceMap: ctx.relevanceMap,
+        chatLength: ctx.chatLength,
+        maxUid: ctx.maxUid,
+        arcOverlap: entryArcBoost,
+        threshold,
+      });
+
+      pushCandidateIfEligible(
+        candidates,
+        {
+          entry,
+          bookName,
+          score: tierResult.score,
+          isTracker,
+          isSummary,
+          tier: tierResult.tier,
+        },
+        tierResult.effectiveThreshold,
+      );
     }
+  }
 
-    // Compute the maximum possible bonus from all non-keyword scoring signals.
-    // Used for early exit: if baseScore + maxBonus < threshold, skip the entry.
-    const maxDecayBonus = 5;
-    const maxRecencyBonus = 3;
-    const maxWsBonus = wsSignals ? 13 : 0;
-    const maxFbBonus = 11;
-    const maxPhaseBonus = 9;
-    const maxArcBonus = 10;
-    const maxAllBonus = maxDecayBonus + maxRecencyBonus + maxWsBonus + maxFbBonus + maxPhaseBonus + maxArcBonus;
+  applyTreeProximityBoosts(candidates, activeBooks);
+  applyPredictiveBoosts(candidates, currentMentionKeys);
 
-    const chatLength = getContext().chat?.length || 0;
-
-    // 5A: Pre-compute rolled-up scene UIDs for hierarchy-aware scoring
-    let _rolledUpSceneUids;
-    try {
-        _rolledUpSceneUids = _getRolledUpSceneUids();
-    } catch { _rolledUpSceneUids = new Set(); }
-
-    for (const bookName of activeBooks) {
-        const bookData = getCachedWorldInfoSync(bookName);
-        if (!bookData?.entries) continue;
-
-        const trackerSet = new Set(getTrackerUids(bookName));
-
-        for (const key of Object.keys(bookData.entries)) {
-            const entry = bookData.entries[key];
-            if (entry.disable) continue;
-            if (!entry.content || !entry.content.trim()) continue;
-
-            const isTracker = trackerSet.has(entry.uid);
-            const lowerComment = (entry.comment || '').toLowerCase();
-            const isActSummary = lowerComment.startsWith('[act summary]');
-            const isStorySummary = lowerComment.startsWith('[story summary]');
-            const isSummary = isActSummary || isStorySummary
-                || lowerComment.startsWith('[summary]') || lowerComment.startsWith('[scene summary');
-
-            // 5A: Story summary is always injected with highest priority
-            if (isStorySummary) {
-                candidates.push({ entry, bookName, score: 50, isTracker: false, isSummary: true, tier: TIER_HOT });
-                continue;
-            }
-
-            let relevance = scoreEntry(entry, recentText, presentKeySet);
-
-            // 5A: Act summaries get a warm-tier boost; rolled-up scenes get penalized
-            if (isActSummary) {
-                relevance += 5;
-            } else if (isSummary && _rolledUpSceneUids.has(entry.uid)) {
-                relevance -= 10;
-            }
-
-            // Early exit: if max possible score can't reach inclusion threshold, skip
-            const threshold = isTracker ? 1 : (isSummary || isActSummary) ? 3 : 5;
-            if (relevance + maxAllBonus < threshold) continue;
-
-            if (relevance > 0) {
-                const entryKeys = (entry.key || []).map(k => String(k).trim().toLowerCase()).filter(k => k.length >= 2);
-                for (const k of entryKeys) {
-                    if (presentKeySet.has(k)) {
-                        currentMentionKeys.add(k);
-                    }
-                }
-            }
-
-            relevance += relevanceDecay(entry.uid, relevanceMap);
-            if (maxUid > 0 && entry.uid > maxUid * 0.9) relevance += 3;
-            relevance += worldStateBoost(entry, wsSignals);
-            relevance += feedbackBoost(entry.uid);
-            relevance += cooldownPenalty(entry.uid);
-            relevance += phaseBoost(entry, phase);
-            relevance += negativeSignalPenalty(entry, feedbackMap);
-
-            const entryArcBoost = arcBoost(entry);
-            relevance += entryArcBoost;
-
-            // 3A: Tiered memory — classify entry and apply tier-based scoring
-            const tier = computeEntryTier(entry, {
-                isTracker, isSummary, feedbackMap, relevanceMap,
-                chatLength, maxUid, arcOverlap: entryArcBoost,
-            });
-            const tierAdj = TIER_SCORE_ADJUST[tier];
-            relevance += tierAdj.bonus;
-
-            const effectiveThreshold = tierAdj.thresholdOverride != null
-                ? tierAdj.thresholdOverride
-                : threshold;
-
-            if (isTracker && relevance > 0) {
-                candidates.push({ entry, bookName, score: relevance + 20, isTracker: true, isSummary: false, tier });
-            } else if (isSummary && relevance >= Math.min(effectiveThreshold, 3)) {
-                candidates.push({ entry, bookName, score: relevance + 2, isTracker: false, isSummary: true, tier });
-            } else if (relevance >= effectiveThreshold) {
-                candidates.push({ entry, bookName, score: relevance, isTracker, isSummary, tier });
-            }
-        }
-    }
-
-    // 2B: Tree proximity boosts — cap to top-K high scorers and sample candidates
-    const proximityBoosts = computeTreeProximityBoosts(candidates, activeBooks);
-    for (const c of candidates) {
-        const bonus = proximityBoosts.get(c.entry.uid);
-        if (bonus) c.score += bonus;
-    }
-
-    // 3B: Predictive boost for entities predicted by bigram model
-    const mentionKeysArray = [...currentMentionKeys];
-    const predicted = predictNextEntities(mentionKeysArray);
-    if (predicted.size > 0) {
-        for (const c of candidates) {
-            const entryKeys = (c.entry.key || []).map(k => String(k).trim().toLowerCase());
-            const entryTitle = (c.entry.comment || '').toLowerCase();
-            for (const [entity, confidence] of predicted) {
-                if (entryTitle.includes(entity) || entryKeys.some(k => k.includes(entity))) {
-                    c.score += Math.min(confidence, 5);
-                    break;
-                }
-            }
-        }
-    }
-
-    if (currentMentionKeys.size > 0) {
-        recordMentions(mentionKeysArray);
-    }
-
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
 }
 
 // ── Core Logic ───────────────────────────────────────────────────
@@ -1017,119 +1242,137 @@ function scoreCandidates(activeBooks, recentText) {
  * @returns {string} Formatted context string for injection, or empty string
  */
 export function buildSmartContextPrompt() {
-    const settings = getSettings();
-    if (!settings.smartContextEnabled || settings.globalEnabled === false) return '';
+  const settings = getSettings();
+  if (!settings.smartContextEnabled || settings.globalEnabled === false)
+    return "";
 
-    const activeBooks = getActiveTunnelVisionBooks();
-    if (activeBooks.length === 0) return '';
+  const activeBooks = getActiveTunnelVisionBooks();
+  if (activeBooks.length === 0) return "";
 
-    const context = getContext();
-    const chat = context.chat;
-    if (!chat || chat.length < 2) return '';
+  const context = getContext();
+  const chat = context.chat;
+  if (!chat || chat.length < 2) return "";
 
-    const lookback = settings.smartContextLookback || 6;
-    const maxEntries = settings.smartContextMaxEntries || 8;
+  const lookback = settings.smartContextLookback || 6;
+  const maxEntries = settings.smartContextMaxEntries || 8;
 
-    const recentText = extractMentionsFromChat(chat, lookback);
-    if (!recentText) return '';
+  const recentText = extractMentionsFromChat(chat, lookback);
+  if (!recentText) return "";
 
-    // Use pre-warmed candidates if cache is fresh, otherwise score synchronously
-    let candidates;
-    const cacheKey = buildPreWarmCacheKey();
-    if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
-        candidates = _preWarmedCandidates;
-        _preWarmedCandidates = null;
-        _preWarmCacheKey = null;
-    } else {
-        candidates = scoreCandidates(activeBooks, recentText);
-    }
+  // Use pre-warmed candidates if cache is fresh, otherwise score synchronously
+  let candidates;
+  const cacheKey = buildPreWarmCacheKey();
+  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
+    candidates = _preWarmedCandidates;
+    _preWarmedCandidates = null;
+    _preWarmCacheKey = null;
+  } else {
+    candidates = scoreCandidates(activeBooks, recentText);
+  }
 
-    if (candidates.length === 0) return '';
+  if (candidates.length === 0) return "";
 
-    // 3C: Dynamic budget allocation
-    const phase = detectConversationPhase(recentText);
-    const maxChars = computeDynamicBudget(candidates, settings, phase);
+  // 3C: Dynamic budget allocation
+  const phase = detectConversationPhase(recentText);
+  const maxChars = computeDynamicBudget(candidates, settings, phase);
 
-    // 1C: Score-density budget allocation
-    // Reserve slots for story summary + trackers, then fill by density
-    const storySummaryCand = candidates.find(c =>
-        c.isSummary && (c.entry.comment || '').toLowerCase().startsWith('[story summary]'));
-    const trackerCandidates = candidates.filter(c => c.isTracker);
-    const nonTrackerCandidates = candidates.filter(c => !c.isTracker && c !== storySummaryCand);
+  // 1C: Score-density budget allocation
+  // Reserve slots for story summary + trackers, then fill by density
+  const storySummaryCand = candidates.find(
+    (c) => c.isSummary && isStorySummaryEntry(c.entry),
+  );
+  const trackerCandidates = candidates.filter((c) => c.isTracker);
+  const nonTrackerCandidates = candidates.filter(
+    (c) => !c.isTracker && c !== storySummaryCand,
+  );
 
-    // Compute density (score per character) for non-tracker entries
-    const withDensity = nonTrackerCandidates.map(c => ({
-        ...c,
-        density: c.score / Math.max((c.entry.content || '').trim().length, 1),
-    }));
-    withDensity.sort((a, b) => b.density - a.density);
+  // Compute density (score per character) for non-tracker entries
+  const withDensity = nonTrackerCandidates.map((c) => ({
+    ...c,
+    density: c.score / Math.max((c.entry.content || "").trim().length, 1),
+  }));
+  withDensity.sort((a, b) => b.density - a.density);
 
-    const selected = [];
-    const selectedUids = [];
-    const selectedEntryInfo = [];
-    let totalChars = 0;
-    let trackerSlots = 0;
+  const selected = [];
+  const selectedUids = [];
+  const selectedEntryInfo = [];
+  let totalChars = 0;
+  let trackerSlots = 0;
 
-    // 5A: Story summary always gets first slot (guaranteed injection)
-    if (storySummaryCand) {
-        const entryText = formatEntryForInjection(
-            storySummaryCand.entry, storySummaryCand.bookName, false, true);
-        selected.push(entryText);
-        selectedUids.push(storySummaryCand.entry.uid);
-        selectedEntryInfo.push({
-            uid: storySummaryCand.entry.uid,
-            title: (storySummaryCand.entry.comment || '').trim(),
-            keys: (storySummaryCand.entry.key || []).map(k => String(k).trim()),
-        });
-        totalChars += entryText.length;
-    }
+  // 5A: Story summary always gets first slot (guaranteed injection)
+  if (storySummaryCand) {
+    const entryText = formatEntryForInjection(
+      storySummaryCand.entry,
+      storySummaryCand.bookName,
+      false,
+      true,
+    );
+    selected.push(entryText);
+    selectedUids.push(storySummaryCand.entry.uid);
+    selectedEntryInfo.push({
+      uid: storySummaryCand.entry.uid,
+      title: (storySummaryCand.entry.comment || "").trim(),
+      keys: (storySummaryCand.entry.key || []).map((k) => String(k).trim()),
+    });
+    totalChars += entryText.length;
+  }
 
-    // Then: include up to 2 tracker entries (reserved slots)
-    for (const c of trackerCandidates) {
-        if (trackerSlots >= 2 || selected.length >= maxEntries) break;
-        const entryText = formatEntryForInjection(c.entry, c.bookName, c.isTracker, c.isSummary);
-        if (totalChars + entryText.length > maxChars) continue;
+  // Then: include up to 2 tracker entries (reserved slots)
+  for (const c of trackerCandidates) {
+    if (trackerSlots >= 2 || selected.length >= maxEntries) break;
+    const entryText = formatEntryForInjection(
+      c.entry,
+      c.bookName,
+      c.isTracker,
+      c.isSummary,
+    );
+    if (totalChars + entryText.length > maxChars) continue;
 
-        selected.push(entryText);
-        selectedUids.push(c.entry.uid);
-        selectedEntryInfo.push({
-            uid: c.entry.uid,
-            title: (c.entry.comment || '').trim(),
-            keys: (c.entry.key || []).map(k => String(k).trim()),
-        });
-        totalChars += entryText.length;
-        trackerSlots++;
-    }
+    selected.push(entryText);
+    selectedUids.push(c.entry.uid);
+    selectedEntryInfo.push({
+      uid: c.entry.uid,
+      title: (c.entry.comment || "").trim(),
+      keys: (c.entry.key || []).map((k) => String(k).trim()),
+    });
+    totalChars += entryText.length;
+    trackerSlots++;
+  }
 
-    // Then: fill remaining slots by density
-    for (const c of withDensity) {
-        if (selected.length >= maxEntries) break;
-        const entryText = formatEntryForInjection(c.entry, c.bookName, c.isTracker, c.isSummary);
-        if (totalChars + entryText.length > maxChars) continue;
+  // Then: fill remaining slots by density
+  for (const c of withDensity) {
+    if (selected.length >= maxEntries) break;
+    const entryText = formatEntryForInjection(
+      c.entry,
+      c.bookName,
+      c.isTracker,
+      c.isSummary,
+    );
+    if (totalChars + entryText.length > maxChars) continue;
 
-        selected.push(entryText);
-        selectedUids.push(c.entry.uid);
-        selectedEntryInfo.push({
-            uid: c.entry.uid,
-            title: (c.entry.comment || '').trim(),
-            keys: (c.entry.key || []).map(k => String(k).trim()),
-        });
-        totalChars += entryText.length;
-    }
+    selected.push(entryText);
+    selectedUids.push(c.entry.uid);
+    selectedEntryInfo.push({
+      uid: c.entry.uid,
+      title: (c.entry.comment || "").trim(),
+      keys: (c.entry.key || []).map((k) => String(k).trim()),
+    });
+    totalChars += entryText.length;
+  }
 
-    if (selected.length === 0) return '';
+  if (selected.length === 0) return "";
 
-    _lastInjectedEntries = selectedEntryInfo;
-    if (selectedUids.length > 0) touchRelevance(selectedUids);
+  _lastInjectedEntries = selectedEntryInfo;
+  if (selectedUids.length > 0) touchRelevance(selectedUids);
 
-    // 1B: Record injections for cooldown
-    recordInjections(selectedUids);
+  // 1B: Record injections for cooldown
+  recordInjections(selectedUids);
 
-    return [
-        `[TunnelVision Smart Context — ${selected.length} relevant entries auto-retrieved based on current scene. This is supplemental memory; the AI can search for more with TunnelVision_Search if needed.]`,
-        '',
-        selected.join('\n\n---\n\n'),
-    ].join('\n');
+  return [
+    `[TunnelVision Smart Context — ${selected.length} relevant entries auto-retrieved based on current scene. This is supplemental memory; the AI can search for more with TunnelVision_Search if needed.]`,
+    "",
+    selected.join("\n\n---\n\n"),
+  ].join("\n");
 }
 
 /**
@@ -1143,121 +1386,146 @@ export function buildSmartContextPrompt() {
  *   - Embedding similarity (5B): if embeddings available, adds similarity scores
  */
 async function preWarmSmartContext() {
-    const settings = getSettings();
-    if (!settings.smartContextEnabled || settings.globalEnabled === false) return;
+  const settings = getSettings();
+  if (!settings.smartContextEnabled || settings.globalEnabled === false) return;
 
-    const activeBooks = getActiveTunnelVisionBooks();
-    if (activeBooks.length === 0) return;
+  const activeBooks = getActiveTunnelVisionBooks();
+  if (activeBooks.length === 0) return;
 
-    const context = getContext();
-    const chat = context.chat;
-    if (!chat || chat.length < 2) return;
+  const context = getContext();
+  const chat = context.chat;
+  if (!chat || chat.length < 2) return;
 
-    const cacheKey = buildPreWarmCacheKey();
-    if (!cacheKey) return;
+  const cacheKey = buildPreWarmCacheKey();
+  if (!cacheKey) return;
 
-    const lookback = settings.smartContextLookback || 6;
-    const recentText = extractMentionsFromChat(chat, lookback);
-    if (!recentText) return;
+  const lookback = settings.smartContextLookback || 6;
+  const recentText = extractMentionsFromChat(chat, lookback);
+  if (!recentText) return;
 
-    // Ensure world info data is in cache (the async part that saves time later)
-    await Promise.all(activeBooks.map(book => getCachedWorldInfo(book)));
+  // Ensure world info data is in cache (the async part that saves time later)
+  await Promise.all(activeBooks.map((book) => getCachedWorldInfo(book)));
 
-    const candidates = scoreCandidates(activeBooks, recentText);
+  const candidates = scoreCandidates(activeBooks, recentText);
 
-    // 5A: Hybrid sidecar reranking — if sidecar is configured, rerank top-15
-    try {
-        const { isSidecarConfigured, sidecarGenerate } = await import('./llm-sidecar.js');
-        if (isSidecarConfigured() && candidates.length > 3) {
-            const topN = candidates.slice(0, 15);
-            const rerankPrompt = buildRerankPrompt(topN, recentText);
-            const response = await sidecarGenerate({ prompt: rerankPrompt, maxTokens: 200 });
-            applyRerankResults(candidates, topN, response);
-        }
-    } catch (e) {
-        console.debug('[TunnelVision] Sidecar reranking skipped:', e.message);
+  // 5A: Hybrid sidecar reranking — if sidecar is configured, rerank top-15
+  try {
+    const { isSidecarConfigured, sidecarGenerate } =
+      await import("./llm-sidecar.js");
+    if (isSidecarConfigured() && candidates.length > 3) {
+      const topN = candidates.slice(0, 15);
+      const rerankPrompt = buildRerankPrompt(topN, recentText);
+      const response = await sidecarGenerate({
+        prompt: rerankPrompt,
+        maxTokens: 200,
+      });
+      applyRerankResults(candidates, topN, response);
     }
+  } catch (e) {
+    console.debug("[TunnelVision] Sidecar reranking skipped:", e.message);
+  }
 
-    // 5B: Embedding similarity — if embedding API available, add cosine similarity scores
-    try {
-        const { isEmbeddingAvailable, getEmbeddingSimilarityBoosts } = await import('./embedding-cache.js');
-        if (isEmbeddingAvailable()) {
-            const boosts = await getEmbeddingSimilarityBoosts(candidates, recentText);
-            for (const c of candidates) {
-                const bonus = boosts.get(c.entry.uid);
-                if (bonus) c.score += bonus;
-            }
-            candidates.sort((a, b) => b.score - a.score);
-        }
-    } catch (e) {
-        console.debug('[TunnelVision] Embedding similarity skipped:', e.message);
+  // 5B: Embedding similarity — if embedding API available, add cosine similarity scores
+  try {
+    const { isEmbeddingAvailable, getEmbeddingSimilarityBoosts } =
+      await import("./embedding-cache.js");
+    if (isEmbeddingAvailable()) {
+      const boosts = await getEmbeddingSimilarityBoosts(candidates, recentText);
+      for (const c of candidates) {
+        const bonus = boosts.get(c.entry.uid);
+        if (bonus) c.score += bonus;
+      }
+      candidates.sort((a, b) => b.score - a.score);
     }
+  } catch (e) {
+    console.debug("[TunnelVision] Embedding similarity skipped:", e.message);
+  }
 
-    _preWarmedCandidates = candidates;
-    _preWarmCacheKey = cacheKey;
-    console.debug(`[TunnelVision] Pre-warmed smart context: ${candidates.length} candidates scored`);
+  _preWarmedCandidates = candidates;
+  _preWarmCacheKey = cacheKey;
+  console.debug(
+    `[TunnelVision] Pre-warmed smart context: ${candidates.length} candidates scored`,
+  );
 }
 
 // ── Hybrid Reranking Helpers (5A) ────────────────────────────────
 
 function buildRerankPrompt(topCandidates, recentText) {
-    const snippet = recentText.length > 500 ? recentText.slice(-500) : recentText;
-    const entryList = topCandidates.map((c, i) =>
-        `${i + 1}. [${(c.entry.comment || '').trim() || `UID ${c.entry.uid}`}] — ${(c.entry.content || '').trim().substring(0, 80)}`,
-    ).join('\n');
+  const snippet = recentText.length > 500 ? recentText.slice(-500) : recentText;
+  const entryList = topCandidates
+    .map(
+      (c, i) =>
+        `${i + 1}. [${(c.entry.comment || "").trim() || `UID ${c.entry.uid}`}] — ${(c.entry.content || "").trim().substring(0, 80)}`,
+    )
+    .join("\n");
 
-    return [
-        'Rank these lorebook entries by relevance to the recent conversation.',
-        'Return ONLY a comma-separated list of entry numbers in order of relevance (most relevant first).',
-        '',
-        '[Recent conversation]',
-        snippet,
-        '',
-        '[Entries]',
-        entryList,
-    ].join('\n');
+  return [
+    "Rank these lorebook entries by relevance to the recent conversation.",
+    "Return ONLY a comma-separated list of entry numbers in order of relevance (most relevant first).",
+    "",
+    "[Recent conversation]",
+    snippet,
+    "",
+    "[Entries]",
+    entryList,
+  ].join("\n");
 }
 
 function applyRerankResults(allCandidates, topN, response) {
-    if (!response || typeof response !== 'string') return;
-    const nums = response.match(/\d+/g);
-    if (!nums || nums.length < 2) return;
+  if (!response || typeof response !== "string") return;
+  const nums = response.match(/\d+/g);
+  if (!nums || nums.length < 2) return;
 
-    const maxBoost = topN.length;
-    for (let rank = 0; rank < nums.length; rank++) {
-        const idx = parseInt(nums[rank], 10) - 1;
-        if (idx >= 0 && idx < topN.length) {
-            const uid = topN[idx].entry.uid;
-            const candidate = allCandidates.find(c => c.entry.uid === uid);
-            if (candidate) {
-                candidate.score += Math.max(maxBoost - rank, 1);
-            }
-        }
+  const maxBoost = topN.length;
+  for (let rank = 0; rank < nums.length; rank++) {
+    const idx = parseInt(nums[rank], 10) - 1;
+    if (idx >= 0 && idx < topN.length) {
+      const uid = topN[idx].entry.uid;
+      const candidate = allCandidates.find((c) => c.entry.uid === uid);
+      if (candidate) {
+        candidate.score += Math.max(maxBoost - rank, 1);
+      }
     }
-    allCandidates.sort((a, b) => b.score - a.score);
+  }
+  allCandidates.sort((a, b) => b.score - a.score);
 }
 
 // ── Formatting ───────────────────────────────────────────────────
 
-function formatEntryForInjection(entry, bookName, isTracker, isSummary = false, tier = TIER_WARM) {
-    const tag = isTracker ? ' [Tracker]' : isSummary ? ' [Summary]' : '';
-    return `[${getEntryTitle(entry)}${tag} — ${bookName}, UID ${entry.uid}]\n${(entry.content || '').trim()}`;
+function formatEntryForInjection(
+  entry,
+  bookName,
+  isTracker,
+  isSummary = false,
+  tier = TIER_WARM,
+) {
+  const tag = isTracker ? " [Tracker]" : isSummary ? " [Summary]" : "";
+  return `[${getEntryTitle(entry)}${tag} — ${bookName}, UID ${entry.uid}]\n${(entry.content || "").trim()}`;
 }
 
 // ── Init ─────────────────────────────────────────────────────────
 
 function onMessageReceived() {
-    try {
-        const context = getContext();
-        const lastMsg = context.chat?.[context.chat.length - 1];
-        if (Array.isArray(lastMsg?.extra?.tool_invocations) && lastMsg.extra.tool_invocations.length > 0) return;
-    } catch { return; }
+  try {
+    const context = getContext();
+    const lastMsg = context.chat?.[context.chat.length - 1];
+    if (
+      Array.isArray(lastMsg?.extra?.tool_invocations) &&
+      lastMsg.extra.tool_invocations.length > 0
+    )
+      return;
+  } catch {
+    return;
+  }
 
-    processRelevanceFeedback();
+  processRelevanceFeedback();
 
-    preWarmSmartContext().catch(err => {
-        console.debug('[TunnelVision] Pre-warm failed (non-critical):', err.message);
-    });
+  preWarmSmartContext().catch((err) => {
+    console.debug(
+      "[TunnelVision] Pre-warm failed (non-critical):",
+      err.message,
+    );
+  });
 }
 
 /**
@@ -1265,16 +1533,18 @@ function onMessageReceived() {
  * Called once from index.js init.
  */
 export function initSmartContext() {
-    if (_scInitialized) return;
-    _scInitialized = true;
+  if (_scInitialized) return;
+  _scInitialized = true;
 
-    if (event_types.MESSAGE_RECEIVED) {
-        eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
-    }
+  if (event_types.MESSAGE_RECEIVED) {
+    eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
+  }
 
-    if (event_types.WORLDINFO_UPDATED) {
-        eventSource.on(event_types.WORLDINFO_UPDATED, invalidatePreWarmCache);
-    }
+  if (event_types.WORLDINFO_UPDATED) {
+    eventSource.on(event_types.WORLDINFO_UPDATED, invalidatePreWarmCache);
+  }
 
-    console.log('[TunnelVision] Smart context feedback loop + pre-warming initialized');
+  console.log(
+    "[TunnelVision] Smart context feedback loop + pre-warming initialized",
+  );
 }

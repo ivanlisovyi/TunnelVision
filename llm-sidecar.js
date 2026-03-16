@@ -15,10 +15,7 @@
  */
 
 import { getSettings } from './tree-store.js';
-
-const CIRCUIT_BREAKER_THRESHOLD = 3;
-const CIRCUIT_BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
-const DEFAULT_TIMEOUT_MS = 30_000;
+import { CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_BREAKER_COOLDOWN_MS, SIDECAR_DEFAULT_TIMEOUT_MS, SIDECAR_CONNECTIVITY_TIMEOUT_MS } from './constants.js';
 
 let _consecutiveFailures = 0;
 let _circuitOpenUntil = 0;
@@ -207,7 +204,7 @@ export async function sidecarGenerate({ prompt, systemPrompt, maxTokens, timeout
     const body = buildRequestBody(config, prompt, systemPrompt, maxTokens);
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout || DEFAULT_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeout || SIDECAR_DEFAULT_TIMEOUT_MS);
 
     try {
         const response = await fetch(url, {
@@ -382,7 +379,7 @@ export async function testSidecarConnectivity() {
         const result = await sidecarGenerate({
             prompt: 'Respond with exactly: OK',
             maxTokens: 10,
-            timeout: 15_000,
+            timeout: SIDECAR_CONNECTIVITY_TIMEOUT_MS,
         });
         const latencyMs = Date.now() - start;
         const ok = typeof result === 'string' && result.length > 0;
