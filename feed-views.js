@@ -421,7 +421,7 @@ export async function loadTimelineEntries() {
     return groups;
 }
 
-async function renderTimelineView() {
+export async function renderTimelineView() {
     const panelBody = getPanelBody();
     if (!panelBody) return;
     panelBody.replaceChildren();
