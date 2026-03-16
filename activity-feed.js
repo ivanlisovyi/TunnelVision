@@ -67,6 +67,7 @@ export { parseRetrievedEntryHeader, buildToolSummary, computeLineDiff };
 // ── Constants (module-private) ──────────────────────────────────
 
 const STORAGE_KEY_POS = 'tv-feed-trigger-position';
+const STORAGE_KEY_SIZE = 'tv-feed-panel-size';
 const METADATA_KEY = 'tunnelvision_feed';
 const HIDDEN_TOOL_CALL_FLAG = 'tvHiddenToolCalls';
 
@@ -208,6 +209,27 @@ function createPanel() {
     const panelEl = el('div', 'tv-float-panel');
     setPanelEl(panelEl);
 
+    // Restore saved size (resizable panel)
+    const savedSize = localStorage.getItem(STORAGE_KEY_SIZE);
+    if (savedSize) {
+        try {
+            const size = JSON.parse(savedSize);
+            if (size && typeof size.width === 'string') panelEl.style.width = size.width;
+            if (size && typeof size.height === 'string') panelEl.style.height = size.height;
+        } catch { /* ignore invalid saved size */ }
+    }
+
+    // Persist size changes caused by user resizing
+    const persistSize = () => {
+        const w = panelEl.style.width;
+        const h = panelEl.style.height;
+        if (!w && !h) return;
+        localStorage.setItem(STORAGE_KEY_SIZE, JSON.stringify({ width: w, height: h }));
+    };
+    panelEl.addEventListener('pointerup', persistSize);
+    panelEl.addEventListener('mouseup', persistSize);
+    panelEl.addEventListener('touchend', persistSize);
+
     // Header
     const header = el('div', 'tv-float-panel-header');
     const title = el('span', 'tv-float-panel-title');
@@ -311,11 +333,24 @@ function positionPanel() {
     const triggerEl = getTriggerEl();
     const panelEl = getPanelEl();
     if (!triggerEl || !panelEl) return;
+
     const rect = triggerEl.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const pw = 340;
-    const ph = 420;
+
+    // Prefer live measurements when visible; otherwise fall back to explicit style size or defaults.
+    let pw = 0;
+    let ph = 0;
+
+    if (panelEl.classList.contains('open') && panelEl.offsetWidth && panelEl.offsetHeight) {
+        pw = panelEl.offsetWidth;
+        ph = panelEl.offsetHeight;
+    } else {
+        const w = parseFloat(panelEl.style.width || '');
+        const h = parseFloat(panelEl.style.height || '');
+        pw = Number.isFinite(w) && w > 0 ? w : 340;
+        ph = Number.isFinite(h) && h > 0 ? h : 420;
+    }
 
     let left = rect.right + 8;
     if (left + pw > vw - 16) left = rect.left - pw - 8;
