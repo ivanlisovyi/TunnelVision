@@ -80,6 +80,7 @@ import {
 } from "./constants.js";
 
 const METADATA_KEY = "tunnelvision_postturn";
+const POST_TURN_LOG_PREFIX = "[TunnelVision][Post-turn]";
 
 let _initialized = false;
 let _processorRunning = false;
@@ -183,23 +184,45 @@ async function loadTrackerEntries(activeBooks) {
  * @returns {Promise<Object|null>} Processing result summary, or null
  */
 export async function runPostTurnProcessor(force = false) {
-  if (_processorRunning) return null;
-  if (!force && !shouldProcess()) return null;
+  if (_processorRunning) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: processor already running`);
+    return null;
+  }
+  if (!force && !shouldProcess()) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: cooldown not met`);
+    return null;
+  }
 
   const settings = getSettings();
-  if (!settings.postTurnEnabled || settings.globalEnabled === false)
+  if (!settings.postTurnEnabled || settings.globalEnabled === false) {
+    console.debug(
+      `${POST_TURN_LOG_PREFIX} Skipping run: post-turn processing is disabled`,
+    );
     return null;
+  }
 
   const activeBooks = getActiveTunnelVisionBooks();
-  if (activeBooks.length === 0) return null;
+  if (activeBooks.length === 0) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: no active lorebooks`);
+    return null;
+  }
 
   const context = getContext();
   const chat = context.chat;
-  if (!chat || chat.length === 0) return null;
+  if (!chat || chat.length === 0) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: chat is empty`);
+    return null;
+  }
 
   const chatId = getChatId();
   const { book: targetBook, error } = resolveTargetBook(activeBooks[0]);
-  if (error || !targetBook) return null;
+  if (error || !targetBook) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: target book could not be resolved`, {
+      requestedBook: activeBooks[0],
+      error,
+    });
+    return null;
+  }
 
   _processorRunning = true;
   const task = registerBackgroundTask({
@@ -221,6 +244,10 @@ export async function runPostTurnProcessor(force = false) {
   const recentExcerpt = formatRecentExchange(chat, excerptCount);
 
   if (!recentExcerpt.trim()) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: recent excerpt is empty`, {
+      excerptCount,
+      msgsSinceLastProcess,
+    });
     _liveRollback = null;
     _processorRunning = false;
     _currentTask = null;
@@ -231,6 +258,17 @@ export async function runPostTurnProcessor(force = false) {
   console.log(
     `[TunnelVision] Post-turn processor running (${msgsSinceLastProcess} new messages)`,
   );
+  console.debug(`${POST_TURN_LOG_PREFIX} Run context`, {
+    force,
+    chatId,
+    targetBook,
+    activeBooks,
+    excerptCount,
+    excerptChars: recentExcerpt.length,
+    extractFactsEnabled: settings.postTurnExtractFacts !== false,
+    updateTrackersEnabled: settings.postTurnUpdateTrackers !== false,
+    sceneArchiveEnabled: settings.postTurnSceneArchive !== false,
+  });
 
   const result = {
     factsCreated: 0,
@@ -257,11 +295,15 @@ export async function runPostTurnProcessor(force = false) {
 
     const trackerPromise =
       settings.postTurnUpdateTrackers !== false
-        ? loadTrackerEntries(activeBooks).then((trackers) =>
-            trackers.length > 0
+        ? loadTrackerEntries(activeBooks).then((trackers) => {
+            console.debug(`${POST_TURN_LOG_PREFIX} Loaded tracker entries`, {
+              trackerCount: trackers.length,
+              books: [...new Set(trackers.map((tracker) => tracker.book))],
+            });
+            return trackers.length > 0
               ? updateTrackers(trackers, recentExcerpt, chatId)
-              : null,
-          )
+              : null;
+          })
         : Promise.resolve(null);
 
     const [analysisResult, trackerResult] = await Promise.all([
@@ -751,6 +793,12 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
   );
 
   try {
+    console.debug(`${POST_TURN_LOG_PREFIX} Starting analysis LLM call`, {
+      targetBook,
+      excerptChars: recentExcerpt.length,
+      hasTemporalContext: !!temporalContext,
+      hasExistingFactsSection: !!existingFactsSection,
+    });
     const storyCtx = getStoryContext();
     const response = await callWithRetry(
       () => generateAnalytical({ prompt: storyCtx + quietPrompt }),
@@ -760,7 +808,16 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
     if (getChatId() !== chatId) return result;
 
     const parsed = parseJsonFromLLM(response);
-    if (!parsed || typeof parsed !== "object") return result;
+    if (!parsed || typeof parsed !== "object") {
+      console.debug(`${POST_TURN_LOG_PREFIX} Analysis returned no parseable object`);
+      return result;
+    }
+
+    console.debug(`${POST_TURN_LOG_PREFIX} Analysis parsed`, {
+      factCount: Array.isArray(parsed.facts) ? parsed.facts.length : 0,
+      hasSceneChange: parsed.sceneChange?.detected === true,
+      arcCount: Array.isArray(parsed.arcs) ? parsed.arcs.length : 0,
+    });
 
     const dedupIndex = await buildTrigramDedupIndex(targetBook);
 
@@ -814,11 +871,28 @@ async function archiveScene(targetBook, chat, sceneChange, chatId) {
   const sceneEndIdx = chat.length - 3;
   const oldSceneMessages = Math.max(sceneEndIdx - watermark, 0);
 
-  if (oldSceneMessages < 4) return result;
+  if (oldSceneMessages < 4) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Skipping scene archive: not enough prior messages`, {
+      oldSceneMessages,
+      sceneEndIdx,
+      watermark,
+      sceneType: sceneChange?.type || "unknown",
+    });
+    return result;
+  }
 
   // Slice the chat to only include the old scene (exclude new scene messages)
   const oldSceneChat = chat.slice(0, sceneEndIdx + 1);
   const archiveCount = Math.min(oldSceneMessages, oldSceneChat.length, 50);
+
+  console.debug(`${POST_TURN_LOG_PREFIX} Archiving scene`, {
+    targetBook,
+    archiveCount,
+    sceneEndIdx,
+    watermark,
+    sceneType: sceneChange?.type || "unknown",
+    sceneDescription: sceneChange?.description || "",
+  });
 
   try {
     const { runQuietSummarize } = await import("./commands.js");
@@ -949,6 +1023,11 @@ export async function updateTrackers(trackers, recentExcerpt, chatId) {
     .map((t) => `[UID ${t.uid} — "${t.title}" in "${t.book}"]\n${t.content}`)
     .join("\n\n---\n\n");
 
+  console.debug(`${POST_TURN_LOG_PREFIX} Evaluating tracker updates`, {
+    trackerCount: trackers.length,
+    excerptChars: recentExcerpt.length,
+  });
+
   const quietPrompt = [
     "You are a state-tracking assistant for a roleplay lorebook.",
     "Below are TRACKER entries — structured documents tracking character states, inventory, relationships, etc.",
@@ -996,7 +1075,17 @@ export async function updateTrackers(trackers, recentExcerpt, chatId) {
     if (getChatId() !== chatId) return result;
 
     const updates = parseJsonFromLLM(response, { type: "array" });
-    if (!Array.isArray(updates) || updates.length === 0) return result;
+    if (!Array.isArray(updates) || updates.length === 0) {
+      console.debug(`${POST_TURN_LOG_PREFIX} Tracker analysis produced no updates`);
+      return result;
+    }
+
+    console.debug(`${POST_TURN_LOG_PREFIX} Tracker analysis produced updates`, {
+      updateCount: updates.length,
+      trackerUids: updates
+        .map((update) => Number(update?.uid))
+        .filter((uid) => Number.isFinite(uid)),
+    });
 
     const trackerMap = new Map(trackers.map((t) => [t.uid, t]));
     const hashes = getTrackerHashes();

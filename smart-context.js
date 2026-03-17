@@ -65,6 +65,7 @@ import {
 // ── Summary Hierarchy (5A) lazy accessor ─────────────────────────
 
 let _getRolledUpSceneUids = () => new Set();
+const SMART_CONTEXT_LOG_PREFIX = "[TunnelVision][SmartContext]";
 
 /**
  * Initialize hierarchy references. Called once after module load to avoid circular imports.
@@ -110,9 +111,13 @@ function buildPreWarmCacheKey() {
 
 /** Invalidate the pre-warming cache when entries change or books are modified. */
 export function invalidatePreWarmCache() {
+  const hadCache = !!_preWarmedCandidates || !!_preWarmCacheKey;
   _preWarmedCandidates = null;
   _preWarmCacheKey = null;
   _derivedKeyCache.clear();
+  if (hadCache) {
+    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Invalidated pre-warm cache`);
+  }
 }
 
 const RELEVANCE_KEY = "tunnelvision_relevance";
@@ -1244,6 +1249,19 @@ function scoreCandidates(activeBooks, recentText) {
   applyPredictiveBoosts(candidates, currentMentionKeys);
 
   candidates.sort((a, b) => b.score - a.score);
+  console.debug(`${SMART_CONTEXT_LOG_PREFIX} Scored candidates`, {
+    activeBooks,
+    candidateCount: candidates.length,
+    trackerCount: candidates.filter((candidate) => candidate.isTracker).length,
+    summaryCount: candidates.filter((candidate) => candidate.isSummary).length,
+    topCandidates: candidates.slice(0, 5).map((candidate) => ({
+      uid: candidate.entry.uid,
+      title: (candidate.entry.comment || "").trim() || `UID ${candidate.entry.uid}`,
+      score: Number(candidate.score.toFixed(2)),
+      tier: candidate.tier,
+      book: candidate.bookName,
+    })),
+  });
   return candidates;
 }
 
@@ -1303,15 +1321,25 @@ export function buildSmartContextPrompt() {
   // Use pre-warmed candidates if cache is fresh, otherwise score synchronously
   let candidates;
   const cacheKey = buildPreWarmCacheKey();
+  let usedPreWarmCache = false;
   if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
     candidates = _preWarmedCandidates;
     _preWarmedCandidates = null;
     _preWarmCacheKey = null;
+    usedPreWarmCache = true;
   } else {
     candidates = scoreCandidates(activeBooks, recentText);
   }
 
-  if (candidates.length === 0) return "";
+  if (candidates.length === 0) {
+    console.debug(`${SMART_CONTEXT_LOG_PREFIX} No candidates available for injection`, {
+      activeBooks,
+      lookback,
+      recentTextChars: recentText.length,
+      usedPreWarmCache,
+    });
+    return "";
+  }
 
   // 3C: Dynamic budget allocation
   const phase = detectConversationPhase(recentText);
@@ -1406,6 +1434,20 @@ export function buildSmartContextPrompt() {
 
   if (selected.length === 0) return "";
 
+  console.debug(`${SMART_CONTEXT_LOG_PREFIX} Selected entries for injection`, {
+    usedPreWarmCache,
+    phase,
+    maxEntries,
+    maxChars,
+    totalChars,
+    selectedCount: selected.length,
+    selectedEntries: selectedEntryInfo.map((entry) => ({
+      uid: entry.uid,
+      title: entry.title || `UID ${entry.uid ?? "?"}`,
+      book: entry.bookName || "",
+    })),
+  });
+
   _lastInjectedEntries = selectedEntryInfo;
   reportSmartContextSelections(selectedEntryInfo);
   if (selectedUids.length > 0) touchRelevance(selectedUids);
@@ -1443,11 +1485,20 @@ export async function preWarmSmartContext() {
 
   const cacheKey = buildPreWarmCacheKey();
   if (!cacheKey) return;
-  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) return;
+  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
+    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Pre-warm skipped: cache already fresh`);
+    return;
+  }
 
   const lookback = settings.smartContextLookback || 6;
   const recentText = extractMentionsFromChat(chat, lookback);
   if (!recentText) return;
+
+  console.debug(`${SMART_CONTEXT_LOG_PREFIX} Starting pre-warm`, {
+    activeBooks,
+    lookback,
+    recentTextChars: recentText.length,
+  });
 
   // Ensure world info data is in cache (the async part that saves time later)
   await Promise.all(activeBooks.map((book) => getCachedWorldInfo(book)));
@@ -1466,6 +1517,9 @@ export async function preWarmSmartContext() {
         maxTokens: 200,
       });
       applyRerankResults(candidates, topN, response);
+      console.debug(`${SMART_CONTEXT_LOG_PREFIX} Applied sidecar reranking`, {
+        rerankedCount: topN.length,
+      });
     }
   } catch (e) {
     console.debug("[TunnelVision] Sidecar reranking skipped:", e.message);
@@ -1477,11 +1531,18 @@ export async function preWarmSmartContext() {
       await import("./embedding-cache.js");
     if (isEmbeddingAvailable()) {
       const boosts = await getEmbeddingSimilarityBoosts(candidates, recentText);
+      let boostedCount = 0;
       for (const c of candidates) {
         const bonus = boosts.get(c.entry.uid);
-        if (bonus) c.score += bonus;
+        if (bonus) {
+          c.score += bonus;
+          boostedCount++;
+        }
       }
       candidates.sort((a, b) => b.score - a.score);
+      console.debug(`${SMART_CONTEXT_LOG_PREFIX} Applied embedding boosts`, {
+        boostedCount,
+      });
     }
   } catch (e) {
     console.debug("[TunnelVision] Embedding similarity skipped:", e.message);
