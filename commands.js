@@ -27,6 +27,7 @@ import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { ingestChatMessages } from './tree-builder.js';
 import { createEntry, forgetEntry, mergeEntries, splitEntry, findEntry, findEntryByUid, searchEntriesAcrossBooks, escapeHtml, parseJsonFromLLM, getCachedWorldInfo, buildSummaryKeys, KEYWORD_RULES, SUMMARY_STYLE_RULES, FACT_EXTRACTION_PROMPT } from './entry-manager.js';
 import { getWorldStateText, updateWorldState, clearWorldState } from './world-state.js';
+import { clearAllArcs } from './arc-tracker.js';
 import { runLifecycleMaintenance } from './memory-lifecycle.js';
 import { markAutoSummaryComplete, getAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { hideSummarizedMessages, setWatermark } from './tools/summarize.js';
@@ -195,7 +196,20 @@ function registerSlashCommands() {
         helpString: 'Run memory lifecycle maintenance now — detects duplicates and compresses verbose entries.',
     }));
 
-    console.log('[TunnelVision] Registered slash commands: /tv-summarize, /tv-remember, /tv-search, /tv-forget, /tv-merge, /tv-split, /tv-ingest, /tv-counter, /tv-worldstate, /tv-maintain');
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'tv-clear',
+        callback: handleClearCommand,
+        aliases: ['tvclear'],
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'What to clear: "all" (everything), "arcs" (narrative arcs), or "worldstate" (world state)',
+                typeList: [ARGUMENT_TYPE.STRING],
+            }),
+        ],
+        helpString: 'Clear TunnelVision data. Usage: /tv-clear all (clear everything) | /tv-clear arcs | /tv-clear worldstate',
+    }));
+
+    console.log('[TunnelVision] Registered slash commands: /tv-summarize, /tv-remember, /tv-search, /tv-forget, /tv-merge, /tv-split, /tv-ingest, /tv-counter, /tv-worldstate, /tv-maintain, /tv-clear');
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +673,52 @@ async function handleMaintainCommand() {
         }
     } catch (e) {
         toastr.error(`Maintenance failed: ${e.message}`, 'TunnelVision');
+    }
+    return '';
+}
+
+async function handleClearCommand(args) {
+    const check = preflight();
+    if (check) return check;
+
+    let target = 'all';
+    if (args && typeof args === 'string') {
+        target = args.trim().toLowerCase();
+    }
+
+    const validTargets = ['all', 'arcs', 'worldstate', 'ws'];
+    if (target && !validTargets.includes(target)) {
+        toastr.warning(`Invalid target. Use: /tv-clear all | /tv-clear arcs | /tv-clear worldstate`, 'TunnelVision');
+        return '';
+    }
+
+    // If target is 'ws', treat as 'worldstate'
+    if (target === 'ws') target = 'worldstate';
+
+    // Ask for confirmation
+    const confirmMsg = target === 'all'
+        ? 'Clear ALL TunnelVision data (arcs, world state, and more)? This cannot be undone.'
+        : target === 'arcs'
+            ? 'Clear all narrative arcs? This cannot be undone.'
+            : 'Clear world state? This cannot be undone.';
+
+    if (!confirm(confirmMsg)) {
+        toastr.info('Clear cancelled', 'TunnelVision');
+        return '';
+    }
+
+    try {
+        if (target === 'all' || target === 'arcs') {
+            clearAllArcs();
+        }
+        if (target === 'all' || target === 'worldstate') {
+            clearWorldState();
+        }
+
+        const cleared = target === 'all' ? 'all TunnelVision data' : target;
+        toastr.success(`Cleared: ${cleared}`, 'TunnelVision');
+    } catch (e) {
+        toastr.error(`Clear failed: ${e.message}`, 'TunnelVision');
     }
     return '';
 }

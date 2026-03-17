@@ -8,8 +8,7 @@
  * Extracted from activity-feed.js to keep the main file focused on orchestration.
  */
 
-import {
-    getPanelEl, getPanelBody, getPanelTabs,
+import { getPanelEl, getPanelBody, getPanelTabs,
     getShowingWorldState, setShowingWorldState,
     getShowingTimeline, setShowingTimeline,
     getShowingArcs, setShowingArcs,
@@ -19,7 +18,7 @@ import {
 } from './feed-state.js';
 import { truncate } from './feed-helpers.js';
 import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState } from './world-state.js';
-import { getAllArcs } from './arc-tracker.js';
+import { getAllArcs, removeArc } from './arc-tracker.js';
 import { countStaleEntries, buildHealthReport } from './entry-scoring.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { isSummaryTitle, isTrackerTitle } from './tree-store.js';
@@ -861,6 +860,24 @@ function buildArcCard(arc) {
     statusBadge.textContent = arc.status;
     statusBadge.style.color = statusColor;
     titleRow.appendChild(statusBadge);
+    
+    // Delete button
+    const deleteBtn = el('button', 'tv-arc-delete-btn');
+    deleteBtn.title = 'Remove this arc';
+    deleteBtn.style.cssText = 'background: none; border: none; cursor: pointer; color: #d63031; font-size: 0.9em; padding: 4px 8px; margin-left: auto;';
+    const deleteIcon = icon('fa-trash');
+    deleteIcon.style.cssText = 'margin-right: 4px;';
+    deleteBtn.appendChild(deleteIcon);
+    deleteBtn.append('Remove');
+    deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (confirm(`Remove arc "${arc.title}"?`)) {
+            removeArc(arc.id);
+            renderArcsView();
+        }
+    });
+    titleRow.appendChild(deleteBtn);
+    
     card.appendChild(titleRow);
 
     // Progression

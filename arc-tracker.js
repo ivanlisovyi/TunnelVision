@@ -170,3 +170,25 @@ export function processArcUpdates(arcUpdates) {
     setArcsState({ arcs, lastUpdated: now });
     return result;
 }
+
+/**
+ * Remove an arc by its ID.
+ * @param {string} arcId - The arc ID to remove
+ * @returns {boolean} True if arc was found and removed, false otherwise
+ */
+export function removeArc(arcId) {
+    const state = getArcsState();
+    const index = state.arcs.findIndex(a => a.id === arcId);
+    if (index === -1) return false;
+    
+    state.arcs.splice(index, 1);
+    setArcsState({ arcs: state.arcs, lastUpdated: Date.now() });
+    return true;
+}
+
+/**
+ * Clear all arcs from the current chat.
+ */
+export function clearAllArcs() {
+    setArcsState({ arcs: [], lastUpdated: Date.now() });
+}
