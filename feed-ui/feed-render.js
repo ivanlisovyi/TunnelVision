@@ -300,6 +300,22 @@ export function buildItemElement(item) {
     if (item.type === 'background' && item.action) {
         row.classList.add('tv-feed-clickable');
         row.addEventListener('click', () => toggleBackgroundExpand(row, item));
+    } else if (item.type === 'entry' && item.lorebook && item.uid != null) {
+        row.classList.add('tv-feed-clickable');
+        row.addEventListener('click', () => toggleFeedEntryExpand(row, item));
+    } else if (item.type === 'entry' && item.source && item.source !== 'native') {
+        const sourceLabel = item.source === 'smart-context'
+            ? 'Source: Smart Context'
+            : `Source: ${item.source}`;
+        const details = el('div', 'tv-feed-details');
+        details.style.display = 'none';
+        details.appendChild(el('div', 'tv-feed-detail-line', sourceLabel));
+        row.appendChild(details);
+
+        row.classList.add('tv-feed-clickable');
+        row.addEventListener('click', () => {
+            details.style.display = details.style.display === 'none' ? 'block' : 'none';
+        });
     }
 
     return row;

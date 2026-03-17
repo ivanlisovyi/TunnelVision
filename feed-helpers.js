@@ -46,8 +46,8 @@ export function createEntryFeedItem({ source, lorebook = '', uid = null, title =
         type: 'entry',
         source,
         icon: 'fa-book-open',
-        verb: source === 'native' ? 'Triggered' : 'Injected',
-        color: source === 'native' ? '#e84393' : '#fdcb6e',
+        verb: source === 'native' || source === 'smart-context' ? 'Triggered' : 'Injected',
+        color: source === 'native' ? '#e84393' : source === 'smart-context' ? '#fdcb6e' : '#fdcb6e',
         lorebook,
         uid,
         title,
@@ -72,12 +72,13 @@ export function shouldIncludeLorebookForEntries() {
 export function formatEntrySummary(item, includeLorebook) {
     const title = truncate(item.title || `UID ${item.uid ?? '?'}`, includeLorebook ? 42 : 52);
     const uidLabel = item.uid !== null && item.uid !== undefined ? `#${item.uid}` : '#?';
+    const sourceLabel = item.source === 'smart-context' ? ' [Smart Context]' : '';
 
     if (includeLorebook && item.lorebook) {
-        return `${item.lorebook}: ${title} (${uidLabel})`;
+        return `${item.lorebook}: ${title} (${uidLabel})${sourceLabel}`;
     }
 
-    return `${title} (${uidLabel})`;
+    return `${title} (${uidLabel})${sourceLabel}`;
 }
 
 export function formatRetrievedEntryLabel(entry, includeLorebook) {

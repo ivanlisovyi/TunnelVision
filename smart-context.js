@@ -38,6 +38,7 @@ import { getCachedWorldInfoSync, getCachedWorldInfo } from "./entry-manager.js";
 import { getEntryTitle, getMaxContextTokens } from "./agent-utils.js";
 import { getWorldStateSections } from "./world-state.js";
 import { getActiveArcs } from "./arc-tracker.js";
+import { addEntryActivationEvents } from "./background-events.js";
 import {
   shuffleArray,
   isActSummaryEntry,
@@ -119,6 +120,7 @@ const FEEDBACK_KEY = "tunnelvision_feedback";
 
 /** Entries injected during the most recent GENERATION_STARTED. */
 let _lastInjectedEntries = [];
+let _lastReportedInjectionKey = null;
 let _scInitialized = false;
 
 // ── Semantic Key Expansion (1A) ──────────────────────────────────
@@ -1259,6 +1261,27 @@ function scoreCandidates(activeBooks, recentText) {
  *
  * @returns {string} Formatted context string for injection, or empty string
  */
+function reportSmartContextSelections(selectedEntryInfo) {
+  if (!Array.isArray(selectedEntryInfo) || selectedEntryInfo.length === 0) return;
+
+  const injectionKey = selectedEntryInfo
+    .map((entry) => `${entry.uid}:${entry.title}`)
+    .join("|");
+
+  if (injectionKey === _lastReportedInjectionKey) return;
+  _lastReportedInjectionKey = injectionKey;
+
+  addEntryActivationEvents(
+    selectedEntryInfo.map((entry) => ({
+      source: "smart-context",
+      lorebook: entry.bookName || "",
+      uid: entry.uid ?? null,
+      title: entry.title || `UID ${entry.uid ?? "?"}`,
+      keys: Array.isArray(entry.keys) ? entry.keys : [],
+    })),
+  );
+}
+
 export function buildSmartContextPrompt() {
   const settings = getSettings();
   if (!settings.smartContextEnabled || settings.globalEnabled === false)
@@ -1331,6 +1354,7 @@ export function buildSmartContextPrompt() {
       uid: storySummaryCand.entry.uid,
       title: (storySummaryCand.entry.comment || "").trim(),
       keys: (storySummaryCand.entry.key || []).map((k) => String(k).trim()),
+      bookName: storySummaryCand.bookName,
     });
     totalChars += entryText.length;
   }
@@ -1352,6 +1376,7 @@ export function buildSmartContextPrompt() {
       uid: c.entry.uid,
       title: (c.entry.comment || "").trim(),
       keys: (c.entry.key || []).map((k) => String(k).trim()),
+      bookName: c.bookName,
     });
     totalChars += entryText.length;
     trackerSlots++;
@@ -1374,6 +1399,7 @@ export function buildSmartContextPrompt() {
       uid: c.entry.uid,
       title: (c.entry.comment || "").trim(),
       keys: (c.entry.key || []).map((k) => String(k).trim()),
+      bookName: c.bookName,
     });
     totalChars += entryText.length;
   }
@@ -1381,6 +1407,7 @@ export function buildSmartContextPrompt() {
   if (selected.length === 0) return "";
 
   _lastInjectedEntries = selectedEntryInfo;
+  reportSmartContextSelections(selectedEntryInfo);
   if (selectedUids.length > 0) touchRelevance(selectedUids);
 
   // 1B: Record injections for cooldown

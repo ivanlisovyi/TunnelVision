@@ -74,6 +74,41 @@ export function addBackgroundEvent({ icon, verb, color, summary = '', details = 
 }
 
 /**
+ * Emit entry-style activation items to the activity feed.
+ * Used by smart-context and other non-tool, non-native retrieval paths
+ * so injected entries appear the same way as native WI activations.
+ *
+ * @param {Array<{
+ *   source?: string,
+ *   lorebook?: string,
+ *   uid?: number|null,
+ *   title?: string,
+ *   keys?: string[],
+ *   timestamp?: number,
+ * }>} entries
+ */
+export function addEntryActivationEvents(entries) {
+    if (!_addFeedItems || !Array.isArray(entries) || entries.length === 0) return;
+
+    const timestamp = Date.now();
+    const items = entries.map((entry, index) => ({
+        id: 2_000_000 + timestamp + index,
+        type: 'entry',
+        source: entry?.source || 'smart-context',
+        icon: 'fa-book-open',
+        verb: 'Triggered',
+        color: '#e84393',
+        lorebook: typeof entry?.lorebook === 'string' ? entry.lorebook : '',
+        uid: Number.isFinite(entry?.uid) ? entry.uid : null,
+        title: entry?.title || (Number.isFinite(entry?.uid) ? `UID ${entry.uid}` : 'Unknown entry'),
+        keys: Array.isArray(entry?.keys) ? entry.keys : [],
+        timestamp: Number.isFinite(entry?.timestamp) ? entry.timestamp : timestamp,
+    }));
+
+    _addFeedItems(items);
+}
+
+/**
  * Mark the start of a background operation (shows spinner on trigger button).
  * Returns a function to call when the operation completes.
  * @returns {() => void}
