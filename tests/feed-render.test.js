@@ -118,4 +118,49 @@ describe('feed rendering', () => {
         expect(expand.querySelector('.tv-feed-expand-actions')).not.toBeNull();
         expect(expand.textContent).toContain('Open tree');
     });
+
+    it('renders related prewarm entries when background items expand', () => {
+        const item = {
+            type: 'background',
+            icon: 'fa-forward',
+            verb: 'Pre-warmed',
+            color: '#fdcb6e',
+            summary: '8 smart-context entries cached for the next prompt',
+            preWarmSource: 'smart-context',
+            relatedEntries: [
+                { title: 'Elena Blackwood', lorebook: 'Book A', uid: 17, score: 14.2, tier: 'hot', keys: ['elena', 'blackwood'] },
+            ],
+            timestamp: Date.now(),
+        };
+
+        const row = buildItemElement(item);
+        document.body.appendChild(row);
+
+        expect(row.classList.contains('tv-feed-clickable')).toBe(true);
+    expect(row.classList.contains('tv-float-item-prewarm-smart-context')).toBe(true);
+
+        toggleBackgroundExpand(row, item);
+
+        const expand = row.nextElementSibling;
+        expect(expand).not.toBeNull();
+        expect(expand.textContent).toContain('Elena Blackwood');
+        expect(expand.textContent).toContain('Book A');
+        expect(expand.textContent).toContain('UID 17');
+        expect(expand.textContent).toContain('score 14.2');
+    });
+
+    it('adds a distinct class for fact-driven prewarm rows', () => {
+        const row = buildItemElement({
+            type: 'background',
+            icon: 'fa-brain',
+            verb: 'Pre-warmed',
+            color: '#e84393',
+            summary: '2 smart-context entries cached for the next prompt',
+            preWarmSource: 'fact-driven',
+            relatedEntries: [{ title: 'Elena', lorebook: 'Book A', uid: 1 }],
+            timestamp: Date.now(),
+        });
+
+        expect(row.classList.contains('tv-float-item-prewarm-fact')).toBe(true);
+    });
 });

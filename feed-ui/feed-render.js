@@ -45,6 +45,45 @@ function buildEntrySourceIcon(source) {
     return badge;
 }
 
+function buildBackgroundRelatedEntry(entry) {
+    const entryBlock = el('div', 'tv-feed-expand-retrieved');
+    const header = el('div', 'tv-feed-expand-entry-header');
+    const title = entry?.title || `UID ${entry?.uid ?? '?'}`;
+    header.appendChild(el('span', 'tv-feed-expand-entry-title', title));
+
+    if (entry?.lorebook) {
+        header.appendChild(el('span', 'tv-feed-expand-entry-book', entry.lorebook));
+    }
+
+    entryBlock.appendChild(header);
+
+    const metaParts = [];
+    if (Number.isFinite(entry?.uid)) metaParts.push(`UID ${entry.uid}`);
+    if (typeof entry?.score === 'number') metaParts.push(`score ${entry.score.toFixed(1)}`);
+    if (entry?.tier) metaParts.push(String(entry.tier));
+    if (metaParts.length > 0) {
+        entryBlock.appendChild(el('div', 'tv-feed-detail-line', metaParts.join(' · ')));
+    }
+
+    if (Array.isArray(entry?.keys) && entry.keys.length > 0) {
+        const keysRow = el('div', 'tv-float-item-keys');
+        const shown = entry.keys.slice(0, 4);
+        for (const key of shown) {
+            keysRow.appendChild(el('span', 'tv-float-key-tag', key));
+        }
+        if (entry.keys.length > 4) {
+            keysRow.appendChild(el('span', 'tv-float-key-more', `+${entry.keys.length - 4}`));
+        }
+        entryBlock.appendChild(keysRow);
+    }
+
+    if (entry?.summary) {
+        entryBlock.appendChild(el('div', 'tv-feed-detail-line', entry.summary));
+    }
+
+    return entryBlock;
+}
+
 let _renderStatsBar = () => document.createDocumentFragment();
 let _saveFeed = () => {};
 let _renderAllItems = () => {};
@@ -238,6 +277,13 @@ export function buildItemElement(item) {
         } else {
             rowClasses.push('tv-float-item-entry-tv');
         }
+    } else if (item.type === 'background' && item.verb === 'Pre-warmed') {
+        rowClasses.push('tv-float-item-prewarm');
+        if (item.preWarmSource === 'fact-driven') {
+            rowClasses.push('tv-float-item-prewarm-fact');
+        } else {
+            rowClasses.push('tv-float-item-prewarm-smart-context');
+        }
     } else if (item.type === 'wi') {
         rowClasses.push('tv-float-item-wi');
     }
@@ -327,7 +373,7 @@ export function buildItemElement(item) {
         row.addEventListener('click', () => toggleToolItemExpand(row, item));
     }
 
-    if (item.type === 'background' && item.action) {
+    if (item.type === 'background' && (item.action || item.relatedEntries?.length || item.details?.length)) {
         row.classList.add('tv-feed-clickable');
         row.addEventListener('click', () => toggleBackgroundExpand(row, item));
     } else if (item.type === 'entry' && item.lorebook && item.uid != null) {
@@ -491,6 +537,16 @@ export function toggleBackgroundExpand(row, item) {
     const expandDiv = el('div', 'tv-feed-expand tv-feed-expand-bg');
     const actionsDiv = el('div', 'tv-feed-expand-actions');
 
+    if (Array.isArray(item.relatedEntries) && item.relatedEntries.length > 0) {
+        for (const entry of item.relatedEntries) {
+            expandDiv.appendChild(buildBackgroundRelatedEntry(entry));
+        }
+    } else if (Array.isArray(item.details) && item.details.length > 0) {
+        for (const detail of item.details) {
+            expandDiv.appendChild(el('div', 'tv-feed-detail-line', detail));
+        }
+    }
+
     if (item.completedAt) {
         const doneLabel = el('span', 'tv-feed-completed-label');
         doneLabel.appendChild(icon('fa-circle-check'));
@@ -507,7 +563,7 @@ export function toggleBackgroundExpand(row, item) {
             _renderAllItems();
         });
         actionsDiv.appendChild(undoBtn);
-    } else {
+    } else if (item.action) {
         const actionBtn = el('button', 'tv-btn tv-btn-sm tv-btn-secondary');
         actionBtn.appendChild(icon(item.action.icon || 'fa-arrow-right'));
         actionBtn.append(` ${item.action.label}`);
@@ -529,7 +585,9 @@ export function toggleBackgroundExpand(row, item) {
         actionsDiv.appendChild(dismissBtn);
     }
 
-    expandDiv.appendChild(actionsDiv);
+    if (actionsDiv.childNodes.length > 0) {
+        expandDiv.appendChild(actionsDiv);
+    }
     row.after(expandDiv);
 }
 

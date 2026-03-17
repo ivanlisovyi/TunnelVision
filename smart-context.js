@@ -38,7 +38,7 @@ import { getCachedWorldInfoSync, getCachedWorldInfo } from "./entry-manager.js";
 import { getEntryTitle, getMaxContextTokens } from "./agent-utils.js";
 import { getWorldStateSections } from "./world-state.js";
 import { getActiveArcs } from "./arc-tracker.js";
-import { addEntryActivationEvents } from "./background-events.js";
+import { addBackgroundEvent, addEntryActivationEvents } from "./background-events.js";
 import {
   shuffleArray,
   isActSummaryEntry,
@@ -81,6 +81,7 @@ export function initHierarchyRefs(refs) {
 let _preWarmedCandidates = null;
 /** @type {string|null} Cache key for validating pre-warmed data freshness. */
 let _preWarmCacheKey = null;
+let _lastReportedPreWarmKey = null;
 
 function buildPreWarmCacheKey() {
   try {
@@ -113,6 +114,7 @@ function buildPreWarmCacheKey() {
 export function invalidatePreWarmCache() {
   _preWarmedCandidates = null;
   _preWarmCacheKey = null;
+  _lastReportedPreWarmKey = null;
   _derivedKeyCache.clear();
 }
 
@@ -1283,6 +1285,38 @@ function reportSmartContextSelections(selectedEntryInfo) {
   );
 }
 
+function reportPreWarmCandidates(candidates, cacheKey, source = "smart-context") {
+  if (!Array.isArray(candidates) || candidates.length === 0) return;
+  if (!cacheKey || cacheKey === _lastReportedPreWarmKey) return;
+  _lastReportedPreWarmKey = cacheKey;
+
+  const relatedEntries = candidates.map((candidate) => ({
+    lorebook: candidate.bookName || "",
+    uid: candidate.entry?.uid ?? null,
+    title: candidate.entry?.comment || `UID ${candidate.entry?.uid ?? "?"}`,
+    keys: Array.isArray(candidate.entry?.key) ? candidate.entry.key : [],
+    score: Number(candidate.score) || 0,
+    tier: candidate.tier || "",
+    summary: candidate.isTracker
+      ? "Tracker candidate"
+      : candidate.isSummary
+        ? "Summary candidate"
+        : "Lorebook candidate",
+  }));
+
+  const isFactDriven = source === 'fact-driven';
+
+  addBackgroundEvent({
+    icon: isFactDriven ? 'fa-brain' : 'fa-forward',
+    verb: 'Pre-warmed',
+    color: isFactDriven ? '#e84393' : '#fdcb6e',
+    summary: `${candidates.length} smart-context entr${candidates.length === 1 ? 'y' : 'ies'} cached for the next prompt`,
+    details: [isFactDriven ? 'Refreshed after post-turn fact updates' : 'Ready for next turn'],
+    relatedEntries,
+    preWarmSource: source,
+  });
+}
+
 export function buildSmartContextPrompt() {
   const settings = getSettings();
   if (!settings.smartContextEnabled || settings.globalEnabled === false)
@@ -1437,7 +1471,7 @@ export function buildSmartContextPrompt() {
  *   - Hybrid sidecar reranking (5A): if sidecar available, reranks top candidates
  *   - Embedding similarity (5B): if embeddings available, adds similarity scores
  */
-export async function preWarmSmartContext() {
+export async function preWarmSmartContext({ source = 'smart-context' } = {}) {
   const settings = getSettings();
   if (!settings.smartContextEnabled || settings.globalEnabled === false) return;
 
@@ -1498,6 +1532,7 @@ export async function preWarmSmartContext() {
 
   _preWarmedCandidates = candidates;
   _preWarmCacheKey = cacheKey;
+  reportPreWarmCandidates(candidates, cacheKey, source);
 }
 
 // ── Hybrid Reranking Helpers (5A) ────────────────────────────────
@@ -1571,7 +1606,7 @@ function onMessageReceived() {
 
   processRelevanceFeedback();
 
-  preWarmSmartContext().catch((err) => {
+  preWarmSmartContext({ source: 'smart-context' }).catch((err) => {
     console.debug(
       "[TunnelVision] Pre-warm failed (non-critical):",
       err.message,

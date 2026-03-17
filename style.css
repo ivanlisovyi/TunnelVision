@@ -2475,6 +2475,16 @@
     border-left: 2px solid rgba(240, 148, 108, 0.4);
 }
 
+.tv-float-item-prewarm-smart-context {
+    border-left: 2px solid rgba(253, 203, 110, 0.65);
+    background: linear-gradient(90deg, rgba(253, 203, 110, 0.07), transparent 42px);
+}
+
+.tv-float-item-prewarm-fact {
+    border-left: 2px solid rgba(232, 67, 147, 0.75);
+    background: linear-gradient(90deg, rgba(232, 67, 147, 0.07), transparent 42px);
+}
+
 .tv-float-entry-tag {
     font-size: 9px;
     padding: 1px 5px;

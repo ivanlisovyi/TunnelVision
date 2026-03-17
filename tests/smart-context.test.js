@@ -42,6 +42,10 @@ vi.mock('../world-state.js', () => ({
 vi.mock('../arc-tracker.js', () => ({
     getActiveArcs: vi.fn(() => []),
 }));
+vi.mock('../background-events.js', () => ({
+    addBackgroundEvent: vi.fn(),
+    addEntryActivationEvents: vi.fn(),
+}));
 vi.mock('../tree-store.js', async (importOriginal) => {
     const actual = await importOriginal();
     return {
@@ -60,10 +64,12 @@ vi.mock('../../../st-context.js', () => ({
 }));
 
 import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD, buildSmartContextPrompt, preWarmSmartContext } from '../smart-context.js';
+import { addBackgroundEvent } from '../background-events.js';
 
 beforeEach(() => {
     // Reset state between tests
     for (const key of Object.keys(mockMetadata)) delete mockMetadata[key];
+    invalidatePreWarmCache();
     mockChat.length = 0;
     mockState.activeBooks = [];
     mockState.cachedWorldInfoCalls = [];
@@ -73,6 +79,7 @@ beforeEach(() => {
         globalEnabled: true,
         smartContextLookback: 6,
     };
+    vi.mocked(addBackgroundEvent).mockClear();
 });
 
 // ── scoreEntry ───────────────────────────────────────────────────
@@ -566,6 +573,14 @@ describe('preWarmSmartContext', () => {
         await preWarmSmartContext();
 
         expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+        expect(addBackgroundEvent).toHaveBeenCalledTimes(1);
+        expect(addBackgroundEvent).toHaveBeenCalledWith(expect.objectContaining({
+            verb: 'Pre-warmed',
+            preWarmSource: 'smart-context',
+            relatedEntries: expect.arrayContaining([
+                expect.objectContaining({ title: 'Elena' }),
+            ]),
+        }));
 
         const prompt = buildSmartContextPrompt();
         expect(prompt).toContain('Elena');
@@ -614,12 +629,37 @@ describe('preWarmSmartContext', () => {
 
         await preWarmSmartContext();
         expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+        expect(addBackgroundEvent).toHaveBeenCalledTimes(1);
 
         mockState.cachedWorldInfoCalls = [];
+        vi.mocked(addBackgroundEvent).mockClear();
 
         await preWarmSmartContext();
 
         expect(mockState.cachedWorldInfoCalls).toEqual([]);
+        expect(addBackgroundEvent).not.toHaveBeenCalled();
+    });
+
+    it('marks explicitly fact-driven prewarms with distinct event metadata', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+        );
+
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        await preWarmSmartContext({ source: 'fact-driven' });
+
+        expect(addBackgroundEvent).toHaveBeenCalledWith(expect.objectContaining({
+            icon: 'fa-brain',
+            color: '#e84393',
+            preWarmSource: 'fact-driven',
+        }));
     });
 
     it('skips prewarm when smart context is disabled', async () => {

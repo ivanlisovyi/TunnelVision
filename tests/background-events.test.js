@@ -49,6 +49,8 @@ describe('background feed helpers', () => {
             summary: 'Archived the current scene',
             details: ['important', '', null, 'summary'],
             action: { type: 'open-tree-editor', label: 'Open tree' },
+            relatedEntries: [null, { title: 'Elena', lorebook: 'Book A' }],
+            preWarmSource: 'fact-driven',
         });
 
         expect(callbackState.feedItems).toHaveLength(1);
@@ -60,6 +62,8 @@ describe('background feed helpers', () => {
             summary: 'Archived the current scene',
             details: ['important', 'summary'],
             action: { type: 'open-tree-editor', label: 'Open tree' },
+            relatedEntries: [{ title: 'Elena', lorebook: 'Book A' }],
+            preWarmSource: 'fact-driven',
         });
     });
 

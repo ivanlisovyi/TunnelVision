@@ -475,11 +475,12 @@ export function shouldInvalidateSmartContextPreWarm(result) {
 }
 
 export function refreshSmartContextAfterPostTurn(result) {
-  if (shouldInvalidateSmartContextPreWarm(result)) {
+  const factDriven = shouldInvalidateSmartContextPreWarm(result);
+  if (factDriven) {
     invalidatePreWarmCache();
   }
 
-  preWarmSmartContext().catch((e) => {
+  preWarmSmartContext({ source: factDriven ? 'fact-driven' : 'smart-context' }).catch((e) => {
     console.debug("[TunnelVision] Post-turn smart-context pre-warm failed (non-critical):", e.message);
   });
 }

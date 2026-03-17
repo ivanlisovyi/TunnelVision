@@ -57,8 +57,10 @@ let _bgEventId = 1_000_000;
  * @param {string} [opts.summary] - Short description text
  * @param {string[]} [opts.details] - Extra detail tags
  * @param {Object} [opts.action] - Optional action button config
+ * @param {Object[]} [opts.relatedEntries] - Optional related entry summaries shown on expand
+ * @param {string} [opts.preWarmSource] - Optional prewarm source marker for feed styling
  */
-export function addBackgroundEvent({ icon, verb, color, summary = '', details = [], action = null }) {
+export function addBackgroundEvent({ icon, verb, color, summary = '', details = [], action = null, relatedEntries = [], preWarmSource = '' }) {
     const item = {
         id: _bgEventId++,
         type: 'background',
@@ -70,6 +72,12 @@ export function addBackgroundEvent({ icon, verb, color, summary = '', details = 
         details: details.filter(Boolean),
     };
     if (action) item.action = action;
+    if (Array.isArray(relatedEntries) && relatedEntries.length > 0) {
+        item.relatedEntries = relatedEntries.filter(entry => entry && typeof entry === 'object');
+    }
+    if (typeof preWarmSource === 'string' && preWarmSource) {
+        item.preWarmSource = preWarmSource;
+    }
     _addFeedItems?.([item]);
 }
 
