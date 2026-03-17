@@ -86,7 +86,7 @@ let _initialized = false;
 let _processorRunning = false;
 let _currentTask = null;
 let _swipePending = false;
-const _chatRef = { lastChatLength: 0 };
+const _chatRef = { lastChatLength: 0, lastChatId: null };
 let _lastArchivedAt = 0;
 let _liveRollback = null;
 
@@ -125,20 +125,58 @@ function persistLiveRollback() {
 
 // ── Decision Logic ───────────────────────────────────────────────
 
-function shouldProcess() {
+function getProcessingGateState() {
   const settings = getSettings();
-  if (!settings.postTurnEnabled || settings.globalEnabled === false)
-    return false;
-  if (getActiveTunnelVisionBooks().length === 0) return false;
+  if (!settings.postTurnEnabled || settings.globalEnabled === false) {
+    return { allowed: false, reason: "disabled" };
+  }
+
+  const activeBooks = getActiveTunnelVisionBooks();
+  if (activeBooks.length === 0) {
+    return { allowed: false, reason: "no-active-books" };
+  }
 
   const context = getContext();
   const chatLength = context.chat?.length || 0;
-
   const state = getProcessorState();
   const lastIdx = state?.lastProcessedMsgIdx ?? -1;
-  const cooldown = settings.postTurnCooldown || 1;
+  const cooldown = Math.max(Number(settings.postTurnCooldown) || 1, 1);
+  const delta = chatLength - 1 - lastIdx;
 
-  return chatLength - 1 - lastIdx >= cooldown;
+  if (delta <= 0) {
+    return {
+      allowed: false,
+      reason: "already-processed-current-message",
+      chatLength,
+      lastIdx,
+      cooldown,
+      delta,
+    };
+  }
+
+  if (delta < cooldown) {
+    return {
+      allowed: false,
+      reason: "turn-interval-not-met",
+      chatLength,
+      lastIdx,
+      cooldown,
+      delta,
+    };
+  }
+
+  return {
+    allowed: true,
+    reason: "ready",
+    chatLength,
+    lastIdx,
+    cooldown,
+    delta,
+  };
+}
+
+function shouldProcess() {
+  return getProcessingGateState().allowed;
 }
 
 // ── Tracker Entry Loading ────────────────────────────────────────
@@ -188,9 +226,33 @@ export async function runPostTurnProcessor(force = false) {
     console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: processor already running`);
     return null;
   }
-  if (!force && !shouldProcess()) {
-    console.debug(`${POST_TURN_LOG_PREFIX} Skipping run: cooldown not met`);
-    return null;
+  if (!force) {
+    const gate = getProcessingGateState();
+    if (!gate.allowed) {
+      if (gate.reason === "already-processed-current-message") {
+        console.debug(
+          `${POST_TURN_LOG_PREFIX} Skipping run: current message already processed`,
+          {
+            lastProcessedMsgIdx: gate.lastIdx,
+            chatLength: gate.chatLength,
+            turnsSinceLastProcess: gate.delta,
+            configuredInterval: gate.cooldown,
+          },
+        );
+      } else if (gate.reason === "turn-interval-not-met") {
+        console.debug(
+          `${POST_TURN_LOG_PREFIX} Skipping run: turn interval not met`,
+          {
+            lastProcessedMsgIdx: gate.lastIdx,
+            chatLength: gate.chatLength,
+            turnsSinceLastProcess: gate.delta,
+            configuredInterval: gate.cooldown,
+          },
+        );
+      }
+    
+      return null;
+    }
   }
 
   const settings = getSettings();
@@ -1610,6 +1672,8 @@ function onAiMessageReceived() {
   const settings = getSettings();
   if (!settings.postTurnEnabled || settings.globalEnabled === false) return;
 
+  const chatId = getChatId();
+
   // Always skip tool-call recursion
   try {
     const context = getContext();
@@ -1617,16 +1681,36 @@ function onAiMessageReceived() {
     if (
       Array.isArray(lastMsg?.extra?.tool_invocations) &&
       lastMsg.extra.tool_invocations.length > 0
-    )
+    ) {
+      console.debug(
+        `${POST_TURN_LOG_PREFIX} Skipping MESSAGE_RECEIVED: assistant reply contains tool invocations`,
+      );
       return;
+    }
   } catch {
     /* proceed */
   }
 
   const chatLength = getContext().chat?.length || 0;
+
+  if (_chatRef.lastChatId !== chatId) {
+    _chatRef.lastChatId = chatId;
+    _chatRef.lastChatLength = Math.max(chatLength - 1, 0);
+    console.debug(`${POST_TURN_LOG_PREFIX} Observed new active chat for post-turn tracking`, {
+      chatId,
+      chatLength,
+      seededLastChatLength: _chatRef.lastChatLength,
+    });
+  }
+
   const isSwipe = chatLength > 0 && chatLength <= _chatRef.lastChatLength;
 
   if (isSwipe) {
+    console.debug(`${POST_TURN_LOG_PREFIX} Detected swipe/regeneration`, {
+      chatId,
+      chatLength,
+      previousLength: _chatRef.lastChatLength,
+    });
     _chatRef.lastChatLength = chatLength;
     if (_processorRunning) {
       _swipePending = true;
@@ -1647,17 +1731,45 @@ function onAiMessageReceived() {
   _chatRef.lastChatLength = chatLength;
 
   if (shouldProcess()) {
+    const gate = getProcessingGateState();
+    console.debug(`${POST_TURN_LOG_PREFIX} MESSAGE_RECEIVED accepted`, {
+      chatId,
+      chatLength,
+      turnsSinceLastProcess: gate.delta,
+      configuredInterval: gate.cooldown,
+      lastProcessedMsgIdx: gate.lastIdx,
+    });
     runPostTurnProcessor().catch((e) => {
       console.error("[TunnelVision] Background post-turn processor failed:", e);
+    });
+  } else {
+    const gate = getProcessingGateState();
+    console.debug(`${POST_TURN_LOG_PREFIX} MESSAGE_RECEIVED did not trigger processing`, {
+      chatId,
+      chatLength,
+      reason: gate.reason,
+      turnsSinceLastProcess: gate.delta,
+      configuredInterval: gate.cooldown,
+      lastProcessedMsgIdx: gate.lastIdx,
     });
   }
 }
 
 function onChatChanged() {
   try {
-    _chatRef.lastChatLength = getContext().chat?.length || 0;
+    const chatId = getChatId();
+    const chatLength = getContext().chat?.length || 0;
+    if (_chatRef.lastChatId !== chatId) {
+      _chatRef.lastChatId = chatId;
+      _chatRef.lastChatLength = chatLength;
+      console.debug(`${POST_TURN_LOG_PREFIX} Chat changed`, {
+        chatId,
+        chatLength,
+      });
+    }
   } catch {
     _chatRef.lastChatLength = 0;
+    _chatRef.lastChatId = null;
   }
 }
 

@@ -20,6 +20,7 @@ export const TV_PROMPT_KEY = 'tunnelvision_mandatory';
 export const TV_NOTEBOOK_KEY = 'tunnelvision_notebook';
 export const TV_WORLDSTATE_KEY = 'tunnelvision_worldstate';
 export const TV_SMARTCTX_KEY = 'tunnelvision_smartcontext';
+const TV_PROMPT_LOG_PREFIX = '[TunnelVision][PromptInjection]';
 
 /**
  * Map a position setting string to the ST extension_prompt_types enum.
@@ -262,6 +263,16 @@ export async function buildPromptInjectionPlan(deps = {}) {
     const activeBooks = getActiveTunnelVisionBooksImpl();
     const enabled = settings.globalEnabled !== false;
 
+    console.log(`${TV_PROMPT_LOG_PREFIX} Building generation prompts`, {
+        enabled,
+        recursiveToolPass: recursive,
+        activeBooks,
+        worldStateEnabled: settings.worldStateEnabled === true,
+        smartContextEnabled: settings.smartContextEnabled === true,
+        notebookEnabled: settings.notebookEnabled !== false,
+        totalInjectionBudget: settings.totalInjectionBudget || 0,
+    });
+
     const promptMeta = {
         mandatory: {
             position: mapPositionSetting(settings.mandatoryPromptPosition, deps.promptTypes),
@@ -303,6 +314,8 @@ export async function buildPromptInjectionPlan(deps = {}) {
 
         if (settings.smartContextEnabled) {
             prompts.smartContext = buildSmartContextPromptImpl();
+        } else {
+            console.log(`${TV_PROMPT_LOG_PREFIX} Smart context skipped: disabled in settings`);
         }
 
         if (settings.notebookEnabled !== false) {
@@ -320,6 +333,13 @@ export async function buildPromptInjectionPlan(deps = {}) {
         worldState: prompts.worldState.length,
         smartContext: prompts.smartContext.length,
         notebook: prompts.notebook.length,
+    });
+
+    console.log(`${TV_PROMPT_LOG_PREFIX} Prompt build complete`, {
+        mandatoryChars: prompts.mandatory.length,
+        worldStateChars: prompts.worldState.length,
+        smartContextChars: prompts.smartContext.length,
+        notebookChars: prompts.notebook.length,
     });
 
     return {
@@ -399,6 +419,12 @@ export function applyPromptInjectionPlan(payload, deps = {}) {
 export async function prepareAndInjectGenerationPrompts(deps = {}) {
     const payload = await buildPromptInjectionPlan(deps);
     applyPromptInjectionPlan(payload, deps);
+    console.log(`${TV_PROMPT_LOG_PREFIX} Prompt injection applied`, {
+        mandatoryChars: payload.prompts.mandatory.length,
+        worldStateChars: payload.prompts.worldState.length,
+        smartContextChars: payload.prompts.smartContext.length,
+        notebookChars: payload.prompts.notebook.length,
+    });
     return payload;
 }
 
