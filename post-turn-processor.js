@@ -132,7 +132,6 @@ function shouldProcess() {
 
   const context = getContext();
   const chatLength = context.chat?.length || 0;
-  if (chatLength < 4) return false;
 
   const state = getProcessorState();
   const lastIdx = state?.lastProcessedMsgIdx ?? -1;
@@ -196,7 +195,7 @@ export async function runPostTurnProcessor(force = false) {
 
   const context = getContext();
   const chat = context.chat;
-  if (!chat || chat.length < 4) return null;
+  if (!chat || chat.length === 0) return null;
 
   const chatId = getChatId();
   const { book: targetBook, error } = resolveTargetBook(activeBooks[0]);
