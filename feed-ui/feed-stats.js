@@ -43,13 +43,18 @@ export function renderStatsBar() {
     const bar = el('div', 'tv-feed-stats');
 
     let nativeEntries = 0;
+    let postTurnEntries = 0;
+    let worldStateEntries = 0;
     let tvEntries = 0;
     let toolCount = 0;
     let bgCount = 0;
 
     for (const item of feedItems) {
         if (item.type === 'entry') {
-            item.source === 'native' ? nativeEntries++ : tvEntries++;
+            if (item.source === 'native') nativeEntries++;
+            else if (item.source === 'post-turn') postTurnEntries++;
+            else if (item.source === 'world-state') worldStateEntries++;
+            else tvEntries++;
         } else if (item.type === 'tool') {
             toolCount++;
         } else if (item.type === 'background') {
@@ -57,11 +62,13 @@ export function renderStatsBar() {
         }
     }
 
+    const triggeredEntries = nativeEntries + postTurnEntries + worldStateEntries;
+
     addStatPair(
         bar,
         'fa-book-open',
-        nativeEntries + tvEntries,
-        `Entries (${nativeEntries} native, ${tvEntries} TV)`,
+        triggeredEntries + tvEntries,
+        `Entries (${nativeEntries} native, ${postTurnEntries} post-turn, ${worldStateEntries} world-state, ${tvEntries} TV)`,
         '#e84393',
     );
     addStatPair(bar, 'fa-gear', toolCount, 'Tool calls', '#f0946c');

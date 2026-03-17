@@ -27,6 +27,24 @@ function icon(iconClass) {
     return i;
 }
 
+function buildEntrySourceIcon(source) {
+    const sourceMeta = source === 'smart-context'
+        ? { iconClass: 'fa-wand-magic-sparkles', label: 'Smart Context', extraClass: 'tv-float-source-icon-smart-context' }
+        : source === 'post-turn'
+            ? { iconClass: 'fa-brain', label: 'Post-turn', extraClass: 'tv-float-source-icon-post-turn' }
+            : source === 'world-state'
+                ? { iconClass: 'fa-globe', label: 'World State', extraClass: 'tv-float-source-icon-world-state' }
+            : null;
+
+    if (!sourceMeta) return null;
+
+    const badge = el('span', `tv-float-source-icon ${sourceMeta.extraClass}`);
+    badge.title = sourceMeta.label;
+    badge.setAttribute('aria-label', sourceMeta.label);
+    badge.appendChild(icon(sourceMeta.iconClass));
+    return badge;
+}
+
 let _renderStatsBar = () => document.createDocumentFragment();
 let _saveFeed = () => {};
 let _renderAllItems = () => {};
@@ -211,7 +229,15 @@ export function buildItemElement(item) {
     const rowClasses = ['tv-float-item'];
     if (item.type === 'entry') {
         rowClasses.push('tv-float-item-entry');
-        rowClasses.push(item.source === 'native' ? 'tv-float-item-entry-native' : 'tv-float-item-entry-tv');
+        if (item.source === 'native') {
+            rowClasses.push('tv-float-item-entry-native');
+        } else if (item.source === 'world-state') {
+            rowClasses.push('tv-float-item-entry-native', 'tv-float-item-entry-world-state');
+        } else if (item.source === 'post-turn') {
+            rowClasses.push('tv-float-item-entry-native', 'tv-float-item-entry-post-turn');
+        } else {
+            rowClasses.push('tv-float-item-entry-tv');
+        }
     } else if (item.type === 'wi') {
         rowClasses.push('tv-float-item-wi');
     }
@@ -240,6 +266,10 @@ export function buildItemElement(item) {
         ? formatEntrySummary(item, shouldIncludeLorebookForEntries())
         : (item.summary || '');
     textRow.appendChild(el('span', 'tv-float-item-summary', summaryText));
+    if (item.type === 'entry') {
+        const sourceIcon = buildEntrySourceIcon(item.source);
+        if (sourceIcon) textRow.appendChild(sourceIcon);
+    }
     body.appendChild(textRow);
 
     if (item.keys?.length > 0) {

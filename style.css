@@ -1666,6 +1666,10 @@
 
 .tv-float-item-row {
     line-height: 1.4;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
 }
 
 .tv-float-item-verb {
@@ -1676,6 +1680,38 @@
 .tv-float-item-summary {
     color: var(--SmartThemeBodyColor);
     opacity: 0.85;
+    min-width: 0;
+}
+
+.tv-float-source-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    font-size: 9px;
+    flex-shrink: 0;
+}
+
+.tv-float-source-icon-smart-context {
+    color: #fdcb6e;
+    border-color: rgba(253, 203, 110, 0.24);
+    background: rgba(253, 203, 110, 0.1);
+}
+
+.tv-float-source-icon-post-turn {
+    color: #e84393;
+    border-color: rgba(232, 67, 147, 0.24);
+    background: rgba(232, 67, 147, 0.1);
+}
+
+.tv-float-source-icon-world-state {
+    color: #00b894;
+    border-color: rgba(0, 184, 148, 0.24);
+    background: rgba(0, 184, 148, 0.1);
 }
 
 .tv-float-item-time {
@@ -2425,6 +2461,16 @@
 }
 
 /* ===== Feed Entry Items (TunnelVision retrieved entries) ===== */
+.tv-float-item-entry-post-turn {
+    border-left: 2px dashed rgba(232, 67, 147, 0.75);
+    background: linear-gradient(90deg, rgba(232, 67, 147, 0.06), transparent 42px);
+}
+
+.tv-float-item-entry-world-state {
+    border-left: 2px dashed rgba(0, 184, 148, 0.75);
+    background: linear-gradient(90deg, rgba(0, 184, 148, 0.06), transparent 42px);
+}
+
 .tv-float-item-entry-tv {
     border-left: 2px solid rgba(240, 148, 108, 0.4);
 }

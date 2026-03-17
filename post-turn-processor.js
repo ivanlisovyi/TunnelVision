@@ -70,6 +70,7 @@ import {
   invalidatePreWarmCache,
 } from "./smart-context.js";
 import { hashString, shuffleArray, isSystemEntry } from "./shared-utils.js";
+import { withWorldInfoAttribution } from "./world-info-attribution.js";
 import {
   DEDUP_SIMILARITY_THRESHOLD as DEDUP_THRESHOLD,
   TRIGRAM_CANDIDATE_MIN_OVERLAP,
@@ -764,6 +765,9 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
     errors: 0,
     sceneChange: null,
     createdUids: [],
+    arcsCreated: 0,
+    arcsUpdated: 0,
+    arcsResolved: 0,
   };
 
   const existingFactsSection = await buildExistingFactsSection(
@@ -780,7 +784,10 @@ async function analyzeExchange(targetBook, recentExcerpt, chatId) {
   try {
     const storyCtx = getStoryContext();
     const response = await callWithRetry(
-      () => generateAnalytical({ prompt: storyCtx + quietPrompt }),
+      () => withWorldInfoAttribution(
+        "post-turn",
+        () => generateAnalytical({ prompt: storyCtx + quietPrompt }),
+      ),
       { label: "Post-turn analysis" },
     );
 
@@ -853,15 +860,18 @@ async function archiveScene(targetBook, chat, sceneChange, chatId) {
     // skipAutoHide: we handle hiding ourselves with the correct range,
     // because runQuietSummarize's hideSummarizedMessages reads the full
     // chat from getContext() and would hide new-scene messages instead.
-    const summaryResult = await runQuietSummarize(
-      targetBook,
-      oldSceneChat,
-      archiveCount,
-      titleHint,
-      {
-        background: true,
-        skipAutoHide: true,
-      },
+    const summaryResult = await withWorldInfoAttribution(
+      "post-turn",
+      () => runQuietSummarize(
+        targetBook,
+        oldSceneChat,
+        archiveCount,
+        titleHint,
+        {
+          background: true,
+          skipAutoHide: true,
+        },
+      ),
     );
 
     if (summaryResult?.title) {
@@ -1022,7 +1032,10 @@ export async function updateTrackers(trackers, recentExcerpt, chatId) {
   try {
     const storyCtx = getStoryContext();
     const response = await callWithRetry(
-      () => generateAnalytical({ prompt: storyCtx + quietPrompt }),
+      () => withWorldInfoAttribution(
+        "post-turn",
+        () => generateAnalytical({ prompt: storyCtx + quietPrompt }),
+      ),
       { label: "Post-turn trackers" },
     );
 

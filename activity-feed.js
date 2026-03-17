@@ -53,6 +53,7 @@ import {
     parseInvocationParameters, extractRetrievedEntries, parseRetrievedEntryHeader,
     buildToolSummary, computeLineDiff,
 } from './feed-helpers.js';
+import { getWorldInfoAttribution } from './world-info-attribution.js';
 
 import { createTriggerButton, createPanel, positionPanel, openTreeEditorFromFeed } from './feed-ui/feed-panel.js';
 import { renderAllItems, renderEmptyState, refreshActiveTasksInPanel, registerFeedRenderCallbacks } from './feed-ui/feed-render.js';
@@ -66,6 +67,10 @@ export { parseRetrievedEntryHeader, buildToolSummary, computeLineDiff };
 // ── Constants (module-private) ──────────────────────────────────
 
 const HIDDEN_TOOL_CALL_FLAG = 'tvHiddenToolCalls';
+
+function getWorldInfoActivationSource() {
+    return getWorldInfoAttribution() || 'native';
+}
 
 function togglePanel() {
     const panelEl = getPanelEl();
@@ -108,13 +113,14 @@ function onWorldInfoActivated(entries) {
     if (activeBooks.length === 0) return;
 
     const timestamp = Date.now();
+    const source = getWorldInfoActivationSource();
     const items = [];
     for (const entry of entries) {
         // Only show entries from TV-managed lorebooks
         if (entry.world && !isLorebookEnabled(entry.world)) continue;
 
         items.push(createEntryFeedItem({
-            source: 'native',
+            source,
             lorebook: typeof entry?.world === 'string' ? entry.world : '',
             uid: Number.isFinite(entry?.uid) ? entry.uid : null,
             title: entry.comment || entry.key?.[0] || `UID ${entry.uid}`,

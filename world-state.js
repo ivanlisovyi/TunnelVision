@@ -22,6 +22,7 @@ import { getCachedWorldInfo } from './entry-manager.js';
 import { getChatId, formatChatExcerpt, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
 import { buildArcsSummary } from './arc-tracker.js';
+import { withWorldInfoAttribution } from './world-info-attribution.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
 
@@ -496,7 +497,10 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
         const quietPrompt = await buildUpdatePrompt(previousState, recentExcerpt, priorityContext);
 
         const response = await callWithRetry(
-            () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            () => withWorldInfoAttribution(
+                'world-state',
+                () => generateQuietPrompt({ quietPrompt, skipWIAN: true }),
+            ),
             { label: 'World state update' },
         );
 

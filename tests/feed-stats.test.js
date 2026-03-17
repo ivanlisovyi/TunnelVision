@@ -283,6 +283,8 @@ describe('feed-stats', () => {
         it('renders counts for entries, tool calls, and background items', async () => {
             setFeedItems([
                 { type: 'entry', source: 'native' },
+                { type: 'entry', source: 'post-turn' },
+                { type: 'entry', source: 'world-state' },
                 { type: 'entry', source: 'tunnelvision' },
                 { type: 'tool' },
                 { type: 'tool' },
@@ -295,8 +297,8 @@ describe('feed-stats', () => {
             expect(bar.className).toBe('tv-feed-stats');
 
             const stats = Array.from(bar.querySelectorAll('.tv-feed-stat'));
-            expect(stats[0].title).toBe('Entries (1 native, 1 TV)');
-            expect(stats[0].querySelector('.tv-feed-stat-value')?.textContent).toBe('2');
+            expect(stats[0].title).toBe('Entries (1 native, 1 post-turn, 1 world-state, 1 TV)');
+            expect(stats[0].querySelector('.tv-feed-stat-value')?.textContent).toBe('4');
 
             expect(stats[1].title).toBe('Tool calls');
             expect(stats[1].querySelector('.tv-feed-stat-value')?.textContent).toBe('2');
