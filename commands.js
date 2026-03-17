@@ -736,30 +736,30 @@ async function handleClearCommand(args) {
  * @param {string} [titleHint] - Optional title hint
  * @returns {Promise<{title: string, uid: number}>}
  */
-function buildSummaryPrompt(recentContext, titleHint) {
+function buildSummaryPrompt(recentContext, titleHint, { strictJson = false } = {}) {
     const titleInstruction = titleHint
         ? `Use this as the title: "${titleHint}".`
         : 'Create a short, descriptive title for the summary.';
 
-    const worldStateText = getWorldStateText();
-    const worldStateSection = worldStateText
-        ? `\n[Current Story Context — use this to understand the broader narrative when writing your summary]\n${worldStateText}\n`
-        : '';
+    const jsonInstruction = strictJson
+        ? 'Respond with ONLY valid JSON matching this schema exactly. No markdown, no code fences, no extra text, no trailing explanation.'
+        : 'Respond with ONLY a JSON object (no markdown, no code fences):';
 
     const quietPrompt = [
         'You are a summarization assistant for a roleplay lorebook. This is a PRIVATE memory document for story continuity, not a public-facing text.',
+        'Your job is to summarize ONLY what is established inside the excerpt. Do not backfill later developments into earlier scenes.',
         '',
         titleInstruction,
         '',
         SUMMARY_STYLE_RULES,
         '',
-        'For "when": estimate the in-world date/time from story context (e.g. "Late evening, Day 3", "Morning after the festival"). Use whatever granularity the story supports. If no time cues exist, write "unspecified".',
+        'For "when": estimate the in-world date/time from the excerpt first, using story context only to clarify already-supported cues. Do not invent precision beyond the evidence in the excerpt. If no time cues exist, write "unspecified".',
         'For "significance": "minor" = flavor/ambiance, "moderate" = plot-relevant, "major" = changes character/world state, "critical" = turning point.',
         'For "arc": if the events belong to an ongoing storyline or narrative thread, provide a short arc name (e.g. "The Curse Investigation", "Elena & Ren\'s Romance"). If this is a standalone scene with no clear thread, omit the field or set it to null.',
         '',
         KEYWORD_RULES,
         '',
-        'Respond with ONLY a JSON object (no markdown, no code fences):',
+        jsonInstruction,
         '{',
         '  "title": "short descriptive title",',
         '  "when": "in-world date/time estimate",',
@@ -769,24 +769,20 @@ function buildSummaryPrompt(recentContext, titleHint) {
         '  "significance": "minor|moderate|major|critical",',
         '  "arc": "narrative thread name or null"',
         '}',
-        worldStateSection,
         `Conversation to summarize:\n${recentContext}`,
     ].join('\n');
 
     return quietPrompt;
 }
 
-async function parseSummaryWithRetry(recentContext, quietPrompt) {
+async function parseSummaryWithRetry(recentContext, titleHint) {
+    let quietPrompt = buildSummaryPrompt(recentContext, titleHint);
     let response = await generateQuietPrompt({ quietPrompt, skipWIAN: true });
     let parsed = parseJsonFromLLM(response);
 
     if (!parsed.title || !parsed.summary) {
-        console.warn('[TunnelVision] Summary parse failed, retrying with simplified prompt. Raw response:', response?.substring?.(0, 300));
-        const retryPrompt = [
-            'Summarize this roleplay excerpt as JSON. Respond with ONLY valid JSON, no other text.',
-            '{"title": "short title", "summary": "what happened", "participants": ["name1"], "significance": "moderate"}',
-            `\n${recentContext}`,
-        ].join('\n');
+        console.warn('[TunnelVision] Summary parse failed, retrying with strict JSON prompt. Raw response:', response?.substring?.(0, 300));
+        const retryPrompt = buildSummaryPrompt(recentContext, titleHint, { strictJson: true });
         response = await generateQuietPrompt({ quietPrompt: retryPrompt, skipWIAN: true });
         parsed = parseJsonFromLLM(response);
 
@@ -846,8 +842,7 @@ async function applySummaryWatermarkAndHide(chat, messageCount) {
 
 export async function runQuietSummarize(lorebook, chat, messageCount, titleHint = '', { background = false, skipAutoHide = false } = {}) {
     const recentContext = formatChatExcerpt(chat, messageCount);
-    const quietPrompt = buildSummaryPrompt(recentContext, titleHint);
-    const parsed = await parseSummaryWithRetry(recentContext, quietPrompt);
+    const parsed = await parseSummaryWithRetry(recentContext, titleHint);
 
     const summariesNodeId = ensureSummariesNode(lorebook);
     const participants = Array.isArray(parsed.participants) ? parsed.participants : [];

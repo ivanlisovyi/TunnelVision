@@ -27,20 +27,22 @@ const METADATA_KEY = 'tunnelvision_worldstate';
 
 /** Default injection header wrapping the world state text in the AI's context. */
 export const DEFAULT_WS_INJECTION_PROMPT = [
-    '[Rolling World State — Your maintained memory of the current story.',
-    'This is automatically kept up-to-date. Use it to stay grounded and maintain consistency.',
+    '[Rolling World State — Live snapshot of the world as it exists right now.',
+    'This is automatically kept up-to-date. Treat it as current truth unless the scene directly changes it.',
     '',
-    '- Check Unresolved Threads — consider advancing or acknowledging one when natural.',
-    '- Check New Pending Threads — weave external events into the scene when appropriate.',
-    '- Check Cliché Check — consciously evaluate the obvious path before defaulting to it.',
-    '- Check Off-Screen — characters exist beyond the current scene; reference their activities when relevant.',
+    '- Respect Current Scene, active pressures, and unresolved obligations.',
+    '- Let off-screen actors continue pursuing their own goals even when not on camera.',
+    '- Use elapsed time, pending events, and world pressures to imply a living, moving world.',
+    '- Reference consequences naturally instead of restating the document.',
     '',
     'Do NOT repeat this information verbatim. Let it inform your writing naturally.]',
 ].join('\n');
 
 /** Default LLM instructions for generating/updating the world state document. */
 export const DEFAULT_WS_UPDATE_PROMPT = [
-    'You are a narrative state tracker for an ongoing roleplay. Maintain a concise "World State" document capturing the current state of the story.',
+    'You are a narrative state tracker for an ongoing roleplay. Maintain a concise "World State" document that functions as a rolling simulation snapshot of the world.',
+    'Prioritize what is true now: current conditions, active pressures, off-screen movement, unresolved obligations, and lasting consequences of recent events.',
+    'Do not write an archive or recap unless a past event still materially affects the present state.',
     '',
     'Follow this exact format:',
     '',
@@ -52,11 +54,11 @@ export const DEFAULT_WS_UPDATE_PROMPT = [
     'Present: [characters currently in the scene]',
     'Situation: [1-2 sentences of what is actively happening right now]',
     '',
-    '## Recollection',
-    '[Summarize recent events, recording important developments, character states, dynamics, and anything noteworthy. 3-5 sentences.]',
+    '## Recent Changes',
+    '[2-4 bullets describing only recent developments that still affect the present world state. Focus on changes, consequences, and newly established facts. Omit flavor recap.]',
     '',
     '## Off-Screen',
-    '[Characters not in the current scene. Format: "- **Name**: location / activity (since when)". Only include established characters.]',
+    '[Characters, factions, or groups not in the current scene whose activity still matters. Format: "- **Name**: location / activity / current direction (since when)". Only include established actors.]',
     '',
     '## Pending',
     '[Near-term events, promises, appointments, and deadlines. Format: "- event/obligation (when)". Only include items that are still actionable or upcoming. Remove immediately once resolved, cancelled, or no longer relevant.]',
@@ -67,16 +69,18 @@ export const DEFAULT_WS_UPDATE_PROMPT = [
     '## Unresolved Threads',
     '[Loose ends, NPC developments, and plots that have not been followed up on but are still genuinely unresolved and potentially relevant. Do NOT keep items here once they are answered, abandoned, concluded, or no longer meaningful to the present story. Remove stale items promptly rather than preserving them as archival notes.]',
     '',
-    '## New Pending Threads',
-    '[External threads NOT involving the main characters in the current scene — events brewing in the background, peripheral stakeholders, concurrent unrelated developments that may eventually come to the forefront. 1-3 items. These must be grounded in the established world — reference named locations, factions, or NPCs. Generic events like "a stranger arrives" are not useful.]',
+    '## World Pressures',
+    '[0-3 off-screen developments or pressures that are actively moving even without the current scene characters. Each item must be grounded in established locations, factions, NPCs, resources, or conflicts. Format: "- pressure/development: current status and likely near-term movement". Do not invent novelty just to fill this section.]',
     '',
     '## Key Character States',
-    '[For each active character: "- **Name**: mood, current goal, notable status".]',
+    '[For each active character: "- **Name**: mood, current goal, notable status, immediate pressure".]',
     '',
-    '## Cliché Check',
-    '[Identify the most obvious narrative path from here. Note it so it can be consciously evaluated rather than defaulted to. Reference specific established facts or patterns from the story so far. Name the trope if applicable. A good cliché check is specific to this story, not generic.]',
+    '## Story Momentum',
+    '[Optional. 0-3 bullets on near-term developments worth watching. Only include developments that are strongly implied by established facts, active pressures, explicit plans, or off-screen activity. Keep them tentative and grounded; do not speculate or invent new plot turns just to fill this section.]',
     '',
     'Be concise — the entire document should be under 1200 words. This replaces the previous version entirely.',
+    'When updating, advance time and off-screen activity conservatively but concretely when the messages support it.',
+    'Prefer persistent causality over surprise. Existing tensions should keep moving unless something clearly stops them.',
     'Respond with ONLY the world state content. No JSON, no code fences, no commentary.',
 ].join('\n');
 
@@ -106,14 +110,14 @@ function setWorldState(state) {
 
 const EXPECTED_SECTIONS = [
     '## Current Scene',
-    '## Recollection',
+    '## Recent Changes',
     '## Off-Screen',
     '## Pending',
     '## Active Threads',
     '## Unresolved Threads',
-    '## New Pending Threads',
+    '## World Pressures',
     '## Key Character States',
-    '## Cliché Check',
+    '## Story Momentum',
 ];
 
 /**
@@ -139,8 +143,8 @@ function validateWorldStateStructure(text) {
 
 const SECTION_HEADER_RE = /^##\s+(.+)$/gm;
 
-const CORE_SECTIONS = new Set(['Current Scene', 'Recollection', 'Cliché Check']);
-const ALWAYS_INCLUDE_SECTIONS = new Set(['Pending', 'Active Threads', 'New Pending Threads']);
+const CORE_SECTIONS = new Set(['Current Scene', 'Recent Changes', 'Off-Screen']);
+const ALWAYS_INCLUDE_SECTIONS = new Set(['Pending', 'Active Threads', 'World Pressures', 'Key Character States']);
 
 /**
  * Parse a world state document into a { header: body } map.
@@ -429,9 +433,9 @@ async function buildUpdatePrompt(previousState, recentExcerpt, priorityContext =
             '- Carry forward all items that are still relevant, even if not mentioned in recent messages.',
             '- Remove concluded threads from "Active Threads" immediately. Do not keep one-turn [concluded] placeholders.',
             '- Remove resolved items from "Pending" immediately once they are fulfilled, cancelled, or no longer actionable. Do not keep one-turn [resolved] placeholders.',
-            '- Preserve lasting consequences of concluded or resolved developments in the appropriate sections (Current Scene, Recollection, Off-Screen, Key Character States) when they still affect the present.',
+            '- Preserve lasting consequences of concluded or resolved developments in the appropriate sections (Current Scene, Recent Changes, Off-Screen, Key Character States, World Pressures) when they still affect the present.',
             '- World State is a live snapshot of the current story, not an archive. Do not retain finished items whose only purpose is historical record.',
-            '- New Pending Threads: always generate 1-3 new external events. These MUST be different from previous ones unless still pending.',
+            '- World Pressures: include 0-3 off-screen developments only when grounded in established world logic. Continue existing pressures when appropriate; do not force novelty.',
         );
     } else {
         parts.push(
