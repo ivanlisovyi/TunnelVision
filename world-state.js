@@ -24,7 +24,6 @@ import { addBackgroundEvent, registerBackgroundTask } from './background-events.
 import { buildArcsSummary } from './arc-tracker.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
-const WORLD_STATE_LOG_PREFIX = '[TunnelVision][WorldState]';
 
 /** Default injection header wrapping the world state text in the AI's context. */
 export const DEFAULT_WS_INJECTION_PROMPT = [
@@ -442,14 +441,6 @@ async function buildUpdatePrompt(previousState, recentExcerpt, priorityContext =
 
     parts.push('', instructions);
 
-    console.debug(`${WORLD_STATE_LOG_PREFIX} Built update prompt`, {
-        hasPrevious,
-        recentExcerptChars: recentExcerpt.length,
-        hasPriorityContext: !!priorityContext,
-        includedHistory: !!historyBlock,
-        includedArcs: !!arcsSummary,
-    });
-
     return parts.join('\n');
 }
 
@@ -462,29 +453,15 @@ async function buildUpdatePrompt(previousState, recentExcerpt, priorityContext =
  * @returns {Promise<Object|null>} The new state object, or null if skipped/failed
  */
 export async function updateWorldState(forceUpdate = false, priorityContext = null) {
-    if (_updateRunning) {
-        console.debug(`${WORLD_STATE_LOG_PREFIX} Skipping update: already running`);
-        return null;
-    }
-    if (!forceUpdate && !shouldUpdate()) {
-        console.debug(`${WORLD_STATE_LOG_PREFIX} Skipping update: interval not met`);
-        return null;
-    }
+    if (_updateRunning) return null;
+    if (!forceUpdate && !shouldUpdate()) return null;
 
     const settings = getSettings();
-    if (!settings.worldStateEnabled || settings.globalEnabled === false) {
-        console.debug(`${WORLD_STATE_LOG_PREFIX} Skipping update: world state is disabled`);
-        return null;
-    }
+    if (!settings.worldStateEnabled || settings.globalEnabled === false) return null;
 
     const context = getContext();
     const chat = context.chat;
-    if (!chat || chat.length < 6) {
-        console.debug(`${WORLD_STATE_LOG_PREFIX} Skipping update: insufficient chat history`, {
-            chatLength: chat?.length || 0,
-        });
-        return null;
-    }
+    if (!chat || chat.length < 6) return null;
 
     const chatId = getChatId();
     const currentState = getWorldState();
@@ -493,13 +470,7 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
     const excerptCount = Math.min(messagesSinceUpdate + 4, chat.length, 40);
 
     let recentExcerpt = formatChatExcerpt(chat, excerptCount);
-    if (!recentExcerpt.trim()) {
-        console.debug(`${WORLD_STATE_LOG_PREFIX} Skipping update: excerpt is empty`, {
-            excerptCount,
-            messagesSinceUpdate,
-        });
-        return null;
-    }
+    if (!recentExcerpt.trim()) return null;
 
     if (recentExcerpt.length > MAX_EXCERPT_CHARS) {
         recentExcerpt = recentExcerpt.slice(-MAX_EXCERPT_CHARS);
@@ -511,21 +482,9 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
 
     _updateRunning = true;
     const task = registerBackgroundTask({ label: 'World state', icon: 'fa-globe', color: '#00b894' });
-    console.log(`[TunnelVision] World state update triggered (${messagesSinceUpdate} new messages)`);
-    console.debug(`${WORLD_STATE_LOG_PREFIX} Update context`, {
-        forceUpdate,
-        chatId,
-        lastIdx,
-        messagesSinceUpdate,
-        excerptCount,
-        excerptChars: recentExcerpt.length,
-        hasPreviousState: !!currentState?.text,
-        priorityContext,
-    });
 
     try {
         if (getChatId() !== chatId || task.cancelled) {
-            console.log('[TunnelVision] World state update aborted');
             return null;
         }
 
@@ -538,7 +497,6 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
         );
 
         if (getChatId() !== chatId || task.cancelled) {
-            console.log('[TunnelVision] World state update aborted after generation');
             return null;
         }
 
@@ -563,10 +521,6 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
         }
 
         const sections = parseWorldStateSections(cleaned);
-        console.debug(`${WORLD_STATE_LOG_PREFIX} Parsed updated sections`, {
-            sectionCount: Object.keys(sections).length,
-            sections: Object.keys(sections),
-        });
 
         const newState = {
             lastUpdated: Date.now(),
@@ -620,22 +574,12 @@ let _priorityContext = null;
  * @param {string}  [reason.sceneChangeType]
  */
 export function requestPriorityUpdate(reason) {
-    if (_priorityRequested || _updateRunning) {
-        console.debug(`${WORLD_STATE_LOG_PREFIX} Ignoring priority request`, {
-            alreadyQueued: _priorityRequested,
-            updateRunning: _updateRunning,
-            reason,
-        });
-        return;
-    }
+    if (_priorityRequested || _updateRunning) return;
     const settings = getSettings();
     if (!settings.worldStateEnabled || settings.globalEnabled === false) return;
 
     _priorityRequested = true;
     _priorityContext = reason || null;
-    console.debug(`${WORLD_STATE_LOG_PREFIX} Queued priority update`, {
-        reason: _priorityContext,
-    });
     setTimeout(() => {
         _priorityRequested = false;
         const ctx = _priorityContext;

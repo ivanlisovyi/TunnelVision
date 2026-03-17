@@ -26,7 +26,7 @@ import { eventSource, event_types, extension_prompt_types, extension_prompt_role
 import { getContext } from '../../../st-context.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled } from './tree-store.js';
-import { preflightToolRuntimeState, registerTools, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache, applyRecurseLimit } from './tool-registry.js';
+import { preflightToolRuntimeState, registerTools, unregisterTools, isSearchToolAvailable, NOTEBOOK_NAME, invalidateActiveBookCache, applyRecurseLimit } from './tool-registry.js';
 import { invalidateWorldInfoCache } from './entry-manager.js';
 import { handleGenerationStartedPromptInjection } from './prompt-injection-service.js';
 import { initWorldState } from './world-state.js';
@@ -40,6 +40,18 @@ import { initAutoSummary } from './auto-summary.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const EXTENSION_FOLDER = `third-party/TunnelVision`;
+
+async function syncToolRegistration(reason) {
+    const settings = getSettings();
+    if (settings.globalEnabled === false) {
+        unregisterTools();
+        console.log(`[TunnelVision] Tools unregistered (${reason}: extension disabled)`);
+        return;
+    }
+
+    await registerTools();
+    console.log(`[TunnelVision] Tool registration synced (${reason})`);
+}
 
 async function init() {
     // Ensure settings exist
@@ -101,7 +113,7 @@ async function init() {
     const settings = getSettings();
     applyRecurseLimit(settings);
     if (settings.globalEnabled !== false) {
-        await registerTools();
+        await syncToolRegistration('init');
     }
 
     // Listen for relevant events
@@ -133,7 +145,7 @@ async function onChatChanged() {
     invalidateWorldInfoCache();
     invalidatePreWarmCache();
     refreshUI();
-    await registerTools();
+    await syncToolRegistration('chat-changed');
 }
 
 async function onWorldInfoUpdated() {
@@ -141,11 +153,11 @@ async function onWorldInfoUpdated() {
     invalidateWorldInfoCache();
     invalidatePreWarmCache();
     refreshUI();
-    await registerTools();
+    await syncToolRegistration('worldinfo-updated');
 }
 
 async function onAppReady() {
-    await registerTools();
+    await syncToolRegistration('app-ready');
 }
 
 /**

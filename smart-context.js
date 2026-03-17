@@ -67,14 +67,6 @@ import {
 let _getRolledUpSceneUids = () => new Set();
 const SMART_CONTEXT_LOG_PREFIX = "[TunnelVision][SmartContext]";
 
-function logSmartContext(message, details) {
-  if (details !== undefined) {
-    console.log(`${SMART_CONTEXT_LOG_PREFIX} ${message}`, details);
-    return;
-  }
-  console.log(`${SMART_CONTEXT_LOG_PREFIX} ${message}`);
-}
-
 /**
  * Initialize hierarchy references. Called once after module load to avoid circular imports.
  */
@@ -119,13 +111,9 @@ function buildPreWarmCacheKey() {
 
 /** Invalidate the pre-warming cache when entries change or books are modified. */
 export function invalidatePreWarmCache() {
-  const hadCache = !!_preWarmedCandidates || !!_preWarmCacheKey;
   _preWarmedCandidates = null;
   _preWarmCacheKey = null;
   _derivedKeyCache.clear();
-  if (hadCache) {
-    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Invalidated pre-warm cache`);
-  }
 }
 
 const RELEVANCE_KEY = "tunnelvision_relevance";
@@ -1257,19 +1245,6 @@ function scoreCandidates(activeBooks, recentText) {
   applyPredictiveBoosts(candidates, currentMentionKeys);
 
   candidates.sort((a, b) => b.score - a.score);
-  console.debug(`${SMART_CONTEXT_LOG_PREFIX} Scored candidates`, {
-    activeBooks,
-    candidateCount: candidates.length,
-    trackerCount: candidates.filter((candidate) => candidate.isTracker).length,
-    summaryCount: candidates.filter((candidate) => candidate.isSummary).length,
-    topCandidates: candidates.slice(0, 5).map((candidate) => ({
-      uid: candidate.entry.uid,
-      title: (candidate.entry.comment || "").trim() || `UID ${candidate.entry.uid}`,
-      score: Number(candidate.score.toFixed(2)),
-      tier: candidate.tier,
-      book: candidate.bookName,
-    })),
-  });
   return candidates;
 }
 
@@ -1310,37 +1285,21 @@ function reportSmartContextSelections(selectedEntryInfo) {
 
 export function buildSmartContextPrompt() {
   const settings = getSettings();
-  if (!settings.smartContextEnabled || settings.globalEnabled === false) {
-    logSmartContext("Prompt build skipped: feature disabled");
+  if (!settings.smartContextEnabled || settings.globalEnabled === false)
     return "";
-  }
 
   const activeBooks = getActiveTunnelVisionBooks();
-  if (activeBooks.length === 0) {
-    logSmartContext("Prompt build skipped: no active lorebooks");
-    return "";
-  }
+  if (activeBooks.length === 0) return "";
 
   const context = getContext();
   const chat = context.chat;
-  if (!chat || chat.length < 2) {
-    logSmartContext("Prompt build skipped: insufficient chat history", {
-      chatLength: chat?.length || 0,
-    });
-    return "";
-  }
+  if (!chat || chat.length < 2) return "";
 
   const lookback = settings.smartContextLookback || 6;
   const maxEntries = settings.smartContextMaxEntries || 8;
 
   const recentText = extractMentionsFromChat(chat, lookback);
-  if (!recentText) {
-    logSmartContext("Prompt build skipped: no recent mentions extracted", {
-      lookback,
-      chatLength: chat.length,
-    });
-    return "";
-  }
+  if (!recentText) return "";
 
   // Use pre-warmed candidates if cache is fresh, otherwise score synchronously
   let candidates;
@@ -1355,15 +1314,7 @@ export function buildSmartContextPrompt() {
     candidates = scoreCandidates(activeBooks, recentText);
   }
 
-  if (candidates.length === 0) {
-    logSmartContext("Prompt build found no candidates", {
-      activeBooks,
-      lookback,
-      recentTextChars: recentText.length,
-      usedPreWarmCache,
-    });
-    return "";
-  }
+  if (candidates.length === 0) return "";
 
   // 3C: Dynamic budget allocation
   const phase = detectConversationPhase(recentText);
@@ -1456,37 +1407,11 @@ export function buildSmartContextPrompt() {
     totalChars += entryText.length;
   }
 
-  if (selected.length === 0) {
-    logSmartContext("Prompt build found candidates but selected none", {
-      activeBooks,
-      maxEntries,
-      maxChars,
-      usedPreWarmCache,
-    });
-    return "";
-  }
+  if (selected.length === 0) return "";
 
-  logSmartContext(`Injecting ${selected.length} smart-context entr${selected.length === 1 ? "y" : "ies"}`, {
-    usedPreWarmCache,
-    phase,
-    selectedEntries: selectedEntryInfo.map((entry) =>
-      `${entry.title || `UID ${entry.uid ?? "?"}`} (${entry.bookName || "unknown book"})`,
-    ),
-  });
-
-  console.debug(`${SMART_CONTEXT_LOG_PREFIX} Selected entries for injection`, {
-    usedPreWarmCache,
-    phase,
-    maxEntries,
-    maxChars,
-    totalChars,
-    selectedCount: selected.length,
-    selectedEntries: selectedEntryInfo.map((entry) => ({
-      uid: entry.uid,
-      title: entry.title || `UID ${entry.uid ?? "?"}`,
-      book: entry.bookName || "",
-    })),
-  });
+  console.log(
+    `${SMART_CONTEXT_LOG_PREFIX} Injecting ${selected.length} entr${selected.length === 1 ? "y" : "ies"}`,
+  );
 
   _lastInjectedEntries = selectedEntryInfo;
   reportSmartContextSelections(selectedEntryInfo);
@@ -1514,46 +1439,22 @@ export function buildSmartContextPrompt() {
  */
 export async function preWarmSmartContext() {
   const settings = getSettings();
-  if (!settings.smartContextEnabled || settings.globalEnabled === false) {
-    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Pre-warm skipped: feature disabled`);
-    return;
-  }
+  if (!settings.smartContextEnabled || settings.globalEnabled === false) return;
 
   const activeBooks = getActiveTunnelVisionBooks();
-  if (activeBooks.length === 0) {
-    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Pre-warm skipped: no active lorebooks`);
-    return;
-  }
+  if (activeBooks.length === 0) return;
 
   const context = getContext();
   const chat = context.chat;
-  if (!chat || chat.length < 2) {
-    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Pre-warm skipped: insufficient chat history`);
-    return;
-  }
+  if (!chat || chat.length < 2) return;
 
   const cacheKey = buildPreWarmCacheKey();
-  if (!cacheKey) {
-    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Pre-warm skipped: could not build cache key`);
-    return;
-  }
-  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
-    logSmartContext("Pre-warm skipped: cache already fresh");
-    return;
-  }
+  if (!cacheKey) return;
+  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) return;
 
   const lookback = settings.smartContextLookback || 6;
   const recentText = extractMentionsFromChat(chat, lookback);
-  if (!recentText) {
-    console.debug(`${SMART_CONTEXT_LOG_PREFIX} Pre-warm skipped: no recent mentions extracted`);
-    return;
-  }
-
-  logSmartContext("Starting pre-warm", {
-    activeBooks,
-    lookback,
-    recentTextChars: recentText.length,
-  });
+  if (!recentText) return;
 
   // Ensure world info data is in cache (the async part that saves time later)
   await Promise.all(activeBooks.map((book) => getCachedWorldInfo(book)));
@@ -1572,9 +1473,6 @@ export async function preWarmSmartContext() {
         maxTokens: 200,
       });
       applyRerankResults(candidates, topN, response);
-      console.debug(`${SMART_CONTEXT_LOG_PREFIX} Applied sidecar reranking`, {
-        rerankedCount: topN.length,
-      });
     }
   } catch (e) {
     console.debug("[TunnelVision] Sidecar reranking skipped:", e.message);
@@ -1586,18 +1484,13 @@ export async function preWarmSmartContext() {
       await import("./embedding-cache.js");
     if (isEmbeddingAvailable()) {
       const boosts = await getEmbeddingSimilarityBoosts(candidates, recentText);
-      let boostedCount = 0;
       for (const c of candidates) {
         const bonus = boosts.get(c.entry.uid);
         if (bonus) {
           c.score += bonus;
-          boostedCount++;
         }
       }
       candidates.sort((a, b) => b.score - a.score);
-      console.debug(`${SMART_CONTEXT_LOG_PREFIX} Applied embedding boosts`, {
-        boostedCount,
-      });
     }
   } catch (e) {
     console.debug("[TunnelVision] Embedding similarity skipped:", e.message);
@@ -1605,7 +1498,6 @@ export async function preWarmSmartContext() {
 
   _preWarmedCandidates = candidates;
   _preWarmCacheKey = cacheKey;
-  logSmartContext(`Pre-warm complete: ${candidates.length} candidates scored`);
 }
 
 // ── Hybrid Reranking Helpers (5A) ────────────────────────────────
@@ -1672,16 +1564,11 @@ function onMessageReceived() {
     if (
       Array.isArray(lastMsg?.extra?.tool_invocations) &&
       lastMsg.extra.tool_invocations.length > 0
-    ) {
-      logSmartContext("MESSAGE_RECEIVED skipped: assistant reply contains tool invocations");
-      return;
-    }
+    ) return;
   } catch {
-    console.debug(`${SMART_CONTEXT_LOG_PREFIX} MESSAGE_RECEIVED skipped: failed to read chat context`);
     return;
   }
 
-  logSmartContext("MESSAGE_RECEIVED: processing relevance feedback and pre-warm");
   processRelevanceFeedback();
 
   preWarmSmartContext().catch((err) => {

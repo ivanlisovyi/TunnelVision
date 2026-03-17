@@ -54,6 +54,7 @@ const CONFIRMABLE_TOOLS = new Set([REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, SUMM
 
 /** Cached tracker list string — refreshed on each registerTools() call. */
 let _trackerListCache = '';
+let _lastAppliedRegistrationSignature = null;
 
 function getAllToolDefinitions() {
     return [
@@ -70,6 +71,22 @@ function getAllToolDefinitions() {
 
 function getToolDefinitionName(tool) {
     return tool?.toFunctionOpenAI?.()?.function?.name || '';
+}
+
+function buildRegistrationSignature(preparedTools, activeBooks) {
+    const payload = {
+        activeBooks: [...activeBooks].sort(),
+        tools: preparedTools.map(({ name, registrationDef, confirmWrapped }) => ({
+            name,
+            displayName: registrationDef.displayName || '',
+            description: registrationDef.description || '',
+            parameters: registrationDef.parameters || null,
+            stealth: registrationDef.stealth === true,
+            confirmWrapped,
+        })),
+    };
+
+    return JSON.stringify(payload);
 }
 
 function getRegisteredTunnelVisionTools() {
@@ -458,8 +475,8 @@ async function _doRegisterTools() {
 
     const confirmTools = settings.confirmTools || {};
     const promptOverrides = settings.toolPromptOverrides || {};
+    const preparedTools = [];
 
-    let registered = 0;
     for (const { def, name } of allDefs) {
         if (disabled[name]) {
             continue;
@@ -488,17 +505,35 @@ async function _doRegisterTools() {
         }
 
         // Wrap action with confirmation gate for confirmable tools
+        const confirmWrapped = !!(CONFIRMABLE_TOOLS.has(name) && confirmTools[name]);
         if (CONFIRMABLE_TOOLS.has(name) && confirmTools[name]) {
             registrationDef.action = wrapWithConfirmation(registrationDef.action, registrationDef.displayName || name);
         }
 
+        preparedTools.push({ name, registrationDef, confirmWrapped });
+    }
+
+    const signature = buildRegistrationSignature(preparedTools, activeBooks);
+    if (signature === _lastAppliedRegistrationSignature) {
+        console.debug('[TunnelVision] Tool registration skipped: definitions unchanged');
+        return;
+    }
+
+    // Unregister right before the synchronous re-registration loop to minimize
+    // the window where tools are absent.
+    unregisterTools();
+
+    let registered = 0;
+    for (const { registrationDef } of preparedTools) {
         try {
             ToolManager.registerFunctionTool(registrationDef);
             registered++;
         } catch (e) {
-            console.error(`[TunnelVision] Failed to register tool "${def.name}":`, e);
+            console.error(`[TunnelVision] Failed to register tool "${registrationDef.name}":`, e);
         }
     }
+
+    _lastAppliedRegistrationSignature = signature;
 
     const eligible = allDefs.filter(({ def, name }) => def && !disabled[name]).length;
     const snapshot = await inspectToolRuntimeState();
@@ -517,6 +552,7 @@ export function unregisterTools() {
             // Tool may not be registered — that's fine
         }
     }
+    _lastAppliedRegistrationSignature = null;
 }
 
 /**
