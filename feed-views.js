@@ -169,13 +169,13 @@ export function renderWorldStateView() {
     } else {
         // Content display
         const contentEl = el('div', 'tv-ws-content');
-        contentEl.style.cssText = 'flex: 1; overflow-y: auto; white-space: pre-wrap; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; background: rgba(0,0,0,0.1); max-height: 260px;';
+        contentEl.style.cssText = 'flex: 1 1 auto; min-height: 0; overflow-y: auto; white-space: pre-wrap; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; background: rgba(0,0,0,0.1);';
         contentEl.textContent = text;
         container.appendChild(contentEl);
 
         // Action buttons
         const actions = el('div', '');
-        actions.style.cssText = 'display: flex; gap: 6px; flex-wrap: wrap;';
+        actions.style.cssText = 'display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0;';
 
         const editBtn = el('button', 'tv-float-panel-btn');
         editBtn.style.cssText = 'padding: 3px 10px; font-size: 0.82em; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;';
@@ -241,12 +241,12 @@ function renderWorldStateEditor(currentText) {
 
     const textarea = document.createElement('textarea');
     textarea.className = 'tv-ws-textarea';
-    textarea.style.cssText = 'flex: 1; min-height: 200px; max-height: 280px; resize: vertical; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; background: rgba(0,0,0,0.2); color: inherit; font-family: inherit;';
+    textarea.style.cssText = 'flex: 1 1 auto; min-height: 0; width: 100%; box-sizing: border-box; resize: vertical; font-size: 0.85em; line-height: 1.5; padding: 8px; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; background: rgba(0,0,0,0.2); color: inherit; font-family: inherit;';
     textarea.value = currentText;
     container.appendChild(textarea);
 
     const actions = el('div', '');
-    actions.style.cssText = 'display: flex; gap: 6px;';
+    actions.style.cssText = 'display: flex; gap: 6px; flex-shrink: 0;';
 
     const saveBtn = el('button', 'tv-float-panel-btn');
     saveBtn.style.cssText = 'padding: 4px 14px; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; background: rgba(108,92,231,0.3);';
