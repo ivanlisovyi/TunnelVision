@@ -277,7 +277,7 @@ export function buildItemElement(item) {
         } else {
             rowClasses.push('tv-float-item-entry-tv');
         }
-    } else if (item.type === 'background' && item.verb === 'Pre-warmed') {
+    } else if (item.type === 'background' && item.preWarmSource) {
         rowClasses.push('tv-float-item-prewarm');
         if (item.preWarmSource === 'fact-driven') {
             rowClasses.push('tv-float-item-prewarm-fact');

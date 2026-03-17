@@ -1341,7 +1341,6 @@ export function buildSmartContextPrompt() {
   // Use pre-warmed candidates if cache is fresh, otherwise score synchronously
   let candidates;
   const cacheKey = buildPreWarmCacheKey();
-  let usedPreWarmCache = false;
   let selectionSource = "smart-context";
   if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
     candidates = _preWarmedCandidates;
@@ -1349,7 +1348,6 @@ export function buildSmartContextPrompt() {
     _preWarmedCandidates = null;
     _preWarmCacheKey = null;
     _preWarmSource = "smart-context";
-    usedPreWarmCache = true;
   } else {
     candidates = scoreCandidates(activeBooks, recentText);
   }

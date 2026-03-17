@@ -99,6 +99,34 @@ export function addEntryActivationEvents(entries) {
     if (!_addFeedItems || !Array.isArray(entries) || entries.length === 0) return;
 
     const timestamp = Date.now();
+    const normalizedEntries = entries.filter(entry => entry && typeof entry === 'object');
+    const groupedSource = normalizedEntries[0]?.source || 'smart-context';
+    const shouldGroup = normalizedEntries.length > 0
+        && normalizedEntries.every(entry => (entry?.source || 'smart-context') === groupedSource)
+        && (groupedSource === 'smart-context' || groupedSource === 'fact-driven');
+
+    if (shouldGroup) {
+        const isFactDriven = groupedSource === 'fact-driven';
+        _addFeedItems?.([{
+            id: _bgEventId++,
+            type: 'background',
+            icon: isFactDriven ? 'fa-brain' : 'fa-wand-magic-sparkles',
+            verb: 'Injected',
+            color: isFactDriven ? '#e84393' : '#fdcb6e',
+            summary: `${normalizedEntries.length} entr${normalizedEntries.length === 1 ? 'y' : 'ies'} injected into the prompt`,
+            timestamp,
+            details: [isFactDriven ? 'From fact-driven pre-warm' : 'From smart-context pre-warm'],
+            relatedEntries: normalizedEntries.map(entry => ({
+                lorebook: typeof entry?.lorebook === 'string' ? entry.lorebook : '',
+                uid: Number.isFinite(entry?.uid) ? entry.uid : null,
+                title: entry?.title || (Number.isFinite(entry?.uid) ? `UID ${entry.uid}` : 'Unknown entry'),
+                keys: Array.isArray(entry?.keys) ? entry.keys : [],
+            })),
+            preWarmSource: groupedSource,
+        }]);
+        return;
+    }
+
     const items = entries.map((entry, index) => ({
         id: 2_000_000 + timestamp + index,
         type: 'entry',

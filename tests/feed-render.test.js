@@ -163,4 +163,19 @@ describe('feed rendering', () => {
 
         expect(row.classList.contains('tv-float-item-prewarm-fact')).toBe(true);
     });
+
+    it('styles grouped injected smart-context rows with the prewarm class family', () => {
+        const row = buildItemElement({
+            type: 'background',
+            icon: 'fa-wand-magic-sparkles',
+            verb: 'Injected',
+            color: '#fdcb6e',
+            summary: '20 entries injected into the prompt',
+            preWarmSource: 'smart-context',
+            relatedEntries: [{ title: 'Elena', lorebook: 'Book A', uid: 1 }],
+            timestamp: Date.now(),
+        });
+
+        expect(row.classList.contains('tv-float-item-prewarm-smart-context')).toBe(true);
+    });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
     _registerFeedCallbacks,
     addBackgroundEvent,
+    addEntryActivationEvents,
     markBackgroundStart,
     registerBackgroundTask,
     cancelBackgroundTask,
@@ -76,6 +77,24 @@ describe('background feed helpers', () => {
         end();
 
         expect(callbackState.triggerStates).toEqual([true, false]);
+    });
+
+    it('groups smart-context activations into a single expandable background item', () => {
+        addEntryActivationEvents([
+            { source: 'smart-context', lorebook: 'Book A', uid: 1, title: 'Elena' },
+            { source: 'smart-context', lorebook: 'Book A', uid: 2, title: 'Grand Cathedral' },
+        ]);
+
+        expect(callbackState.feedItems).toHaveLength(1);
+        expect(callbackState.feedItems[0]).toMatchObject({
+            type: 'background',
+            verb: 'Injected',
+            preWarmSource: 'smart-context',
+            relatedEntries: [
+                expect.objectContaining({ title: 'Elena' }),
+                expect.objectContaining({ title: 'Grand Cathedral' }),
+            ],
+        });
     });
 });
 
