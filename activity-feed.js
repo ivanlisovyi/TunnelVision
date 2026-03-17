@@ -18,7 +18,9 @@ import { saveFeed, loadFeed } from './feed-ui/feed-storage.js';
 
 // ── Sub-module imports ──────────────────────────────────────────
 
-import {MAX_FEED_ITEMS,
+import {DEFAULT_MAX_FEED_ITEMS,
+    MIN_FEED_ITEMS,
+    MAX_FEED_ITEMS,
     TOOL_DISPLAY,
     TRACKER_SUGGESTION_NAME_RE,
     getActiveChatId,
@@ -60,7 +62,7 @@ import { renderAllItems, renderEmptyState, refreshActiveTasksInPanel, registerFe
 
 // ── Re-exports (preserve existing public API) ───────────────────
 
-export { initActivityFeed, refreshHiddenToolCallMessages, clearFeed, getFeedItems };
+export { initActivityFeed, refreshHiddenToolCallMessages, clearFeed, getFeedItems, enforceFeedItemCap, resolveFeedItemCap };
 export { parseTimestamp, loadTimelineEntries };
 export { parseRetrievedEntryHeader, buildToolSummary, computeLineDiff };
 
@@ -225,12 +227,24 @@ function pulseTrigger() {
     setTimeout(() => triggerEl.classList.remove('tv-float-pulse'), 600);
 }
 
+function resolveFeedItemCap(settings = getSettings()) {
+    const raw = Number(settings?.activityFeedCap);
+    if (!Number.isFinite(raw)) return DEFAULT_MAX_FEED_ITEMS;
+    return Math.min(Math.max(Math.round(raw), MIN_FEED_ITEMS), MAX_FEED_ITEMS);
+}
+
 function trimFeed() {
+    const maxFeedItems = resolveFeedItemCap();
     let feedItems = getFeedItemsRaw();
-    if (feedItems.length > MAX_FEED_ITEMS) {
-        feedItems = feedItems.slice(0, MAX_FEED_ITEMS);
+    if (feedItems.length > maxFeedItems) {
+        feedItems = feedItems.slice(0, maxFeedItems);
         setFeedItems(feedItems);
-    }saveFeed();
+    }
+    saveFeed();
+}
+
+function enforceFeedItemCap() {
+    trimFeed();
 }
 
 function addFeedItems(items) {
@@ -397,7 +411,10 @@ function initActivityFeed() {
     if (getFeedInitialized()) return;
     setFeedInitialized(true);
 
-    loadFeed({ trackerSuggestionNameRe: TRACKER_SUGGESTION_NAME_RE });
+    loadFeed({
+        trackerSuggestionNameRe: TRACKER_SUGGESTION_NAME_RE,
+        onAfterLoad: enforceFeedItemCap,
+    });
 
     createTriggerButton({ onTogglePanel: togglePanel });
     createPanel({
@@ -449,7 +466,10 @@ function initActivityFeed() {
     // Reload feed from chat metadata on chat switch
     if (event_types.CHAT_CHANGED) {
         eventSource.on(event_types.CHAT_CHANGED, () => {
-            loadFeed({ trackerSuggestionNameRe: TRACKER_SUGGESTION_NAME_RE });
+            loadFeed({
+                trackerSuggestionNameRe: TRACKER_SUGGESTION_NAME_RE,
+                onAfterLoad: enforceFeedItemCap,
+            });
             setShowingWorldState(false);
             setShowingTimeline(false);
             setShowingArcs(false);

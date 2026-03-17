@@ -116,6 +116,47 @@ export function migrateFeedItems(items, { trackerSuggestionNameRe = null, save =
     for (const item of items) {
         if (!item || typeof item !== 'object') continue;
 
+        // Migration: legacy entry-like items without a modern type marker.
+        if (!item.type && (item.lorebook || item.uid != null || item.title || Array.isArray(item.keys))) {
+            item.type = 'entry';
+            mutated = true;
+        }
+
+        // Migration: backfill defaults for legacy entry items so they continue
+        // rendering after source-specific feed UI changes.
+        if (item.type === 'entry') {
+            const inferredSource = item.source
+                || (item.verb === 'Injected' ? 'tunnelvision' : 'native');
+            if (item.source !== inferredSource) {
+                item.source = inferredSource;
+                mutated = true;
+            }
+
+            if (!item.icon) {
+                item.icon = 'fa-book-open';
+                mutated = true;
+            }
+
+            const expectedVerb = inferredSource === 'tunnelvision' ? 'Injected' : 'Triggered';
+            if (!item.verb) {
+                item.verb = expectedVerb;
+                mutated = true;
+            }
+
+            const expectedColor = inferredSource === 'tunnelvision' || inferredSource === 'smart-context'
+                ? '#fdcb6e'
+                : '#e84393';
+            if (!item.color) {
+                item.color = expectedColor;
+                mutated = true;
+            }
+
+            if (!Array.isArray(item.keys)) {
+                item.keys = [];
+                mutated = true;
+            }
+        }
+
         // Migration: old "Tracker suggested" background items without action
         // used to encode the character name in the summary.
         if (

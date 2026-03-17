@@ -20,7 +20,22 @@ vi.mock('../post-turn-processor.js', () => ({
     createTrackerForCharacter: vi.fn(),
 }));
 
-import { parseTimestamp, parseRetrievedEntryHeader, buildToolSummary, computeLineDiff } from '../activity-feed.js';
+import { parseTimestamp, parseRetrievedEntryHeader, buildToolSummary, computeLineDiff, resolveFeedItemCap } from '../activity-feed.js';
+
+describe('resolveFeedItemCap', () => {
+    it('returns the default cap when the setting is missing', () => {
+        expect(resolveFeedItemCap({})).toBe(100);
+    });
+
+    it('clamps the cap to the supported minimum and maximum', () => {
+        expect(resolveFeedItemCap({ activityFeedCap: 5 })).toBe(20);
+        expect(resolveFeedItemCap({ activityFeedCap: 5000 })).toBe(1000);
+    });
+
+    it('rounds finite values to whole items', () => {
+        expect(resolveFeedItemCap({ activityFeedCap: 128.7 })).toBe(129);
+    });
+});
 
 // ── parseTimestamp ───────────────────────────────────────────────
 

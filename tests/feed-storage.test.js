@@ -284,6 +284,53 @@ describe('feed-storage', () => {
             expect(save).toHaveBeenCalledTimes(1);
         });
 
+        it('backfills legacy entry items so they still render as feed entries', () => {
+            const items = [{
+                id: 2,
+                lorebook: 'BookA',
+                uid: 17,
+                title: 'Legacy Fact',
+                verb: 'Triggered',
+            }];
+            const save = vi.fn();
+
+            migrateFeedItems(items, { save });
+
+            expect(items[0]).toMatchObject({
+                type: 'entry',
+                source: 'native',
+                icon: 'fa-book-open',
+                verb: 'Triggered',
+                color: '#e84393',
+                keys: [],
+            });
+            expect(save).toHaveBeenCalledTimes(1);
+        });
+
+        it('backfills source defaults for legacy injected entry items', () => {
+            const items = [{
+                id: 3,
+                type: 'entry',
+                lorebook: 'BookA',
+                uid: 18,
+                title: 'Legacy Injected Fact',
+                verb: 'Injected',
+            }];
+            const save = vi.fn();
+
+            migrateFeedItems(items, { save });
+
+            expect(items[0]).toMatchObject({
+                type: 'entry',
+                source: 'tunnelvision',
+                icon: 'fa-book-open',
+                verb: 'Injected',
+                color: '#fdcb6e',
+                keys: [],
+            });
+            expect(save).toHaveBeenCalledTimes(1);
+        });
+
         it('does not mutate unrelated items', () => {
             const original = {
                 id: 2,

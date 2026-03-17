@@ -418,6 +418,7 @@ Write naturally. Use tools when they help you stay consistent with established d
     llmCallTimeout: 120000,
     stealthMode: false,
     autoHideSummarized: true,
+    activityFeedCap: 100,
     passthroughConstant: true,
     confirmTools: {},
     toolPromptOverrides: {},

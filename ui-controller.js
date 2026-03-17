@@ -11,7 +11,7 @@ import { getWorldStateText, getWorldStateLastIndex, updateWorldState, clearWorld
 import { getLastProcessingResult, getLastProcessedIndex } from './post-turn-processor.js';
 import { getLastLifecycleResult, getLastLifecycleRunIndex } from './memory-lifecycle.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
-import { loadTimelineEntries } from './activity-feed.js';
+import { loadTimelineEntries, enforceFeedItemCap, resolveFeedItemCap } from './activity-feed.js';
 import {
     getTree,
     isLorebookEnabled,
@@ -163,6 +163,7 @@ export function bindUIEvents() {
     $('#tv_auto_summary_count').on('change', onAutoSummaryCountChange);
     $('#tv_auto_summary_reset').on('click', onAutoSummaryCountReset);
     $('#tv_auto_hide_summarized').on('change', onAutoHideSummarizedToggle);
+    $('#tv_activity_feed_cap').on('change', onActivityFeedCapChange);
 
     // World state settings
     $('#tv_world_state_enabled').on('change', onWorldStateToggle);
@@ -346,6 +347,7 @@ export function refreshUI() {
     $('#tv_auto_summary_interval').val(settings.autoSummaryInterval ?? 50);
     $('#tv_auto_summary_count').val(getAutoSummaryCount());
     $('#tv_auto_hide_summarized').prop('checked', settings.autoHideSummarized !== false);
+    $('#tv_activity_feed_cap').val(resolveFeedItemCap(settings));
 
     // Sync world state settings
     const wsEnabled = settings.worldStateEnabled === true;
@@ -1032,6 +1034,15 @@ function onAutoHideSummarizedToggle() {
     const settings = getSettings();
     settings.autoHideSummarized = enabled;
     saveSettingsDebounced();
+}
+
+function onActivityFeedCapChange() {
+    const clamped = resolveFeedItemCap({ activityFeedCap: $('#tv_activity_feed_cap').val() });
+    $('#tv_activity_feed_cap').val(clamped);
+    const settings = getSettings();
+    settings.activityFeedCap = clamped;
+    saveSettingsDebounced();
+    enforceFeedItemCap();
 }
 
 // ── World State Handlers ─────────────────────────────────────────

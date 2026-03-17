@@ -8,7 +8,9 @@
 
 //── Constants ────────────────────────────────────────────────────
 
-export const MAX_FEED_ITEMS = 50;
+export const DEFAULT_MAX_FEED_ITEMS = 100;
+export const MIN_FEED_ITEMS = 20;
+export const MAX_FEED_ITEMS = 1000;
 export const MAX_RENDERED_RETRIEVED_ENTRIES = 5;
 export const LOREBOOK_STATS_CACHE_TTL = 30000;
 
