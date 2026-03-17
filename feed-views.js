@@ -456,6 +456,28 @@ function parseTimestampTag(tag) {
     };
 }
 
+function hasTemporalOrdering(temporal) {
+    return Number.isFinite(temporal?.turnIndex) || Number.isFinite(temporal?.createdAt);
+}
+
+function mergeTimelineTemporal(parsedTemporal, parsedFromContent) {
+    if (!parsedTemporal || parsedTemporal.groupKey === 'undated') {
+        return parsedFromContent;
+    }
+
+    const mergedTimeLabel = parsedFromContent.timeLabel
+        && parsedFromContent.groupKey === parsedTemporal.groupKey
+        && parsedFromContent.timeLabel.length > parsedTemporal.timeLabel.length
+        ? parsedFromContent.timeLabel
+        : (parsedTemporal.timeLabel || parsedFromContent.timeLabel);
+
+    return {
+        ...parsedFromContent,
+        ...parsedTemporal,
+        timeLabel: mergedTimeLabel,
+    };
+}
+
 function hasLeadingTimestamp(content) {
     return /^\[[^\]]+\]\s*/.test(content || '');
 }
@@ -530,9 +552,7 @@ export async function loadTimelineEntries() {
                 const temporalWhen = temporal?.when ? String(temporal.when).trim() : '';
                 const parsedFromContent = parseTimestamp(entry.content || '');
                 const parsedTemporal = temporalWhen ? parseTimestampTag(temporalWhen) : null;
-                const parsed = parsedTemporal && parsedTemporal.groupKey !== 'undated'
-                    ? { ...parsedFromContent, ...parsedTemporal, timeLabel: parsedTemporal.timeLabel || parsedFromContent.timeLabel }
-                    : parsedFromContent;
+                const parsed = mergeTimelineTemporal(parsedTemporal, parsedFromContent);
 
                 items.push({
                     uid: entry.uid ?? null,
@@ -546,6 +566,8 @@ export async function loadTimelineEntries() {
                     groupLabel: parsed.groupLabel,
                     isSummary,
                     lorebook: bookName,
+                    sortTurnIndex: Number.isFinite(temporal?.turnIndex) ? temporal.turnIndex : null,
+                    sortCreatedAt: Number.isFinite(temporal?.createdAt) ? temporal.createdAt : null,
                 });
             }
         } catch { /* skip unavailable books */ }
@@ -568,6 +590,20 @@ export async function loadTimelineEntries() {
         if (aHasDay) return -1;
         if (bHasDay) return 1;
 
+        const aHasTemporalOrder = a.sortTurnIndex != null || a.sortCreatedAt != null;
+        const bHasTemporalOrder = b.sortTurnIndex != null || b.sortCreatedAt != null;
+        if (aHasTemporalOrder && bHasTemporalOrder) {
+            const turnDelta = (a.sortTurnIndex ?? Number.MAX_SAFE_INTEGER) - (b.sortTurnIndex ?? Number.MAX_SAFE_INTEGER);
+            if (turnDelta !== 0) return turnDelta;
+
+            const createdDelta = (a.sortCreatedAt ?? Number.MAX_SAFE_INTEGER) - (b.sortCreatedAt ?? Number.MAX_SAFE_INTEGER);
+            if (createdDelta !== 0) return createdDelta;
+        } else if (aHasTemporalOrder) {
+            return -1;
+        } else if (bHasTemporalOrder) {
+            return 1;
+        }
+
         return 0;
     });
 
@@ -588,6 +624,18 @@ export async function loadTimelineEntries() {
             groups.push(group);
         }
         byKey.get(item.groupKey).entries.push(item);
+    }
+
+    for (const group of groups) {
+        group.entries.sort((left, right) => {
+            const turnDelta = (left.sortTurnIndex ?? Number.MAX_SAFE_INTEGER) - (right.sortTurnIndex ?? Number.MAX_SAFE_INTEGER);
+            if (turnDelta !== 0) return turnDelta;
+
+            const createdDelta = (left.sortCreatedAt ?? Number.MAX_SAFE_INTEGER) - (right.sortCreatedAt ?? Number.MAX_SAFE_INTEGER);
+            if (createdDelta !== 0) return createdDelta;
+
+            return String(left.title || '').localeCompare(String(right.title || ''));
+        });
     }
 
     return groups;

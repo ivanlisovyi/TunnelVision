@@ -62,7 +62,7 @@ import {
   registerBackgroundTask,
   getTrackerSuggestionNames,
 } from "./background-events.js";
-import { requestPriorityUpdate, getWorldStateText } from "./world-state.js";
+import { requestPriorityUpdate, getWorldStateTemporalSnapshot } from "./world-state.js";
 import { processArcUpdates, buildArcsContextBlock } from "./arc-tracker.js";
 import {
   getFeedbackMap,
@@ -556,27 +556,24 @@ async function buildExistingFactsSection(targetBook, recentExcerpt) {
 }
 
 function buildTemporalContextFromWorldState() {
-  let temporalContext = "";
   try {
-    const wsText = getWorldStateText();
-    if (!wsText) return "";
+    const snapshot = getWorldStateTemporalSnapshot();
+    if (!snapshot) return "";
 
-    const sceneMatch = wsText.match(/## Current Scene[\s\S]*?(?=\n## |$)/);
-    if (!sceneMatch) return "";
+    const lines = [
+      snapshot.day ? `- Day: ${snapshot.day}` : null,
+      snapshot.date ? `- Date: ${snapshot.date}` : null,
+      snapshot.time ? `- Time: ${snapshot.time}` : null,
+      snapshot.location ? `- Location: ${snapshot.location}` : null,
+    ].filter(Boolean);
 
-    const dayMatch = sceneMatch[0].match(/Day:\s*(.+)/i);
-    const dateMatch = sceneMatch[0].match(/Date:\s*(.+)/i);
-    const timeMatch = sceneMatch[0].match(/Time:\s*(.+)/i);
-    const parts = [dayMatch?.[1], dateMatch?.[1], timeMatch?.[1]].filter(
-      Boolean,
-    );
-    if (parts.length > 0) {
-      temporalContext = `\n[Current In-World Time — use this to timestamp facts]\n${parts.join(" | ")}\n`;
-    }
+    if (lines.length === 0) return "";
+
+    return `\n[Current In-World Time — use this to timestamp facts]\n${lines.join("\n")}\n`;
   } catch {
     /* proceed without temporal context */
+    return "";
   }
-  return temporalContext;
 }
 
 function buildPostTurnAnalysisPrompt(

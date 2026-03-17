@@ -24,7 +24,13 @@ vi.mock('../entry-manager.js', () => ({
     parseJsonFromLLM: vi.fn(() => []),
     recordEntryTemporal: vi.fn(),
     KEYWORD_RULES: 'KEYWORD RULES (test stub)',
-    FACT_EXTRACTION_PROMPT: 'FACT EXTRACTION PROMPT (test stub)',
+    FACT_EXTRACTION_PROMPT: [
+        'FACT EXTRACTION PROMPT (test stub)',
+        '{existingFactsSection}',
+        '{temporalContext}',
+        '{inputSection}',
+        'Respond with ONLY a JSON array',
+    ].join('\n'),
 }));
 vi.mock('../auto-summary.js', () => ({
     markAutoSummaryComplete: vi.fn(),
@@ -50,7 +56,7 @@ vi.mock('../background-events.js', () => ({
 }));
 vi.mock('../world-state.js', () => ({
     requestPriorityUpdate: vi.fn(),
-    getWorldStateText: vi.fn(() => ''),
+    getWorldStateTemporalSnapshot: vi.fn(() => null),
 }));
 vi.mock('../arc-tracker.js', () => ({
     processArcUpdates: vi.fn(() => ({ created: 0, updated: 0, resolved: 0 })),
@@ -78,6 +84,7 @@ import { getActiveTunnelVisionBooks, resolveTargetBook } from '../tool-registry.
 import { formatChatExcerpt } from '../agent-utils.js';
 import { registerBackgroundTask } from '../background-events.js';
 import { invalidatePreWarmCache, preWarmSmartContext } from '../smart-context.js';
+import { getWorldStateTemporalSnapshot } from '../world-state.js';
 
 beforeEach(() => {
     vi.clearAllMocks();
@@ -366,6 +373,47 @@ describe('runPostTurnProcessor smart-context refresh', () => {
         const invalidateOrder = invalidatePreWarmCache.mock.invocationCallOrder[0];
         const prewarmOrder = preWarmSmartContext.mock.invocationCallOrder[0];
         expect(invalidateOrder).toBeLessThan(prewarmOrder);
+    });
+
+    it('injects structured world-state day/date/time into the analysis prompt', async () => {
+        getSettings.mockReturnValue({
+            postTurnEnabled: true,
+            globalEnabled: true,
+            postTurnExtractFacts: true,
+            postTurnUpdateTrackers: false,
+            postTurnSceneArchive: false,
+        });
+
+        getContext.mockReturnValue({
+            chat: [
+                { is_user: true, mes: 'Hello' },
+                { is_user: false, mes: 'Hi there' },
+                { is_user: true, mes: 'What day is it?' },
+                { is_user: false, mes: 'It is getting late.' },
+            ],
+            chatMetadata: {},
+            saveMetadataDebounced: vi.fn(),
+        });
+
+        getWorldStateTemporalSnapshot.mockReturnValue({
+            day: 'Day 6',
+            date: 'Sunday 16 March 2025',
+            time: 'around 13:10-13:20',
+            location: 'Germany > Berlin > Cafe',
+        });
+        parseJsonFromLLM.mockReturnValue({ facts: [], sceneChange: { detected: false }, arcs: [] });
+
+        await runPostTurnProcessor(true);
+
+        expect(generateAnalytical).toHaveBeenCalledWith(expect.objectContaining({
+            prompt: expect.stringContaining('[Current In-World Time — use this to timestamp facts]'),
+        }));
+
+        const analysisPrompt = generateAnalytical.mock.calls[0][0].prompt;
+        expect(analysisPrompt).toContain('- Day: Day 6');
+        expect(analysisPrompt).toContain('- Date: Sunday 16 March 2025');
+        expect(analysisPrompt).toContain('- Time: around 13:10-13:20');
+        expect(analysisPrompt).toContain('- Location: Germany > Berlin > Cafe');
     });
 });
 

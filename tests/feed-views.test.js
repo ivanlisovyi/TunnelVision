@@ -186,6 +186,68 @@ describe('feed-views timeline temporal integration', () => {
             expect(groups[0].entries[0].timeLabel).toBe('Day 3');
             expect(groups[0].entries[0].content).toBe('The old bell tolled at dawn.');
         });
+
+        it('keeps richer content time labels when temporal metadata only provides the grouping anchor', async () => {
+            getCachedWorldInfo.mockResolvedValue({
+                entries: {
+                    a: {
+                        uid: 104,
+                        comment: 'Late arrival',
+                        content: '[Day 6, evening] They arrived after sunset.',
+                        disable: false,
+                    },
+                },
+            });
+
+            getEntryTemporal.mockReturnValue({
+                when: 'Day 6',
+                turnIndex: 10,
+                arcId: null,
+                supersedes: null,
+                createdAt: 1,
+            });
+
+            const groups = await loadTimelineEntries();
+
+            expect(groups).toHaveLength(1);
+            expect(groups[0].groupKey).toBe('day:6');
+            expect(groups[0].entries[0].timeLabel).toBe('Day 6, evening');
+            expect(groups[0].entries[0].content).toBe('They arrived after sunset.');
+        });
+
+        it('orders entries within the same timeline group by temporal turn index', async () => {
+            getCachedWorldInfo.mockResolvedValue({
+                entries: {
+                    a: {
+                        uid: 105,
+                        comment: 'Second event',
+                        content: '[Day 6] The second event happened.',
+                        disable: false,
+                    },
+                    b: {
+                        uid: 106,
+                        comment: 'First event',
+                        content: '[Day 6] The first event happened.',
+                        disable: false,
+                    },
+                },
+            });
+
+            getEntryTemporal.mockImplementation((_book, uid) => {
+                if (uid === 105) {
+                    return { when: 'Day 6', turnIndex: 8, arcId: null, supersedes: null, createdAt: 2 };
+                }
+                if (uid === 106) {
+                    return { when: 'Day 6', turnIndex: 4, arcId: null, supersedes: null, createdAt: 1 };
+                }
+                return null;
+            });
+
+            const groups = await loadTimelineEntries();
+
+            expect(groups).toHaveLength(1);
+            expect(groups[0].entries.map(entry => entry.title)).toEqual(['First event', 'Second event']);
+        });
     });
 
     describe('timeline enrichment button', () => {

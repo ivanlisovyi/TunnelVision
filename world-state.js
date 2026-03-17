@@ -687,6 +687,40 @@ export function getWorldStateSections() {
     return state.sections;
 }
 
+function extractCurrentSceneField(sectionBody, label) {
+    if (!sectionBody) return '';
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = sectionBody.match(new RegExp(`^${escapedLabel}:\\s*(.+)$`, 'im'));
+    return match?.[1]?.trim() || '';
+}
+
+function normalizeWorldStateDay(day) {
+    const trimmed = String(day || '').trim();
+    if (!trimmed) return '';
+    return /^day\b/i.test(trimmed) ? trimmed : `Day ${trimmed}`;
+}
+
+/**
+ * Extract structured temporal fields from the Current Scene section.
+ * @returns {{ day: string, date: string, time: string, location: string } | null}
+ */
+export function getWorldStateTemporalSnapshot() {
+    const sections = getWorldStateSections();
+    const currentScene = sections?.['Current Scene'];
+    if (!currentScene) return null;
+
+    const snapshot = {
+        day: normalizeWorldStateDay(extractCurrentSceneField(currentScene, 'Day')),
+        date: extractCurrentSceneField(currentScene, 'Date'),
+        time: extractCurrentSceneField(currentScene, 'Time'),
+        location: extractCurrentSceneField(currentScene, 'Location'),
+    };
+
+    return snapshot.day || snapshot.date || snapshot.time || snapshot.location
+        ? snapshot
+        : null;
+}
+
 /** Get the message index of the last update, or -1 if never updated. */
 export function getWorldStateLastIndex() {
     return getWorldState()?.lastUpdateMsgIdx ?? -1;
