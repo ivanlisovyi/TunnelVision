@@ -352,6 +352,73 @@ twenty`;
             notebook: 4,
         });
     });
+
+    it('leaves prompts unchanged when they already fit within the remaining budget', async () => {
+        mockState.settings = makeSettings({
+            worldStateEnabled: true,
+            mandatoryPromptText: 'MANDATORY',
+            totalInjectionBudget: 260,
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.worldStatePrompt = `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+trim-here
+this part should be removed`;
+
+        const plan = await buildPromptInjectionPlan({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(plan.prompts.mandatory).toBe('MANDATORY');
+        expect(plan.prompts.worldState).toBe(mockState.worldStatePrompt);
+        expect(plan.prompts.worldState).not.toContain('[...budget limit reached]');
+        expect(plan.prompts.smartContext).toBe('');
+        expect(plan.prompts.notebook).toBe('');
+    });
+
+    it('preserves a prompt that is below the remaining budget even when it contains an early newline', async () => {
+        mockState.settings = makeSettings({
+            worldStateEnabled: true,
+            mandatoryPromptText: 'MANDATORY',
+            totalInjectionBudget: 260,
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.worldStatePrompt = `${'A'.repeat(80)}
+${'B'.repeat(160)}`;
+
+        const plan = await buildPromptInjectionPlan({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(plan.prompts.worldState).toBe(mockState.worldStatePrompt);
+        expect(plan.prompts.worldState).not.toContain('[...budget limit reached]');
+        expect(plan.prompts.worldState.startsWith(`${'A'.repeat(80)}
+`)).toBe(true);
+        expect(plan.prompts.worldState).toContain('B');
+    });
+
+    it('drops later prompt slots entirely after an earlier slot consumes the remaining budget', async () => {
+        mockState.settings = makeSettings({
+            worldStateEnabled: true,
+            smartContextEnabled: true,
+            notebookEnabled: true,
+            mandatoryPromptText: 'MANDATORY',
+            totalInjectionBudget: 260,
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.worldStatePrompt = `${'W'.repeat(260)}
+tail`;
+        mockState.smartContextPrompt = 'SMART SHOULD NOT APPEAR';
+        mockState.notebookPrompt = 'NOTE SHOULD NOT APPEAR';
+
+        const plan = await buildPromptInjectionPlan({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(plan.prompts.mandatory).toBe('MANDATORY');
+        expect(plan.prompts.worldState).toContain('[...budget limit reached]');
+        expect(plan.prompts.smartContext).toBe('');
+        expect(plan.prompts.notebook).toBe('');
+    });
 });
 
 describe('buildPromptInjectionPlan sync behavior', () => {

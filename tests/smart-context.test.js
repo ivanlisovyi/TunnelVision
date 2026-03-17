@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Shared mock metadata store — tests can manipulate this directly
 const mockMetadata = {};
 const mockChat = [];
 const mockState = {
@@ -12,6 +11,7 @@ const mockState = {
         globalEnabled: true,
         smartContextLookback: 6,
     },
+    maxContextTokens: 0,
 };
 
 function makeEntry(overrides = {}) {
@@ -370,8 +370,182 @@ describe('invalidatePreWarmCache', () => {
 
     it('can be called multiple times without error', () => {
         invalidatePreWarmCache();
-        invalidatePreWarmCache();
-        invalidatePreWarmCache();
+        expect(() => invalidatePreWarmCache()).not.toThrow();
+    });
+});
+
+describe('dynamic budget behavior', () => {
+    it('builds a smart-context prompt when no context window is available and candidates exist', () => {
+        mockState.maxContextTokens = 0;
+        mockState.settings.smartContextMaxChars = 4321;
+        mockState.activeBooks = ['Lorebook A'];
+        mockState.cachedWorldInfoSyncByBook.set('Lorebook A', {
+            entries: {
+                1: makeEntry({
+                    uid: 10,
+                    comment: 'Harbor',
+                    key: ['harbor'],
+                    content: 'Harbor notes.',
+                }),
+            },
+        });
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about the harbor.' },
+            { is_user: false, mes: 'The harbor is quiet tonight.' },
+        );
+
+        const prompt = buildSmartContextPrompt();
+
+        expect(prompt).toContain('[TunnelVision Smart Context');
+        expect(prompt).toContain('Harbor');
+        expect(prompt).toContain('Lorebook A');
+    });
+
+    it('returns a prompt that favors stronger matches when there are only a few high-confidence candidates', () => {
+        mockState.maxContextTokens = 10000;
+        mockState.settings.smartContextMaxChars = 4000;
+        mockState.settings.smartContextMaxEntries = 10;
+        mockState.activeBooks = ['Lorebook A'];
+        mockState.cachedWorldInfoSyncByBook.set('Lorebook A', {
+            entries: {
+                1: makeEntry({
+                    uid: 10,
+                    comment: 'Harbor',
+                    key: ['harbor'],
+                    content: 'H'.repeat(2000),
+                }),
+                2: makeEntry({
+                    uid: 11,
+                    comment: 'Garden',
+                    key: ['garden'],
+                    content: 'G'.repeat(2000),
+                }),
+                3: makeEntry({
+                    uid: 12,
+                    comment: 'Archive',
+                    key: ['archive'],
+                    content: 'A'.repeat(2000),
+                }),
+            },
+        });
+        mockChat.push(
+            { is_user: true, mes: 'The harbor is calm tonight.' },
+            { is_user: false, mes: 'We should remain quiet.' },
+        );
+
+        const prompt = buildSmartContextPrompt();
+
+        expect(prompt).toContain('[TunnelVision Smart Context');
+        expect(prompt).toContain('Harbor');
+    });
+
+    it('returns multiple relevant entries when many candidates strongly match the chat', () => {
+        mockState.maxContextTokens = 10000;
+        mockState.settings.smartContextMaxChars = 4000;
+        mockState.settings.smartContextMaxEntries = 10;
+        mockState.activeBooks = ['Lorebook A'];
+        mockState.cachedWorldInfoSyncByBook.set('Lorebook A', {
+            entries: {
+                1: makeEntry({
+                    uid: 10,
+                    comment: 'Harbor',
+                    key: ['harbor'],
+                    content: 'H'.repeat(1200),
+                }),
+                2: makeEntry({
+                    uid: 11,
+                    comment: 'Garden',
+                    key: ['garden'],
+                    content: 'G'.repeat(1200),
+                }),
+                3: makeEntry({
+                    uid: 12,
+                    comment: 'Archive',
+                    key: ['archive'],
+                    content: 'A'.repeat(1200),
+                }),
+                4: makeEntry({
+                    uid: 13,
+                    comment: 'Tower',
+                    key: ['tower'],
+                    content: 'T'.repeat(1200),
+                }),
+                5: makeEntry({
+                    uid: 14,
+                    comment: 'Forge',
+                    key: ['forge'],
+                    content: 'F'.repeat(1200),
+                }),
+            },
+        });
+        mockChat.push(
+            { is_user: true, mes: 'We moved from the harbor to the garden, archive, tower, and forge.' },
+            { is_user: false, mes: 'All five locations matter right now.' },
+        );
+
+        const prompt = buildSmartContextPrompt();
+
+        expect(prompt).toContain('[TunnelVision Smart Context');
+        expect(prompt).toContain('Lorebook A');
+        expect(prompt).toMatch(/UID \d+/);
+    });
+
+    it('produces a prompt for both downtime and combat scenes, with combat not shorter than downtime for the same candidates', () => {
+        mockState.maxContextTokens = 10000;
+        mockState.settings.smartContextMaxChars = 4000;
+        mockState.settings.smartContextMaxEntries = 10;
+        mockState.activeBooks = ['Lorebook A'];
+        mockState.cachedWorldInfoSyncByBook.set('Lorebook A', {
+            entries: {
+                1: makeEntry({
+                    uid: 10,
+                    comment: 'Harbor',
+                    key: ['harbor'],
+                    content: 'H'.repeat(1400),
+                }),
+                2: makeEntry({
+                    uid: 11,
+                    comment: 'Garden',
+                    key: ['garden'],
+                    content: 'G'.repeat(1400),
+                }),
+                3: makeEntry({
+                    uid: 12,
+                    comment: 'Archive',
+                    key: ['archive'],
+                    content: 'A'.repeat(1400),
+                }),
+                4: makeEntry({
+                    uid: 13,
+                    comment: 'Tower',
+                    key: ['tower'],
+                    content: 'T'.repeat(1400),
+                }),
+                5: makeEntry({
+                    uid: 14,
+                    comment: 'Forge',
+                    key: ['forge'],
+                    content: 'F'.repeat(1400),
+                }),
+            },
+        });
+
+        mockChat.push(
+            { is_user: true, mes: 'We rest quietly at the harbor and speak softly in the garden, archive, tower, and forge.' },
+            { is_user: false, mes: 'This is a calm rest scene with conversation and reflection.' },
+        );
+        const downtimePrompt = buildSmartContextPrompt();
+
+        mockChat.length = 0;
+        mockChat.push(
+            { is_user: true, mes: 'We fight at the harbor and battle through the garden, archive, tower, and forge.' },
+            { is_user: false, mes: 'The combat is fierce and violent in every location.' },
+        );
+        const combatPrompt = buildSmartContextPrompt();
+
+        expect(downtimePrompt).toContain('[TunnelVision Smart Context');
+        expect(combatPrompt).toContain('[TunnelVision Smart Context');
+        expect(combatPrompt.length).toBeGreaterThanOrEqual(downtimePrompt.length);
     });
 });
 

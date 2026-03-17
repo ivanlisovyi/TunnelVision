@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 
 const mockMetadata = {};
 const mockSaveDebounced = vi.fn();
@@ -28,7 +29,149 @@ vi.mock('./tree-store.js', () => ({
     setTrackerUid: vi.fn(),
 }));
 
-import { parseJsonFromLLM, cleanupEntryMetadata, recordEntryTemporal, getEntryTemporal, setEntrySupersedes, getEntryTurnIndex, buildSummaryKeys } from '../entry-manager.js';
+import {
+    parseJsonFromLLM,
+    cleanupEntryMetadata,
+    recordEntryTemporal,
+    getEntryTemporal,
+    setEntrySupersedes,
+    getEntryTurnIndex,
+    buildSummaryKeys,
+    getCachedWorldInfo,
+    getCachedWorldInfoSync,
+    invalidateWorldInfoCache,
+    invalidateDirtyWorldInfoCache,
+    persistWorldInfo,
+    buildUidMap,
+    withEntryTransaction,
+} from '../entry-manager.js';
+
+describe('entry manager cache and transaction invariants', () => {
+    beforeEach(() => {
+        for (const key of Object.keys(mockMetadata)) delete mockMetadata[key];
+        mockSaveDebounced.mockClear();
+        vi.clearAllMocks();
+        invalidateWorldInfoCache();
+    });
+
+    it('caches loaded world info until explicitly invalidated', async () => {
+        const bookData = { entries: { a: { uid: 1, comment: 'Alpha', content: 'One' } } };
+        loadWorldInfo.mockResolvedValue(bookData);
+
+        const first = await getCachedWorldInfo('Book A');
+        const second = await getCachedWorldInfo('Book A');
+
+        expect(first).toBe(bookData);
+        expect(second).toBe(bookData);
+        expect(loadWorldInfo).toHaveBeenCalledTimes(1);
+        expect(getCachedWorldInfoSync('Book A')).toBe(bookData);
+
+        invalidateWorldInfoCache('Book A');
+        loadWorldInfo.mockResolvedValue({ entries: { b: { uid: 2, comment: 'Beta', content: 'Two' } } });
+
+        const third = await getCachedWorldInfo('Book A');
+        expect(loadWorldInfo).toHaveBeenCalledTimes(2);
+        expect(third).not.toBe(bookData);
+    });
+
+    it('only invalidates dirty books during selective cache invalidation', async () => {
+        const alpha = { entries: { a: { uid: 1, comment: 'Alpha', content: 'One' } } };
+        const beta = { entries: { b: { uid: 2, comment: 'Beta', content: 'Two' } } };
+
+        loadWorldInfo.mockImplementation(async (bookName) => {
+            if (bookName === 'Alpha') return alpha;
+            if (bookName === 'Beta') return beta;
+            return null;
+        });
+
+        await getCachedWorldInfo('Alpha');
+        await getCachedWorldInfo('Beta');
+
+        invalidateWorldInfoCache('Alpha');
+        invalidateDirtyWorldInfoCache();
+
+        await getCachedWorldInfo('Alpha');
+        await getCachedWorldInfo('Beta');
+
+        expect(loadWorldInfo.mock.calls.filter(([name]) => name === 'Alpha')).toHaveLength(2);
+        expect(loadWorldInfo.mock.calls.filter(([name]) => name === 'Beta')).toHaveLength(1);
+    });
+
+    it('persistWorldInfo saves and invalidates the targeted book cache', async () => {
+        const bookData = { entries: { a: { uid: 1, comment: 'Alpha', content: 'One' } } };
+        loadWorldInfo.mockResolvedValue(bookData);
+        saveWorldInfo.mockResolvedValue(undefined);
+
+        await getCachedWorldInfo('Book A');
+        await persistWorldInfo('Book A', bookData);
+
+        loadWorldInfo.mockResolvedValue({ entries: { a: { uid: 1, comment: 'Alpha', content: 'Two' } } });
+        await getCachedWorldInfo('Book A');
+
+        expect(saveWorldInfo).toHaveBeenCalledWith('Book A', bookData, true);
+        expect(loadWorldInfo).toHaveBeenCalledTimes(2);
+    });
+
+    it('buildUidMap maps entries by uid', () => {
+        const entries = {
+            a: { uid: 10, comment: 'A' },
+            b: { uid: 22, comment: 'B' },
+        };
+
+        const map = buildUidMap(entries);
+
+        expect(map.get(10)).toBe(entries.a);
+        expect(map.get(22)).toBe(entries.b);
+        expect(map.size).toBe(2);
+    });
+
+    it('withEntryTransaction rolls back snapshotted entries after an operation failure', async () => {
+        const originalA = { uid: 1, comment: 'Alpha', content: 'One', key: ['a'], disable: false };
+        const originalB = { uid: 2, comment: 'Beta', content: 'Two', key: ['b'], disable: false };
+        const bookData = { entries: { a: originalA, b: originalB } };
+
+        loadWorldInfo.mockResolvedValue(bookData);
+        saveWorldInfo.mockResolvedValue(undefined);
+
+        await expect(withEntryTransaction('Book A', [1, 2], async (data) => {
+            data.entries.a.content = 'Mutated one';
+            data.entries.a.comment = 'Changed alpha';
+            data.entries.a.key = ['changed'];
+            data.entries.a.disable = true;
+            data.entries.b.content = 'Mutated two';
+            throw new Error('boom');
+        })).rejects.toThrow('boom');
+
+        expect(bookData.entries.a).toMatchObject({
+            uid: 1,
+            comment: 'Alpha',
+            content: 'One',
+            key: ['a'],
+            disable: false,
+        });
+        expect(bookData.entries.b).toMatchObject({
+            uid: 2,
+            comment: 'Beta',
+            content: 'Two',
+            key: ['b'],
+            disable: false,
+        });
+        expect(saveWorldInfo).toHaveBeenCalledWith('Book A', bookData, true);
+    });
+
+    it('withEntryTransaction does not persist rollback when no snapshotted entries exist', async () => {
+        const bookData = { entries: { a: { uid: 1, comment: 'Alpha', content: 'One', key: [], disable: false } } };
+
+        loadWorldInfo.mockResolvedValue(bookData);
+        saveWorldInfo.mockResolvedValue(undefined);
+
+        await expect(withEntryTransaction('Book A', [999], async () => {
+            throw new Error('no snapshots');
+        })).rejects.toThrow('no snapshots');
+
+        expect(saveWorldInfo).not.toHaveBeenCalled();
+    });
+});
 
 describe('parseJsonFromLLM', () => {
     // ── Clean inputs ─────────────────────────────────────────────

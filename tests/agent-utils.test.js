@@ -127,6 +127,18 @@ describe('trigramSimilarity', () => {
         expect(trigramSimilarity('hello, world!', 'hello world')).toBe(1);
     });
 
+    it('normalizes repeated whitespace before scoring', () => {
+        expect(trigramSimilarity('hello   world', 'hello world')).toBe(1);
+    });
+
+    it('treats punctuation-only differences as highly similar even when punctuation removal joins words', () => {
+        expect(trigramSimilarity('The king—arrives.', 'The king arrives')).toBeGreaterThan(0.7);
+    });
+
+    it('treats casing, punctuation, and spacing normalization consistently', () => {
+        expect(trigramSimilarity('  HELLO,   WORLD!  ', 'hello world')).toBe(1);
+    });
+
     it('scores more-similar strings higher than less-similar ones', () => {
         const high = trigramSimilarity('cat', 'cats');
         const low = trigramSimilarity('cat', 'dog');

@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const mockMetadata = {};
+const mockChat = [];
+const mockState = { throwContext: false };
 
 // Mock transitive dependencies pulled in via smart-context.js → tool-registry.js
 vi.mock('../tool-registry.js', () => ({
@@ -10,10 +14,37 @@ vi.mock('../entry-manager.js', () => ({
 vi.mock('../world-state.js', () => ({
     getWorldStateSections: vi.fn(() => ({})),
 }));
+vi.mock('../../../st-context.js', () => ({
+    getContext: vi.fn(() => {
+        if (mockState.throwContext) throw new Error('context unavailable');
+        return {
+            chat: mockChat,
+            chatMetadata: mockMetadata,
+        };
+    }),
+}));
+vi.mock('../smart-context.js', () => ({
+    getFeedbackMap: vi.fn(() => mockMetadata.tv_feedback || {}),
+}));
 
-import { computeEntryQuality, getQualityRating, getQualityColor, qualityTooltip, buildHealthReport, countStaleEntries } from '../entry-scoring.js';
+import {
+    computeEntryQuality,
+    getQualityRating,
+    getQualityColor,
+    qualityTooltip,
+    buildQualityContext,
+    buildHealthReport,
+    countStaleEntries,
+} from '../entry-scoring.js';
 
 // ── getQualityRating ─────────────────────────────────────────────
+
+beforeEach(() => {
+    mockChat.length = 0;
+    Object.keys(mockMetadata).forEach(key => delete mockMetadata[key]);
+    mockState.throwContext = false;
+    vi.clearAllMocks();
+});
 
 describe('getQualityRating', () => {
     it('returns "good" for score >= 70', () => {
@@ -178,9 +209,76 @@ describe('computeEntryQuality', () => {
     // ── Combined ──
 
     it('produces a score in the 0-100 range', () => {
-        const q = computeEntryQuality(makeEntry(), 100, {}, 'test entry words');
+        const q = computeEntryQuality(makeEntry(), 100, null, 'alice bob');
         expect(q.total).toBeGreaterThanOrEqual(0);
         expect(q.total).toBeLessThanOrEqual(100);
+    });
+
+    it('applies the detail bonus without exceeding the specificity cap', () => {
+        const content = 'Alexandra Meridian met Commander Rena at Outpost 17 on Day 42 with code 991 and backup 2048.';
+        const q = computeEntryQuality(makeEntry({ content }), 100, null, '');
+
+        expect(q.specificity).toBeGreaterThanOrEqual(15);
+        expect(q.specificity).toBeLessThanOrEqual(25);
+    });
+
+    it('gives fallback retrieval score when entry has injections but zero references below stale threshold', () => {
+        const fb = {
+            50: { injections: 2, references: 0, missStreak: 1, lastReferenced: null },
+        };
+        const q = computeEntryQuality(makeEntry({ uid: 50 }), 100, fb, '');
+
+        expect(q.retrievalRate).toBe(15);
+    });
+
+    it('gives high freshness only when uid ratio is strictly above 0.9', () => {
+        const q = computeEntryQuality(makeEntry({ uid: 90 }), 100, null, '');
+
+        expect(q.freshness).toBe(20);
+    });
+});
+
+describe('buildQualityContext', () => {
+    it('computes maxUid, reuses feedback map, and lowercases recent non-system chat', () => {
+        mockMetadata.tv_feedback = {
+            42: { injections: 4, references: 2, missStreak: 0, lastReferenced: 123 },
+        };
+        mockChat.push(
+            { is_system: true, mes: 'ignored system note' },
+            { is_system: false, mes: 'Alice meets BOB.' },
+            { is_system: false, mes: 'The Harbor is quiet tonight.' },
+        );
+
+        const bookData = {
+            entries: {
+                a: { uid: 7, comment: 'A', content: '', disable: false, key: [] },
+                b: { uid: 42, comment: 'B', content: '', disable: false, key: [] },
+            },
+        };
+
+        const ctx = buildQualityContext(bookData);
+
+        expect(ctx.maxUid).toBe(42);
+        expect(ctx.feedbackMap).toBe(mockMetadata.tv_feedback);
+        expect(ctx.recentText).toContain('alice meets bob.');
+        expect(ctx.recentText).toContain('the harbor is quiet tonight.');
+        expect(ctx.recentText).not.toContain('ignored system note');
+    });
+
+    it('returns safe defaults when chat is unavailable', () => {
+        mockState.throwContext = true;
+
+        const ctx = buildQualityContext({
+            entries: {
+                a: { uid: 3, comment: 'A', content: '', disable: false, key: [] },
+            },
+        });
+
+        expect(ctx.maxUid).toBe(3);
+        expect(ctx.feedbackMap).toEqual({});
+        expect(ctx.recentText).toBe('');
+
+        mockState.throwContext = false;
     });
 });
 
