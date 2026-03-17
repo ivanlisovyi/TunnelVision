@@ -81,6 +81,7 @@ export function initHierarchyRefs(refs) {
 let _preWarmedCandidates = null;
 /** @type {string|null} Cache key for validating pre-warmed data freshness. */
 let _preWarmCacheKey = null;
+let _preWarmSource = "smart-context";
 let _lastReportedPreWarmKey = null;
 
 function buildPreWarmCacheKey() {
@@ -114,7 +115,9 @@ function buildPreWarmCacheKey() {
 export function invalidatePreWarmCache() {
   _preWarmedCandidates = null;
   _preWarmCacheKey = null;
+  _preWarmSource = "smart-context";
   _lastReportedPreWarmKey = null;
+  _lastReportedInjectionKey = null;
   _derivedKeyCache.clear();
 }
 
@@ -1264,7 +1267,7 @@ function scoreCandidates(activeBooks, recentText) {
  *
  * @returns {string} Formatted context string for injection, or empty string
  */
-function reportSmartContextSelections(selectedEntryInfo) {
+function reportSmartContextSelections(selectedEntryInfo, source = "smart-context") {
   if (!Array.isArray(selectedEntryInfo) || selectedEntryInfo.length === 0) return;
 
   const injectionKey = selectedEntryInfo
@@ -1276,7 +1279,7 @@ function reportSmartContextSelections(selectedEntryInfo) {
 
   addEntryActivationEvents(
     selectedEntryInfo.map((entry) => ({
-      source: "smart-context",
+      source,
       lorebook: entry.bookName || "",
       uid: entry.uid ?? null,
       title: entry.title || `UID ${entry.uid ?? "?"}`,
@@ -1339,10 +1342,13 @@ export function buildSmartContextPrompt() {
   let candidates;
   const cacheKey = buildPreWarmCacheKey();
   let usedPreWarmCache = false;
+  let selectionSource = "smart-context";
   if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
     candidates = _preWarmedCandidates;
+    selectionSource = _preWarmSource || "smart-context";
     _preWarmedCandidates = null;
     _preWarmCacheKey = null;
+    _preWarmSource = "smart-context";
     usedPreWarmCache = true;
   } else {
     candidates = scoreCandidates(activeBooks, recentText);
@@ -1448,7 +1454,7 @@ export function buildSmartContextPrompt() {
   );
 
   _lastInjectedEntries = selectedEntryInfo;
-  reportSmartContextSelections(selectedEntryInfo);
+  reportSmartContextSelections(selectedEntryInfo, selectionSource);
   if (selectedUids.length > 0) touchRelevance(selectedUids);
 
   // 1B: Record injections for cooldown
@@ -1532,6 +1538,7 @@ export async function preWarmSmartContext({ source = 'smart-context' } = {}) {
 
   _preWarmedCandidates = candidates;
   _preWarmCacheKey = cacheKey;
+  _preWarmSource = source;
   reportPreWarmCandidates(candidates, cacheKey, source);
 }
 

@@ -64,7 +64,7 @@ vi.mock('../../../st-context.js', () => ({
 }));
 
 import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD, buildSmartContextPrompt, preWarmSmartContext } from '../smart-context.js';
-import { addBackgroundEvent } from '../background-events.js';
+import { addBackgroundEvent, addEntryActivationEvents } from '../background-events.js';
 
 beforeEach(() => {
     // Reset state between tests
@@ -80,6 +80,7 @@ beforeEach(() => {
         smartContextLookback: 6,
     };
     vi.mocked(addBackgroundEvent).mockClear();
+    vi.mocked(addEntryActivationEvents).mockClear();
 });
 
 // ── scoreEntry ───────────────────────────────────────────────────
@@ -660,6 +661,18 @@ describe('preWarmSmartContext', () => {
             color: '#e84393',
             preWarmSource: 'fact-driven',
         }));
+
+        vi.mocked(addEntryActivationEvents).mockClear();
+
+        const prompt = buildSmartContextPrompt();
+
+        expect(prompt).toContain('Elena');
+        expect(addEntryActivationEvents).toHaveBeenCalledWith(expect.arrayContaining([
+            expect.objectContaining({
+                source: 'fact-driven',
+                title: 'Elena',
+            }),
+        ]));
     });
 
     it('skips prewarm when smart context is disabled', async () => {
