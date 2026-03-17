@@ -83,13 +83,19 @@ let _preWarmedCandidates = null;
 let _preWarmCacheKey = null;
 let _preWarmSource = "smart-context";
 let _lastReportedPreWarmKey = null;
+let _preWarmCachedAt = 0;
+const PREWARM_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 
 function buildPreWarmCacheKey() {
   try {
     const context = getContext();
+    const settings = getSettings();
     const chat = context.chat || [];
     const chatLen = chat.length;
     const books = getActiveTunnelVisionBooks().sort().join(",");
+    const settingsFingerprint = JSON.stringify({
+      smartContextLookback: settings.smartContextLookback || 6,
+    });
 
     const lastMsg = chat[chatLen - 1] || null;
     const lastMsgFingerprint = lastMsg
@@ -105,10 +111,16 @@ function buildPreWarmCacheKey() {
         )
       : 0;
 
-    return `${chatLen}:${books}:${lastMsgFingerprint}`;
+    return `${chatLen}:${books}:${settingsFingerprint}:${lastMsgFingerprint}`;
   } catch {
     return null;
   }
+}
+
+function isPreWarmCacheFresh(cacheKey) {
+  if (!_preWarmedCandidates || _preWarmCacheKey !== cacheKey) return false;
+  if (!_preWarmCachedAt) return false;
+  return Date.now() - _preWarmCachedAt <= PREWARM_CACHE_MAX_AGE_MS;
 }
 
 /** Invalidate the pre-warming cache when entries change or books are modified. */
@@ -116,6 +128,7 @@ export function invalidatePreWarmCache() {
   _preWarmedCandidates = null;
   _preWarmCacheKey = null;
   _preWarmSource = "smart-context";
+  _preWarmCachedAt = 0;
   _lastReportedPreWarmKey = null;
   _lastReportedInjectionKey = null;
   _derivedKeyCache.clear();
@@ -1342,12 +1355,9 @@ export function buildSmartContextPrompt() {
   let candidates;
   const cacheKey = buildPreWarmCacheKey();
   let selectionSource = "smart-context";
-  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) {
+  if (isPreWarmCacheFresh(cacheKey)) {
     candidates = _preWarmedCandidates;
     selectionSource = _preWarmSource || "smart-context";
-    _preWarmedCandidates = null;
-    _preWarmCacheKey = null;
-    _preWarmSource = "smart-context";
   } else {
     candidates = scoreCandidates(activeBooks, recentText);
   }
@@ -1488,7 +1498,7 @@ export async function preWarmSmartContext({ source = 'smart-context' } = {}) {
 
   const cacheKey = buildPreWarmCacheKey();
   if (!cacheKey) return;
-  if (_preWarmedCandidates && _preWarmCacheKey === cacheKey) return;
+  if (isPreWarmCacheFresh(cacheKey)) return;
 
   const lookback = settings.smartContextLookback || 6;
   const recentText = extractMentionsFromChat(chat, lookback);
@@ -1537,6 +1547,7 @@ export async function preWarmSmartContext({ source = 'smart-context' } = {}) {
   _preWarmedCandidates = candidates;
   _preWarmCacheKey = cacheKey;
   _preWarmSource = source;
+  _preWarmCachedAt = Date.now();
   reportPreWarmCandidates(candidates, cacheKey, source);
 }
 

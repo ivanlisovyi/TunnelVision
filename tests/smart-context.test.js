@@ -641,6 +641,87 @@ describe('preWarmSmartContext', () => {
         expect(addBackgroundEvent).not.toHaveBeenCalled();
     });
 
+    it('keeps a prewarmed cache after prompt build when chat is unchanged', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+        );
+
+        await preWarmSmartContext();
+        expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+
+        const prompt = buildSmartContextPrompt();
+        expect(prompt).toContain('Elena');
+
+        mockState.cachedWorldInfoCalls = [];
+        vi.mocked(addBackgroundEvent).mockClear();
+
+        await preWarmSmartContext();
+
+        expect(mockState.cachedWorldInfoCalls).toEqual([]);
+        expect(addBackgroundEvent).not.toHaveBeenCalled();
+    });
+
+    it('refreshes prewarm when lookback settings change', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+        );
+
+        await preWarmSmartContext();
+        expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+
+        mockState.cachedWorldInfoCalls = [];
+        mockState.settings.smartContextLookback = 10;
+
+        await preWarmSmartContext();
+
+        expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+    });
+
+    it('refreshes prewarm after cache age expires', async () => {
+        vi.useFakeTimers();
+        try {
+            mockState.activeBooks = ['Book A'];
+            mockState.cachedWorldInfoSyncByBook.set('Book A', {
+                entries: {
+                    1: makeEntry(),
+                },
+            });
+
+            mockChat.push(
+                { is_user: true, mes: 'Tell me about Elena.' },
+                { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+            );
+
+            await preWarmSmartContext();
+            expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+
+            mockState.cachedWorldInfoCalls = [];
+            vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+
+            await preWarmSmartContext();
+
+            expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('marks explicitly fact-driven prewarms with distinct event metadata', async () => {
         mockState.activeBooks = ['Book A'];
         mockChat.push(
