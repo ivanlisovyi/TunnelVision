@@ -111,7 +111,29 @@ function setWorldState(state) {
     try {
         const context = getContext();
         if (!context.chatMetadata) return;
-        context.chatMetadata[METADATA_KEY] = state;
+        const previous = context.chatMetadata[METADATA_KEY] || null;
+        const previousEpoch = Number.isFinite(previous?.epoch) ? previous.epoch : 0;
+        const sectionsChanged = JSON.stringify(state?.sections || null) !== JSON.stringify(previous?.sections || null);
+        const textChanged = state?.text !== previous?.text;
+        const contentChanged = textChanged || sectionsChanged;
+        const nextEpoch = Number.isFinite(state?.epoch)
+            ? state.epoch
+            : contentChanged
+                ? previousEpoch + 1
+                : previousEpoch;
+        const nextSectionsEpoch = Number.isFinite(state?.sectionsEpoch)
+            ? state.sectionsEpoch
+            : isPlainObject(state?.sections)
+                ? contentChanged
+                    ? nextEpoch
+                    : (Number.isFinite(previous?.sectionsEpoch) ? previous.sectionsEpoch : nextEpoch)
+                : (Number.isFinite(previous?.sectionsEpoch) ? previous.sectionsEpoch : 0);
+
+        context.chatMetadata[METADATA_KEY] = {
+            ...state,
+            epoch: nextEpoch,
+            sectionsEpoch: nextSectionsEpoch,
+        };
         context.saveMetadataDebounced?.();
     } catch { /* metadata not available */ }
 }
@@ -126,6 +148,8 @@ export function getWorldStateRuntimeSnapshot() {
     return {
         metadataKey: METADATA_KEY,
         state,
+        stateEpoch: Number.isFinite(state?.epoch) ? state.epoch : 0,
+        sectionsEpoch: Number.isFinite(state?.sectionsEpoch) ? state.sectionsEpoch : 0,
         sections,
         updateRunning: _updateRunning,
         priorityRequested: _priorityRequested,
@@ -140,6 +164,8 @@ function isValidWorldStateMetadata(state) {
 
     if (state.lastUpdated != null && !Number.isFinite(state.lastUpdated)) return false;
     if (state.lastUpdateMsgIdx != null && !Number.isFinite(state.lastUpdateMsgIdx)) return false;
+    if (state.epoch != null && !Number.isFinite(state.epoch)) return false;
+    if (state.sectionsEpoch != null && !Number.isFinite(state.sectionsEpoch)) return false;
     if (state.text != null && typeof state.text !== 'string') return false;
     if (state.previousText != null && typeof state.previousText !== 'string') return false;
     if (state.sections != null && !isPlainObject(state.sections)) return false;
@@ -795,6 +821,8 @@ export function auditWorldStateRuntime(snapshot = getWorldStateRuntimeSnapshot()
     const requiresConfirmation = [];
     const {
         state,
+        stateEpoch,
+        sectionsEpoch,
         sections,
         updateRunning,
         priorityRequested,
@@ -866,6 +894,38 @@ export function auditWorldStateRuntime(snapshot = getWorldStateRuntimeSnapshot()
             reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
             context: { metadataKey },
         }));
+    }
+
+    if (
+        state?.text
+        && isPlainObject(state?.sections)
+        && stateEpoch > 0
+        && sectionsEpoch > 0
+        && sectionsEpoch !== stateEpoch
+    ) {
+        findings.push(createRuntimeFinding({
+            id: 'worldstate-sections-epoch-stale',
+            subsystem: 'world-state',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: 'World-state section metadata was built for an older world-state epoch.',
+            reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            repairActionId: 'reparse-world-state-sections',
+            context: {
+                stateEpoch,
+                sectionsEpoch,
+            },
+        }));
+
+        if (!safeRepairs.some(repair => repair.id === 'reparse-world-state-sections')) {
+            safeRepairs.push(createRuntimeRepair({
+                id: 'reparse-world-state-sections',
+                label: 'Rebuild parsed world-state sections from current text',
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
+                context: { metadataKey },
+            }));
+        }
     }
 
     if (state?.previousText && typeof state.previousText === 'string' && !validateWorldStateStructure(state.previousText).valid) {
@@ -940,6 +1000,8 @@ export function auditWorldStateRuntime(snapshot = getWorldStateRuntimeSnapshot()
             context: {
                 hasState: Boolean(state),
                 sectionCount: sections ? Object.keys(sections).length : 0,
+                stateEpoch,
+                sectionsEpoch,
                 updateRunning: _updateRunning,
                 priorityRequested: _priorityRequested,
             },

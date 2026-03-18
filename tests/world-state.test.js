@@ -111,6 +111,8 @@ describe('getWorldStateRuntimeSnapshot', () => {
         mockState.context.chatMetadata.tunnelvision_worldstate = {
             lastUpdated: 123456789,
             lastUpdateMsgIdx: 7,
+            epoch: 2,
+            sectionsEpoch: 2,
             text: [
                 '## Current Scene',
                 'Day: 6',
@@ -162,6 +164,8 @@ describe('getWorldStateRuntimeSnapshot', () => {
 
         expect(snapshot).toMatchObject({
             metadataKey: 'tunnelvision_worldstate',
+            stateEpoch: 2,
+            sectionsEpoch: 2,
             updateRunning: false,
             priorityRequested: false,
         });
@@ -190,6 +194,8 @@ describe('auditWorldStateRuntime', () => {
         mockState.context.chatMetadata.tunnelvision_worldstate = {
             lastUpdated: Date.now(),
             lastUpdateMsgIdx: 8,
+            epoch: 4,
+            sectionsEpoch: 4,
             text: [
                 '## Current Scene',
                 'Day: 6',
@@ -276,6 +282,8 @@ describe('auditWorldStateRuntime', () => {
         mockState.context.chatMetadata.tunnelvision_worldstate = {
             lastUpdated: Date.now(),
             lastUpdateMsgIdx: 4,
+            epoch: 3,
+            sectionsEpoch: 1,
             text: [
                 '## Current Scene',
                 'Day: 7',
@@ -308,6 +316,11 @@ describe('auditWorldStateRuntime', () => {
             && finding.reasonCode === 'stale_world_state_output'
             && finding.severity === 'warn'
         )).toBe(true);
+        expect(audit.findings.some(finding =>
+            finding.id === 'worldstate-sections-epoch-stale'
+            && finding.reasonCode === 'stale_world_state_output'
+            && finding.severity === 'warn'
+        )).toBe(true);
         expect(audit.safeRepairs).toEqual([
             expect.objectContaining({
                 id: 'reparse-world-state-sections',
@@ -320,6 +333,8 @@ describe('auditWorldStateRuntime', () => {
         mockState.context.chatMetadata.tunnelvision_worldstate = {
             lastUpdated: Date.now(),
             lastUpdateMsgIdx: 4,
+            epoch: 5,
+            sectionsEpoch: 5,
             text: [
                 '## Current Scene',
                 'Day: 7',

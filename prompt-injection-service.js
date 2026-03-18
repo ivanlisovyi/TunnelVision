@@ -30,6 +30,37 @@ export const TV_NOTEBOOK_KEY = 'tunnelvision_notebook';
 export const TV_WORLDSTATE_KEY = 'tunnelvision_worldstate';
 export const TV_SMARTCTX_KEY = 'tunnelvision_smartcontext';
 const TV_PROMPT_LOG_PREFIX = '[TunnelVision][PromptInjection]';
+let _promptPlanEpoch = 0;
+let _lastAppliedPromptPlanEpoch = 0;
+let _lastAppliedPromptPlanSignature = null;
+
+function clonePromptPlanState(payload = {}) {
+    return {
+        enabled: payload.enabled === true,
+        activeBooks: Array.isArray(payload.activeBooks) ? [...payload.activeBooks] : [],
+        isRecursiveToolPass: payload.isRecursiveToolPass === true,
+        prompts: {
+            mandatory: payload.prompts?.mandatory || '',
+            worldState: payload.prompts?.worldState || '',
+            smartContext: payload.prompts?.smartContext || '',
+            notebook: payload.prompts?.notebook || '',
+        },
+        promptMeta: payload.promptMeta
+            ? {
+                mandatory: { ...payload.promptMeta.mandatory },
+                worldState: { ...payload.promptMeta.worldState },
+                smartContext: { ...payload.promptMeta.smartContext },
+                notebook: { ...payload.promptMeta.notebook },
+            }
+            : null,
+        promptKeys: payload.promptKeys ? { ...payload.promptKeys } : null,
+        settingsSnapshot: payload.auditContext?.settingsSnapshot || null,
+    };
+}
+
+function buildPromptPlanSignature(payload = {}) {
+    return JSON.stringify(clonePromptPlanState(payload));
+}
 
 /**
  * Map a position setting string to the ST extension_prompt_types enum.
@@ -412,6 +443,9 @@ export async function getPromptInjectionRuntimeSnapshot(deps = {}) {
         promptKeys: payload.promptKeys,
         settings: payload.settings,
         auditContext: payload.auditContext,
+        expectedPlanSignature: buildPromptPlanSignature(payload),
+        installedPlanEpoch: _lastAppliedPromptPlanEpoch,
+        installedPlanSignature: _lastAppliedPromptPlanSignature,
     };
 }
 
@@ -437,6 +471,7 @@ export async function getPromptInjectionRuntimeSnapshot(deps = {}) {
  */
 export function applyPromptInjectionPlan(payload, deps = {}) {
     const { setExtensionPromptImpl = setExtensionPrompt } = deps;
+    const planEpoch = Number.isFinite(payload.planEpoch) ? payload.planEpoch : ++_promptPlanEpoch;
     const promptKeys = payload.promptKeys || {
         mandatory: TV_PROMPT_KEY,
         worldState: TV_WORLDSTATE_KEY,
@@ -479,6 +514,9 @@ export function applyPromptInjectionPlan(payload, deps = {}) {
         false,
         payload.promptMeta.notebook.role,
     );
+
+    _lastAppliedPromptPlanEpoch = planEpoch;
+    _lastAppliedPromptPlanSignature = buildPromptPlanSignature(payload);
 }
 
 /**
@@ -487,6 +525,10 @@ export function applyPromptInjectionPlan(payload, deps = {}) {
  */
 export async function prepareAndInjectGenerationPrompts(deps = {}) {
     const payload = await buildPromptInjectionPlan(deps);
+    payload.planEpoch = ++_promptPlanEpoch;
+    if (payload.auditContext) {
+        payload.auditContext.planEpoch = payload.planEpoch;
+    }
     applyPromptInjectionPlan(payload, deps);
     console.log(`${TV_PROMPT_LOG_PREFIX} Prompt injection applied`, {
         mandatoryChars: payload.prompts.mandatory.length,
@@ -570,6 +612,26 @@ export async function auditPromptInjectionRuntime(deps = {}) {
     }
 
     if (
+        payload.installedPlanEpoch > 0
+        && payload.installedPlanSignature
+        && payload.expectedPlanSignature
+        && payload.installedPlanSignature !== payload.expectedPlanSignature
+    ) {
+        findings.push(createRuntimeFinding({
+            id: 'prompt-installed-plan-stale',
+            subsystem: 'prompt-injection-service',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: 'Installed prompt plan no longer matches the current runtime inputs.',
+            reasonCode: RUNTIME_REASON_CODES.STALE_PROMPT_PLAN,
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            repairActionId: 'rebuild-prompt-plan',
+            context: {
+                installedPlanEpoch: payload.installedPlanEpoch,
+            },
+        }));
+    }
+
+    if (
         payload.enabled
         && payload.settings?.mandatoryTools
         && payload.activeBooks?.length > 0
@@ -629,6 +691,7 @@ export async function auditPromptInjectionRuntime(deps = {}) {
             activeBooks: payload.activeBooks,
             isRecursiveToolPass: payload.isRecursiveToolPass,
             promptKeys,
+            installedPlanEpoch: payload.installedPlanEpoch || 0,
         },
     });
 }

@@ -116,6 +116,7 @@ vi.mock('../runtime-health.js', () => ({
 import {
     buildPromptInjectionPlan,
     applyPromptInjectionPlan,
+    getPromptInjectionRuntimeSnapshot,
     mapPositionSetting,
     mapRoleSetting,
     TV_PROMPT_KEY,
@@ -734,5 +735,75 @@ describe('applyPromptInjectionPlan', () => {
             smartContext: 0,
             notebook: 0,
         });
+    });
+
+    it('records an installed prompt-plan epoch in the runtime snapshot', async () => {
+        mockState.settings = makeSettings({
+            worldStateEnabled: true,
+            smartContextEnabled: true,
+            notebookEnabled: true,
+            mandatoryPromptText: 'MANDATORY',
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.worldStatePrompt = 'WORLD';
+        mockState.smartContextPrompt = 'SMART';
+        mockState.notebookPrompt = 'NOTE';
+
+        const plan = await buildPromptInjectionPlan({
+            isRecursiveToolPassImpl: () => false,
+        });
+        applyPromptInjectionPlan(plan);
+
+        const snapshot = await getPromptInjectionRuntimeSnapshot({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(snapshot.installedPlanEpoch).toBeGreaterThan(0);
+        expect(typeof snapshot.installedPlanSignature).toBe('string');
+        expect(snapshot.expectedPlanSignature).toBe(snapshot.installedPlanSignature);
+    });
+
+    it('reports stale installed prompt plans as a warning', async () => {
+        const audit = await auditPromptInjectionRuntime({
+            payload: {
+                settings: makeSettings({ mandatoryTools: true }),
+                activeBooks: ['Book A'],
+                enabled: true,
+                isRecursiveToolPass: false,
+                prompts: {
+                    mandatory: 'MANDATORY',
+                    worldState: '',
+                    smartContext: '',
+                    notebook: '',
+                },
+                promptMeta: {
+                    mandatory: { position: 'IN_CHAT', depth: 1, role: 'SYSTEM' },
+                    worldState: { position: 'IN_CHAT', depth: 2, role: 'SYSTEM' },
+                    smartContext: { position: 'IN_CHAT', depth: 3, role: 'SYSTEM' },
+                    notebook: { position: 'IN_CHAT', depth: 1, role: 'SYSTEM' },
+                },
+                promptKeys: {
+                    mandatory: TV_PROMPT_KEY,
+                    worldState: TV_WORLDSTATE_KEY,
+                    smartContext: TV_SMARTCTX_KEY,
+                    notebook: TV_NOTEBOOK_KEY,
+                },
+                installedPlanEpoch: 2,
+                installedPlanSignature: 'stale-installed-plan',
+                expectedPlanSignature: 'fresh-plan',
+                auditContext: {
+                    enabled: true,
+                    activeBooks: ['Book A'],
+                    isRecursiveToolPass: false,
+                },
+            },
+        });
+
+        expect(audit.ok).toBe(true);
+        expect(audit.findings.some(finding =>
+            finding.id === 'prompt-installed-plan-stale'
+            && finding.reasonCode === 'stale_prompt_plan'
+            && finding.severity === 'warn'
+        )).toBe(true);
     });
 });
