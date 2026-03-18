@@ -73,6 +73,12 @@ vi.mock('../background-events.js', () => ({
     }),
 }));
 
+vi.mock('../runtime-telemetry.js', () => ({
+    logRuntimeRepair: vi.fn((payload) => {
+        mockState.calls.push(`runtime:${payload.status}:${payload.repair?.label}`);
+    }),
+}));
+
 import { executeSafeRuntimeAuditRepairs, executeRuntimeRepairAction } from '../runtime-repairs.js';
 
 function makeAudit(group, safeRepairs) {
@@ -113,14 +119,19 @@ describe('executeSafeRuntimeAuditRepairs', () => {
         expect(mockState.calls).toEqual([
             'invalidate-dirty-worldinfo-cache',
             'feed:Repaired:Invalidate dirty cache',
+            'runtime:applied:Invalidate dirty cache',
             'reset-entry-manager-cache',
             'feed:Repaired:Reset entry manager cache',
+            'runtime:applied:Reset entry manager cache',
             'reset-smart-context-cache',
             'feed:Repaired:Reset smart-context cache',
+            'runtime:applied:Reset smart-context cache',
             'rebuild-tool-registration',
             'feed:Repaired:Rebuild tool registration',
+            'runtime:applied:Rebuild tool registration',
             'rebuild-prompt-plan',
             'feed:Repaired:Rebuild prompt plan',
+            'runtime:applied:Rebuild prompt plan',
         ]);
         expect(result).toEqual({
             attempted: 5,
@@ -164,6 +175,7 @@ describe('executeSafeRuntimeAuditRepairs', () => {
         expect(mockState.calls).toEqual([
             'rebuild-world-state-metadata',
             'feed:Repaired:Rebuild persisted world-state metadata',
+            'runtime:applied:Rebuild persisted world-state metadata',
         ]);
         expect(result).toEqual({
             status: 'applied',

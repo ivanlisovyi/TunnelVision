@@ -60,6 +60,7 @@ import {
   addBackgroundEvent,
   registerBackgroundTask,
 } from "./background-events.js";
+import { logRuntimeFailure } from "./runtime-telemetry.js";
 import { getWorldStateText } from "./world-state.js";
 import { shuffleArray, isSystemEntry } from "./shared-utils.js";
 import {
@@ -360,6 +361,13 @@ export async function runLifecycleMaintenance(force = false) {
       verb: "Lifecycle failed",
       color: "#d63031",
       summary: e.message || "Unknown error",
+    });
+    logRuntimeFailure({
+      category: "memory-lifecycle",
+      source: "memory-lifecycle",
+      title: "Lifecycle maintenance failed",
+      error: e.message || "Unknown error",
+      taskId: task.id,
     });
     _lifecycleRunning = false;
     task.fail(e, () => runLifecycleMaintenance(true));

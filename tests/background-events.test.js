@@ -1,4 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+vi.mock('../runtime-telemetry.js', () => ({
+    createTaskCorrelationId: vi.fn((taskId) => `bg-task-${taskId}`),
+    logRuntimeEvent: vi.fn(),
+    logRuntimeFailure: vi.fn(),
+}));
 import {
     _registerFeedCallbacks,
     addBackgroundEvent,
@@ -12,6 +18,7 @@ import {
     dismissFailedTask,
     getTrackerSuggestionNames,
 } from '../background-events.js';
+import { logRuntimeEvent, logRuntimeFailure } from '../runtime-telemetry.js';
 
 const callbackState = {
     feedItems: [],
@@ -39,6 +46,8 @@ describe('background feed helpers', () => {
         callbackState.feedItems = [];
         callbackState.triggerStates = [];
         callbackState.refreshCount = 0;
+        vi.mocked(logRuntimeEvent).mockClear();
+        vi.mocked(logRuntimeFailure).mockClear();
         registerCallbacks();
     });
 
@@ -103,6 +112,10 @@ describe('background task lifecycle', () => {
         callbackState.feedItems = [];
         callbackState.triggerStates = [];
         callbackState.refreshCount = 0;
+        getActiveTasks().clear();
+        getFailedTasks().clear();
+        vi.mocked(logRuntimeEvent).mockClear();
+        vi.mocked(logRuntimeFailure).mockClear();
         registerCallbacks();
     });
 
@@ -144,6 +157,10 @@ describe('background task lifecycle', () => {
         expect(failedTask.retryFn).toBe(retryFn);
         expect(typeof failedTask.retrying).toBe('boolean');
         expect(callbackState.refreshCount).toBeGreaterThan(0);
+        expect(logRuntimeFailure).toHaveBeenCalledWith(expect.objectContaining({
+            category: 'background-task',
+            title: 'Lifecycle maintenance',
+        }));
     });
 
     it('retryFailedTask returns a boolean result and updates failed-task state on success', async () => {
@@ -157,6 +174,10 @@ describe('background task lifecycle', () => {
         expect(typeof result).toBe('boolean');
         if (result) {
             expect(getFailedTasks().has(failedId)).toBe(false);
+            expect(logRuntimeEvent).toHaveBeenCalledWith(expect.objectContaining({
+                status: 'retried',
+                title: 'Auto-summary',
+            }));
         } else {
             expect(getFailedTasks().has(failedId)).toBe(true);
         }
@@ -181,6 +202,10 @@ describe('background task lifecycle', () => {
             expect(failedTask?.retrying).toBe(false);
             expect(typeof failedTask?.errorMessage).toBe('string');
             expect(failedTask?.errorMessage.length).toBeGreaterThan(0);
+            expect(logRuntimeEvent).toHaveBeenCalledWith(expect.objectContaining({
+                status: 'retry-failed',
+                title: 'Auto-summary',
+            }));
         }
     });
 
@@ -200,6 +225,8 @@ describe('getTrackerSuggestionNames', () => {
         callbackState.feedItems = [];
         callbackState.triggerStates = [];
         callbackState.refreshCount = 0;
+        vi.mocked(logRuntimeEvent).mockClear();
+        vi.mocked(logRuntimeFailure).mockClear();
         registerCallbacks(() => callbackState.feedItems);
     });
 

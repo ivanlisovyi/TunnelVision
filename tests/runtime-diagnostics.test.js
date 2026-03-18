@@ -80,6 +80,11 @@ vi.mock('../runtime-orchestration.js', () => ({
     getOrchestrationRuntimeSnapshot: vi.fn(() => mockState.orchestrationSnapshot),
 }));
 
+vi.mock('../runtime-telemetry.js', () => ({
+    createNamedCorrelationId: vi.fn(() => 'audit-test-correlation'),
+    logRuntimeDiagnosticsSummary: vi.fn(),
+}));
+
 vi.mock('../runtime-health.js', () => ({
     RUNTIME_REASON_CODES: {
         STALE_PROMPT_PLAN: 'stale_prompt_plan',

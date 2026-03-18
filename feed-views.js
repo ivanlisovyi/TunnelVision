@@ -19,12 +19,13 @@ import { getPanelEl, getPanelBody, getPanelTabs,
 import { truncate } from './feed-helpers.js';
 import { getWorldStateText, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState } from './world-state.js';
 import { getAllArcs, removeArc } from './arc-tracker.js';
-import { countStaleEntries, buildHealthReport } from './entry-scoring.js';
 import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { isSummaryTitle, isTrackerTitle } from './tree-store.js';
 import { getCachedWorldInfo, getEntryTemporal, persistWorldInfo } from './entry-manager.js';
 import { getContext } from '../../../st-context.js';
 import { formatShortDateTime } from './shared-utils.js';
+import { buildRuntimeDashboard } from './runtime-dashboard-view.js';
+import { buildLorebookHealthDashboard } from './lorebook-health-view.js';
 
 //── DOM Helpers (local) ──────────────────────────────────────────
 
@@ -1018,7 +1019,7 @@ async function renderHealthView() {
     const headerRow = el('div', 'tv-health-header');
     const titleEl = el('span', 'tv-health-title');
     titleEl.appendChild(icon('fa-heart-pulse'));
-    titleEl.append(' Lorebook Health');
+    titleEl.append(' System Health');
     headerRow.appendChild(titleEl);
 
     const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
@@ -1030,297 +1031,25 @@ async function renderHealthView() {
     // Loading
     const loadingEl = el('div', 'tv-health-loading');
     loadingEl.appendChild(el('span', 'tv_loading'));
-    loadingEl.appendChild(el('span', null, 'Analyzing lorebook health...'));
+    loadingEl.appendChild(el('span', null, 'Analyzing system health...'));
     container.appendChild(loadingEl);
     panelBody.appendChild(container);
 
     try {
         const activeBooks = getActiveTunnelVisionBooks();
-        if (activeBooks.length === 0) {
-            loadingEl.remove();
-            const emptyEl = el('div', 'tv-float-empty');
-            emptyEl.style.cssText = 'flex: 1;';
-            emptyEl.appendChild(icon('fa-heart-pulse'));
-            emptyEl.appendChild(el('span', null, 'No active lorebooks'));
-            emptyEl.appendChild(el('span', 'tv-float-empty-sub', 'Enable a lorebook in TunnelVision settings to see health metrics'));
-            container.appendChild(emptyEl);
-            return;
-        }
-
-        // Merge reports across all active books
-        const mergedReport = {
-            totalEntries: 0, facts: 0, summaries: 0, trackers: 0, disabled: 0,
-            categoryDistribution: [],
-            staleEntries: [], orphanedEntries: [], noTimestamp: [],avgLength: 0, outlierEntries: [], duplicateCandidates: [],growthRate: 0, duplicateDensity: 0, compressionRatio: 1.0,
-            neverReferencedCount: 0, metadataSizes: [],
-        };
-        let totalLength = 0;
-        let totalDupUids = 0, totalForDensity = 0;
-        let compressionSum = 0, compressionCount = 0;
-
-        for (const bookName of activeBooks) {
-            try {
-                const bookData = await getCachedWorldInfo(bookName);
-                if (!bookData?.entries) continue;
-                const report = buildHealthReport(bookName, bookData);
-                mergedReport.totalEntries += report.totalEntries;
-                mergedReport.facts += report.facts;
-                mergedReport.summaries += report.summaries;
-                mergedReport.trackers += report.trackers;
-                mergedReport.disabled += report.disabled;
-                mergedReport.categoryDistribution.push(...report.categoryDistribution);
-                mergedReport.staleEntries.push(...report.staleEntries);
-                mergedReport.orphanedEntries.push(...report.orphanedEntries);
-                mergedReport.noTimestamp.push(...report.noTimestamp);
-                mergedReport.outlierEntries.push(...report.outlierEntries);
-                mergedReport.duplicateCandidates.push(...report.duplicateCandidates);
-                totalLength += report.avgLength * report.totalEntries;
-                mergedReport.neverReferencedCount += report.neverReferencedCount || 0;
-
-                if (report.growthRate > mergedReport.growthRate) mergedReport.growthRate = report.growthRate;
-                if (report.duplicateDensity > 0) {
-                    totalDupUids += report.duplicateDensity * report.totalEntries;
-                    totalForDensity += report.totalEntries;
-                }
-                if (report.compressionRatio !==1.0) {
-                    compressionSum += report.compressionRatio;
-                    compressionCount++;
-                }
-                if (report.metadataSizes?.length > 0 && mergedReport.metadataSizes.length === 0) {
-                    mergedReport.metadataSizes = report.metadataSizes;
-                }
-            } catch { /* skip unavailable books */ }
-        }
-
-        mergedReport.avgLength = mergedReport.totalEntries > 0 ? Math.round(totalLength / mergedReport.totalEntries) : 0;
-        mergedReport.categoryDistribution.sort((a, b) => b.count - a.count);
-        mergedReport.duplicateCandidates.sort((a, b) => b.similarity - a.similarity);
-        mergedReport.outlierEntries.sort((a, b) => b.length - a.length);
-        if (totalForDensity > 0) mergedReport.duplicateDensity = Math.round((totalDupUids / totalForDensity) * 100) / 100;
-        if (compressionCount > 0) mergedReport.compressionRatio = Math.round((compressionSum / compressionCount) * 100) / 100;
+        const runtimeDashboard = await buildRuntimeDashboard({ onRefresh: renderHealthView });
+        const lorebookDashboard = await buildLorebookHealthDashboard({ activeBooks });
 
         loadingEl.remove();
 
         // Build dashboard content
         const body = el('div', 'tv-health-body');
-
-        // ── Entry type breakdown ──
-        const typeSection = el('div', 'tv-health-section');
-        typeSection.appendChild(el('div', 'tv-health-section-title', 'Entry Breakdown'));
-        const typeGrid = el('div', 'tv-health-type-grid');
-        addHealthStat(typeGrid, 'Total', mergedReport.totalEntries, '#a29bfe');
-        addHealthStat(typeGrid, 'Facts', mergedReport.facts, '#6c5ce7');
-        addHealthStat(typeGrid, 'Summaries', mergedReport.summaries, '#fdcb6e');
-        addHealthStat(typeGrid, 'Trackers', mergedReport.trackers, '#00b894');
-        if (mergedReport.disabled > 0) addHealthStat(typeGrid, 'Disabled', mergedReport.disabled, '#636e72');
-        typeSection.appendChild(typeGrid);
-
-        const avgLine = el('div', 'tv-health-avg');
-        avgLine.textContent = `Average entry length: ${mergedReport.avgLength} chars`;
-        typeSection.appendChild(avgLine);
-        body.appendChild(typeSection);
-
-        // ── Scalability Metrics ──
-        const scaleSection = el('div', 'tv-health-section');
-        scaleSection.appendChild(el('div', 'tv-health-section-title', 'Scalability Metrics'));
-        const scaleGrid = el('div', 'tv-health-type-grid');
-
-        addHealthStat(scaleGrid, 'Growth', `${mergedReport.growthRate}`, '#a29bfe');
-        scaleGrid.lastElementChild.title = `${mergedReport.growthRate} entries per100 chat turns`;
-        scaleGrid.lastElementChild.querySelector('.tv-health-stat-label').textContent = '/100 turns';
-
-        const dupPctNum = mergedReport.duplicateDensity * 100;
-        const dupPct = dupPctNum.toFixed(0);
-        addHealthStat(scaleGrid, 'Dup Density', `${dupPct}%`, dupPctNum > 15 ? '#e17055' : dupPctNum > 5 ? '#fdcb6e' : '#00b894');
-        scaleGrid.lastElementChild.title = `${dupPct}% of entries share >70% similarity with another entry`;
-
-        const compRatio = mergedReport.compressionRatio;
-        const compLabel = `${(compRatio * 100).toFixed(0)}%`;
-        addHealthStat(scaleGrid, 'Compression', compLabel, compRatio < 0.8 ? '#00b894' : compRatio > 1.2 ? '#e17055' : '#fdcb6e');
-        scaleGrid.lastElementChild.title = `Current avg length is ${compLabel} of original avg length`;
-
-        addHealthStat(scaleGrid, 'Never Ref\'d', String(mergedReport.neverReferencedCount),
-            mergedReport.neverReferencedCount > 20 ? '#e17055' : mergedReport.neverReferencedCount > 5 ? '#fdcb6e' : '#636e72');
-        scaleGrid.lastElementChild.title = `${mergedReport.neverReferencedCount} entries have been injected but never referenced by the AI`;
-
-        scaleSection.appendChild(scaleGrid);
-
-        // Metadata size breakdown
-        if (mergedReport.metadataSizes?.length > 0) {
-            const metaRow = el('div', 'tv-health-meta-sizes');
-            const metaLabel = el('div', 'tv-health-avg');
-            const totalMeta = mergedReport.metadataSizes.reduce((s, m) => s + m.size, 0);
-            metaLabel.textContent = `Metadata: ${(totalMeta / 1024).toFixed(1)} KB total`;
-            metaRow.appendChild(metaLabel);
-
-            const metaColors = ['#e84393', '#6c5ce7', '#00b894', '#fdcb6e', '#0984e3', '#e17055', '#a29bfe'];
-
-            const metaBar = el('div', 'tv-budget-bar');
-            metaBar.style.marginTop = '4px';
-            for (let i = 0; i < mergedReport.metadataSizes.length; i++) {
-                const m = mergedReport.metadataSizes[i];
-                const pct = Math.max((m.size / totalMeta) * 100, 2);
-                const seg = el('div', 'tv-budget-seg');
-                seg.style.width = `${pct}%`;
-                seg.style.background = metaColors[i % metaColors.length];
-                seg.title = `${m.key}: ${(m.size / 1024).toFixed(1)} KB`;
-                metaBar.appendChild(seg);
-            }
-            metaRow.appendChild(metaBar);
-
-            const metaLegend = el('div', 'tv-budget-legend');
-            metaLegend.style.marginTop = '2px';
-            for (let i = 0; i < mergedReport.metadataSizes.length; i++) {
-                const m = mergedReport.metadataSizes[i];
-                const item = el('span', 'tv-budget-legend-item');
-                const dot = el('span', 'tv-budget-legend-dot');
-                dot.style.background = metaColors[i % metaColors.length];
-                item.appendChild(dot);
-                item.appendChild(document.createTextNode(`${m.key} ${(m.size / 1024).toFixed(1)}K`));
-                metaLegend.appendChild(item);
-            }
-            metaRow.appendChild(metaLegend);scaleSection.appendChild(metaRow);
-        }
-
-        body.appendChild(scaleSection);
-
-        // ── Category distribution ──
-        if (mergedReport.categoryDistribution.length > 0) {
-            const catSection = el('div', 'tv-health-section');
-            catSection.appendChild(el('div', 'tv-health-section-title', 'Category Distribution'));
-            const maxCount = mergedReport.categoryDistribution[0]?.count || 1;
-            const catList = el('div', 'tv-health-cat-list');
-            for (const cat of mergedReport.categoryDistribution.slice(0, 12)) {
-                const catRow = el('div', 'tv-health-cat-row');
-                const catLabel = el('span', 'tv-health-cat-label', truncate(cat.label, 25));
-                catRow.appendChild(catLabel);
-                const barWrap = el('div', 'tv-health-cat-bar-wrap');
-                const bar = el('div', 'tv-health-cat-bar');
-                bar.style.width = `${(cat.count / maxCount) * 100}%`;
-                barWrap.appendChild(bar);
-                catRow.appendChild(barWrap);
-                catRow.appendChild(el('span', 'tv-health-cat-count', String(cat.count)));
-                catList.appendChild(catRow);
-            }
-            if (mergedReport.categoryDistribution.length > 12) {
-                catList.appendChild(el('div', 'tv-health-more', `+${mergedReport.categoryDistribution.length - 12} more categories`));
-            }
-            catSection.appendChild(catList);
-            body.appendChild(catSection);
-        }
-
-        // ── Issues ──
-        const issues = [];
-        if (mergedReport.staleEntries.length > 0) {
-            issues.push({
-                title: `${mergedReport.staleEntries.length} Stale Entries`,
-                icon: 'fa-ghost',
-                color: '#e17055',
-                desc: 'Injected 3+ times but never referenced by the AI',
-                items: mergedReport.staleEntries.slice(0, 10),
-            });
-        }
-        if (mergedReport.orphanedEntries.length > 0) {
-            issues.push({
-                title: `${mergedReport.orphanedEntries.length} Orphaned Entries`,
-                icon: 'fa-link-slash',
-                color: '#fdcb6e',
-                desc: 'Not assigned to any tree category',
-                items: mergedReport.orphanedEntries.slice(0, 10),
-            });
-        }
-        if (mergedReport.noTimestamp.length > 0) {
-            issues.push({
-                title: `${mergedReport.noTimestamp.length} Without Timestamps`,
-                icon: 'fa-calendar-xmark',
-                color: '#74b9ff',
-                desc: 'Fact entries missing [Day X] prefix',
-                items: mergedReport.noTimestamp.slice(0, 10),
-            });
-        }
-        if (mergedReport.outlierEntries.length > 0) {
-            issues.push({
-                title: `${mergedReport.outlierEntries.length} Oversized Entries`,
-                icon: 'fa-weight-hanging',
-                color: '#a29bfe',
-                desc: `Significantly longer than average (${mergedReport.avgLength} chars)`,
-                items: mergedReport.outlierEntries.slice(0, 10).map(e => ({
-                    ...e, title: `${e.title} (${e.length} chars)`,
-                })),
-            });
-        }
-        if (mergedReport.duplicateCandidates.length > 0) {
-            issues.push({
-                title: `${mergedReport.duplicateCandidates.length} Duplicate Candidates`,
-                icon: 'fa-clone',
-                color: '#e84393',
-                desc: 'Entries with high content similarity',
-                items: mergedReport.duplicateCandidates.slice(0, 10).map(d => ({
-                    uid: d.uidA,
-                    title: `${truncate(d.titleA, 20)} ↔ ${truncate(d.titleB, 20)} (${(d.similarity * 100).toFixed(0)}%)`,
-                    bookName: d.bookName,
-                })),
-            });
-        }
-
-        if (issues.length === 0) {
-            const healthyEl = el('div', 'tv-health-healthy');
-            healthyEl.appendChild(icon('fa-circle-check'));
-            healthyEl.appendChild(el('span', null, 'Lorebook looks healthy!'));
-            healthyEl.appendChild(el('span', 'tv-float-empty-sub', 'No stale entries, orphans, or duplicates detected'));
-            body.appendChild(healthyEl);
-        } else {
-            for (const issue of issues) {
-                body.appendChild(buildIssueSection(issue));
-            }
-        }
+        body.appendChild(runtimeDashboard);
+        body.appendChild(lorebookDashboard);
 
         container.appendChild(body);
     } catch (err) {
         loadingEl.remove();
         container.appendChild(el('div', 'tv-feed-expand-empty', `Health analysis failed: ${err.message}`));
     }
-}
-
-function addHealthStat(container, label, value, color) {
-    const stat = el('div', 'tv-health-stat');
-    const valEl = el('div', 'tv-health-stat-value');
-    valEl.textContent = String(value);
-    valEl.style.color = color;
-    stat.appendChild(valEl);
-    stat.appendChild(el('div', 'tv-health-stat-label', label));
-    container.appendChild(stat);
-}
-
-function buildIssueSection(issue) {
-    const section = el('div', 'tv-health-issue');
-
-    const header = el('div', 'tv-health-issue-header');
-    const issueIcon = icon(issue.icon);
-    issueIcon.style.color = issue.color;
-    header.appendChild(issueIcon);
-    header.appendChild(el('span', 'tv-health-issue-title', issue.title));
-    section.appendChild(header);
-
-    section.appendChild(el('div', 'tv-health-issue-desc', issue.desc));
-
-    const list = el('div', 'tv-health-issue-list');
-    for (const item of issue.items) {
-        const row = el('div', 'tv-health-issue-item');
-        row.appendChild(el('span', 'tv-health-issue-uid', `#${item.uid}`));
-        row.appendChild(el('span', 'tv-health-issue-name', truncate(item.title, 45)));
-        list.appendChild(row);
-    }
-    const remaining = (issue.items.length < 10) ? 0 : 0;
-    section.appendChild(list);
-
-    section.classList.add('tv-feed-clickable');
-    const listEl = list;
-    listEl.style.display = 'none';
-    section.addEventListener('click', () => {
-        const expanded = section.classList.toggle('expanded');
-        listEl.style.display = expanded ? '' : 'none';
-    });
-
-    return section;
 }

@@ -24,6 +24,7 @@ import {
     createRuntimeFinding,
     createRuntimeRepair,
 } from './runtime-health.js';
+import { createNamedCorrelationId, logRuntimeFailure } from './runtime-telemetry.js';
 
 export const TV_PROMPT_KEY = 'tunnelvision_mandatory';
 export const TV_NOTEBOOK_KEY = 'tunnelvision_notebook';
@@ -721,6 +722,14 @@ export async function handleGenerationStartedPromptInjection(deps = {}) {
         isRecursiveToolPass = payload.isRecursiveToolPass;
     } catch (e) {
         console.error('[TunnelVision] Error in onGenerationStarted synchronous section:', e);
+        logRuntimeFailure({
+            category: 'prompt-injection',
+            source: 'generation-start',
+            title: 'Prompt injection failed',
+            error: e?.message || 'Unknown prompt injection error.',
+            details: ['Stage: handleGenerationStartedPromptInjection'],
+            correlationId: createNamedCorrelationId('prompt'),
+        });
     }
 
     return { settings, isRecursiveToolPass };

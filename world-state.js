@@ -21,6 +21,7 @@ import { getActiveTunnelVisionBooks } from './tool-registry.js';
 import { getCachedWorldInfo } from './entry-manager.js';
 import { getChatId, formatChatExcerpt, callWithRetry } from './agent-utils.js';
 import { addBackgroundEvent, registerBackgroundTask } from './background-events.js';
+import { logRuntimeFailure } from './runtime-telemetry.js';
 import { buildArcsSummary } from './arc-tracker.js';
 import { withWorldInfoAttribution } from './world-info-attribution.js';
 import {
@@ -597,6 +598,15 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
                 color: '#e17055',
                 summary: validation.reason,
             });
+            logRuntimeFailure({
+                category: 'world-state',
+                source: 'world-state',
+                title: 'World state update rejected',
+                error: validation.reason,
+                taskId: task.id,
+                status: 'rejected',
+                severity: 'warn',
+            });
             return null;
         }
 
@@ -627,6 +637,13 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
             verb: 'World state failed',
             color: '#d63031',
             summary: e.message || 'Unknown error',
+        });
+        logRuntimeFailure({
+            category: 'world-state',
+            source: 'world-state',
+            title: 'World state update failed',
+            error: e.message || 'Unknown error',
+            taskId: task.id,
         });
         _updateRunning = false;
         task.fail(e, () => updateWorldState(true));

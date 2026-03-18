@@ -13,6 +13,7 @@ import {
 } from './world-state.js';
 import { invalidateDirtyWorldInfoCache, invalidateWorldInfoCache } from './entry-manager.js';
 import { addBackgroundEvent } from './background-events.js';
+import { logRuntimeRepair } from './runtime-telemetry.js';
 
 const SAFE_RUNTIME_REPAIR_ORDER = Object.freeze([
     'invalidate-dirty-worldinfo-cache',
@@ -73,7 +74,7 @@ const RUNTIME_REPAIR_HANDLERS = Object.freeze({
     ...EXPLICIT_RUNTIME_REPAIR_HANDLERS,
 });
 
-function logRuntimeRepairEvent({ status, repair, origin = 'runtime-audit', groups = [], error = null }) {
+function logRuntimeRepairEvent({ status, repair, origin = 'runtime-audit', groups = [], error = null, correlationId = null }) {
     addBackgroundEvent({
         icon: status === 'failed' ? 'fa-screwdriver-wrench' : 'fa-wand-magic-sparkles',
         verb: status === 'failed' ? 'Repair failed' : 'Repaired',
@@ -85,6 +86,7 @@ function logRuntimeRepairEvent({ status, repair, origin = 'runtime-audit', group
             error ? `Error: ${error}` : '',
         ],
     });
+    logRuntimeRepair({ status, repair, origin, groups, error, correlationId });
 }
 
 function collectSafeRepairQueue(audits = []) {
@@ -121,15 +123,16 @@ function collectSafeRepairQueue(audits = []) {
         });
 }
 
-export async function executeSafeRuntimeAuditRepairs(audits = []) {
+export async function executeSafeRuntimeAuditRepairs(audits = [], { origin = 'runtime-audit:auto', correlationId = null } = {}) {
     const queue = collectSafeRepairQueue(audits);
     const applied = [];
     const failed = [];
 
     for (const repair of queue) {
         const result = await executeRuntimeRepairAction(repair, {
-            origin: 'runtime-audit:auto',
+            origin,
             groups: repair.groups,
+            correlationId,
         });
         if (result.status === 'applied') {
             applied.push(result.repair);
@@ -152,7 +155,7 @@ export function canExecuteRuntimeRepairAction(repairId) {
     return Boolean(repairId && RUNTIME_REPAIR_HANDLERS[repairId]);
 }
 
-export async function executeRuntimeRepairAction(repair, { origin = 'runtime-audit', groups = [] } = {}) {
+export async function executeRuntimeRepairAction(repair, { origin = 'runtime-audit', groups = [], correlationId = null } = {}) {
     const normalizedRepair = {
         id: repair?.id || null,
         label: repair?.label || repair?.id || '',
@@ -188,6 +191,7 @@ export async function executeRuntimeRepairAction(repair, { origin = 'runtime-aud
             repair: normalizedRepair,
             origin,
             groups: normalizedRepair.groups,
+            correlationId,
         });
         return {
             status: 'applied',
@@ -202,6 +206,7 @@ export async function executeRuntimeRepairAction(repair, { origin = 'runtime-aud
             origin,
             groups: normalizedRepair.groups,
             error: message,
+            correlationId,
         });
         return {
             status: 'failed',

@@ -60,6 +60,14 @@ vi.mock('../shared-utils.js', () => ({
     formatShortDateTime: vi.fn(() => 'formatted'),
 }));
 
+vi.mock('../runtime-dashboard-view.js', () => ({
+    buildRuntimeDashboard: vi.fn(async () => document.createElement('div')),
+}));
+
+vi.mock('../lorebook-health-view.js', () => ({
+    buildLorebookHealthDashboard: vi.fn(async () => document.createElement('div')),
+}));
+
 import { setPanelBody } from '../feed-state.js';
 import { loadTimelineEntries, renderTimelineView } from '../feed-views.js';
 

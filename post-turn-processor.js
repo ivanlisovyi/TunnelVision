@@ -71,6 +71,7 @@ import {
   registerBackgroundTask,
   getTrackerSuggestionNames,
 } from "./background-events.js";
+import { logRuntimeFailure } from "./runtime-telemetry.js";
 import { requestPriorityUpdate, getWorldStateTemporalSnapshot } from "./world-state.js";
 import { processArcUpdates, buildArcsContextBlock } from "./arc-tracker.js";
 import {
@@ -754,6 +755,13 @@ export async function runPostTurnProcessor(force = false) {
       verb: "Post-turn failed",
       color: "#d63031",
       summary: e.message || "Unknown error",
+    });
+    logRuntimeFailure({
+      category: "post-turn",
+      source: "post-turn-processor",
+      title: "Post-turn processing failed",
+      error: e.message || "Unknown error",
+      taskId: task.id,
     });
     _liveRollback = null;
     _processorRunning = false;

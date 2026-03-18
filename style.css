@@ -3613,3 +3613,118 @@
 .tv-health-healthy .tv-float-empty-sub {
     color: var(--SmartThemeQuoteColor, #888);
 }
+
+.tv-runtime-events-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tv-runtime-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.tv-runtime-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.tv-runtime-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 140px;
+}
+
+.tv-runtime-filter-label {
+    font-size: 11px;
+    color: var(--SmartThemeQuoteColor, #999);
+}
+
+.tv-runtime-filter-select {
+    padding: 6px 8px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--SmartThemeBodyColor, #ddd);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+}
+
+.tv-runtime-actions .tv-float-panel-btn[disabled] {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.tv-runtime-event {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.tv-runtime-event-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tv-runtime-event-badge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    color: #111;
+}
+
+.tv-runtime-event-info {
+    background: #74b9ff;
+}
+
+.tv-runtime-event-warn {
+    background: #fdcb6e;
+}
+
+.tv-runtime-event-error {
+    background: #ef4444;
+    color: #fff;
+}
+
+.tv-runtime-event-title {
+    flex: 1 1 180px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--SmartThemeEmColor, #f5f5f5);
+}
+
+.tv-runtime-event-time {
+    font-size: 11px;
+    color: var(--SmartThemeQuoteColor, #aaa);
+}
+
+.tv-runtime-event-summary {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--SmartThemeBodyColor, #ddd);
+}
+
+.tv-runtime-event-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.tv-runtime-event-detail {
+    font-size: 10px;
+    color: #cdb8ff;
+    background: rgba(162, 155, 254, 0.12);
+    border: 1px solid rgba(162, 155, 254, 0.25);
+    border-radius: 999px;
+    padding: 2px 8px;
+}

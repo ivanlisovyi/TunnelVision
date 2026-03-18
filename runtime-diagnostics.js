@@ -22,6 +22,7 @@ import {
     RUNTIME_REPAIR_CLASSES,
 } from './runtime-health.js';
 import { executeSafeRuntimeAuditRepairs } from './runtime-repairs.js';
+import { createNamedCorrelationId, logRuntimeDiagnosticsSummary } from './runtime-telemetry.js';
 
 /**
  * @typedef {Object} DiagResult
@@ -339,8 +340,12 @@ export async function runRuntimeAuditDiagnostics({ repair = false } = {}) {
 
 export async function runRuntimeAuditDiagnosticsDetailed({ repair = false } = {}) {
     const initialAudits = await collectRuntimeAudits();
+    const correlationId = createNamedCorrelationId('audit');
     const repairExecution = repair
-        ? await executeSafeRuntimeAuditRepairs(initialAudits)
+        ? await executeSafeRuntimeAuditRepairs(initialAudits, {
+            origin: 'runtime-audit:auto',
+            correlationId,
+        })
         : null;
     const audits = repairExecution?.applied?.length
         ? await collectRuntimeAudits()
@@ -354,6 +359,18 @@ export async function runRuntimeAuditDiagnosticsDetailed({ repair = false } = {}
             `Runtime repair execution failed for ${repairExecution.failed.length} action(s): ${repairExecution.failed.map(repair => repair.id).join(', ')}.`,
         ));
     }
+
+    const totals = results.reduce((acc, result) => {
+        acc[result.status] = (acc[result.status] || 0) + 1;
+        return acc;
+    }, { pass: 0, warn: 0, fail: 0 });
+    logRuntimeDiagnosticsSummary({
+        repair,
+        totals,
+        resultCount: results.length,
+        repairExecution,
+        correlationId,
+    });
 
     return results;
 }

@@ -12,6 +12,8 @@
  * _registerFeedCallbacks(), wiring the visual side without a cycle.
  */
 
+import { createTaskCorrelationId, logRuntimeEvent, logRuntimeFailure } from './runtime-telemetry.js';
+
 // ── UI Callbacks (registered by activity-feed.js at init) ────────
 
 /** @type {((items: Object[]) => void) | null} */
@@ -189,6 +191,7 @@ let _nextFailedTaskId = 0;
  * @property {string} color
  * @property {number} failedAt
  * @property {string} errorMessage
+ * @property {string} [correlationId]
  * @property {Function} retryFn - Closure to re-invoke the operation
  * @property {boolean} retrying - Whether a retry is currently in progress
  */
@@ -227,6 +230,19 @@ export function registerBackgroundTask({ label, icon: taskIcon = 'fa-gear', colo
             _activeTasks.delete(id);
             setBackgroundActive(false);
 
+            logRuntimeFailure({
+                category: 'background-task',
+                source: 'background-events',
+                title: label,
+                error: error?.message || 'Background task failed.',
+                taskId: id,
+                details: [typeof retryFn === 'function' ? 'Retry available' : 'Retry unavailable'],
+                context: {
+                    icon: taskIcon,
+                    color,
+                },
+            });
+
             if (typeof retryFn === 'function') {
                 const failedId = _nextFailedTaskId++;
                 _failedTasks.set(failedId, {
@@ -236,6 +252,7 @@ export function registerBackgroundTask({ label, icon: taskIcon = 'fa-gear', colo
                     color,
                     failedAt: Date.now(),
                     errorMessage: error?.message || 'Unknown error',
+                    correlationId: createTaskCorrelationId(id),
                     retryFn,
                     retrying: false,
                 });
@@ -289,10 +306,32 @@ export async function retryFailedTask(failedId) {
 
     try {
         await failedTask.retryFn();
+        logRuntimeEvent({
+            severity: 'info',
+            category: 'background-task',
+            source: 'background-events',
+            status: 'retried',
+            title: failedTask.label,
+            summary: 'Background task retry succeeded.',
+            details: [`Failed task ID: ${failedId}`],
+            context: { failedId },
+            correlationId: failedTask.correlationId || createTaskCorrelationId(failedId),
+        });
         _failedTasks.delete(failedId);
         _refreshTasksUI?.();
         return true;
     } catch (e) {
+        logRuntimeEvent({
+            severity: 'warn',
+            category: 'background-task',
+            source: 'background-events',
+            status: 'retry-failed',
+            title: failedTask.label,
+            summary: e?.message || 'Background task retry failed.',
+            details: [`Failed task ID: ${failedId}`],
+            context: { failedId },
+            correlationId: failedTask.correlationId || createTaskCorrelationId(failedId),
+        });
         failedTask.retrying = false;
         failedTask.failedAt = Date.now();
         failedTask.errorMessage = e?.message || 'Retry failed';
