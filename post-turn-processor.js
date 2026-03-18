@@ -43,14 +43,10 @@ import {
   FACT_EXTRACTION_PROMPT,
 } from "./entry-manager.js";
 import {
-  RUNTIME_AUDIT_GROUPS,
-  RUNTIME_AUDIT_SEVERITIES,
-  RUNTIME_REASON_CODES,
-  RUNTIME_REPAIR_CLASSES,
-  createRuntimeAuditResult,
-  createRuntimeFinding,
-  createRuntimeRepair,
-} from "./runtime-health.js";
+  auditPostTurnProcessorRuntime as auditPostTurnProcessorRuntimeImpl,
+  getPostTurnProcessorRuntimeSnapshot as getPostTurnProcessorRuntimeSnapshotImpl,
+} from './post-turn-runtime.js';
+import { postTurnRuntimeState } from './post-turn-runtime-state.js';
 import { markAutoSummaryComplete } from "./auto-summary.js";
 import {
   getWatermark,
@@ -93,12 +89,6 @@ import {
 const METADATA_KEY = "tunnelvision_postturn";
 
 let _initialized = false;
-let _processorRunning = false;
-let _currentTask = null;
-let _swipePending = false;
-const _chatRef = { lastChatLength: 0, lastChatId: null };
-let _lastArchivedAt = 0;
-let _liveRollback = null;
 
 // ── Persistence ──────────────────────────────────────────────────
 
@@ -122,36 +112,13 @@ function setProcessorState(state) {
 }
 
 function persistLiveRollback() {
-  if (!_liveRollback) return;
+  if (!postTurnRuntimeState.liveRollback) return;
   try {
     const state = getProcessorState() || {};
-    setProcessorState({ ...state, rollback: { ..._liveRollback } });
+    setProcessorState({ ...state, rollback: { ...postTurnRuntimeState.liveRollback } });
   } catch (e) {
     console.warn("[TunnelVision] Failed to persist live rollback:", e);
   }
-}
-
-function isValidProcessorMetadata(state) {
-  if (state == null) return true;
-  if (typeof state !== "object" || Array.isArray(state)) return false;
-
-  const numericFields = ["lastProcessedMsgIdx", "lastProcessedAt"];
-  for (const field of numericFields) {
-    const value = state[field];
-    if (value != null && !Number.isFinite(value)) {
-      return false;
-    }
-  }
-
-  if (state.lastResult != null && typeof state.lastResult !== "object") {
-    return false;
-  }
-
-  if (state.rollback != null && !isValidRollbackPayload(state.rollback)) {
-    return false;
-  }
-
-  return true;
 }
 
 function isValidRollbackPayload(rollback) {
@@ -181,289 +148,30 @@ function isValidRollbackPayload(rollback) {
   return true;
 }
 
-function auditTrackerHashMetadata(hashes = getTrackerHashes()) {
-  const findings = [];
-
-  if (hashes == null) {
-    return findings;
-  }
-
-  if (typeof hashes !== "object" || Array.isArray(hashes)) {
-    findings.push(createRuntimeFinding({
-      id: "postturn-tracker-hash-metadata-invalid",
-      subsystem: "post-turn-processor",
-      severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-      message: "Tracker hash metadata is malformed.",
-      reasonCode: RUNTIME_REASON_CODES.STALE_TRACKER_METADATA,
-      repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-      context: { trackerHashesType: typeof hashes },
-    }));
-    return findings;
-  }
-
-  for (const [key, value] of Object.entries(hashes)) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      findings.push(createRuntimeFinding({
-        id: "postturn-tracker-hash-entry-invalid",
-        subsystem: "post-turn-processor",
-        severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-        message: `Tracker hash metadata entry "${key}" is malformed.`,
-        reasonCode: RUNTIME_REASON_CODES.STALE_TRACKER_METADATA,
-        repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-        context: { key, value },
-      }));
-      continue;
-    }
-
-    if (
-      (value.hash != null && !Number.isFinite(value.hash))
-      || (value.timestamp != null && !Number.isFinite(value.timestamp))
-    ) {
-      findings.push(createRuntimeFinding({
-        id: "postturn-tracker-hash-entry-fields-invalid",
-        subsystem: "post-turn-processor",
-        severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-        message: `Tracker hash metadata entry "${key}" has invalid hash or timestamp fields.`,
-        reasonCode: RUNTIME_REASON_CODES.STALE_TRACKER_METADATA,
-        repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-        context: { key, value },
-      }));
-    }
-  }
-
-  return findings;
-}
 
 // (formatRecentExchange and getChatId imported from agent-utils.js)
 
 // ── Decision Logic ───────────────────────────────────────────────
 
-function getProcessingGateState() {
-  const settings = getSettings();
-  if (!settings.postTurnEnabled || settings.globalEnabled === false) {
-    return { allowed: false, reason: "disabled" };
-  }
-
-  const activeBooks = getActiveTunnelVisionBooks();
-  if (activeBooks.length === 0) {
-    return { allowed: false, reason: "no-active-books" };
-  }
-
-  const context = getContext();
-  const chatLength = context.chat?.length || 0;
-  const state = getProcessorState();
-  const lastIdx = state?.lastProcessedMsgIdx ?? -1;
-  const cooldown = Math.max(Number(settings.postTurnCooldown) || 1, 1);
-  const delta = chatLength - 1 - lastIdx;
-
-  if (delta <= 0) {
-    return {
-      allowed: false,
-      reason: "already-processed-current-message",
-      chatLength,
-      lastIdx,
-      cooldown,
-      delta,
-    };
-  }
-
-  if (delta < cooldown) {
-    return {
-      allowed: false,
-      reason: "turn-interval-not-met",
-      chatLength,
-      lastIdx,
-      cooldown,
-      delta,
-    };
-  }
-
-  return {
-    allowed: true,
-    reason: "ready",
-    chatLength,
-    lastIdx,
-    cooldown,
-    delta,
-  };
-}
-
 export function getPostTurnProcessorRuntimeSnapshot() {
-  const state = getProcessorState();
-  const gate = getProcessingGateState();
-  const trackerHashes = getTrackerHashes();
-
-  return {
-    metadataKey: METADATA_KEY,
-    state,
-    gate,
-    processorRunning: _processorRunning,
-    hasCurrentTask: Boolean(_currentTask),
-    swipePending: _swipePending,
-    chatRef: { ..._chatRef },
-    lastArchivedAt: _lastArchivedAt,
-    hasLiveRollback: Boolean(_liveRollback),
-    liveRollback: _liveRollback,
-    trackerHashes,
-  };
+  return getPostTurnProcessorRuntimeSnapshotImpl();
 }
 
 function shouldProcess() {
-  return getProcessingGateState().allowed;
+  return getPostTurnProcessorRuntimeSnapshotImpl().gate.allowed;
 }
 
 export function auditPostTurnProcessorRuntime(
   snapshot = getPostTurnProcessorRuntimeSnapshot(),
 ) {
-  const findings = [];
-  const safeRepairs = [];
-  const requiresConfirmation = [];
-
-  const {
-    state,
-    gate,
-    processorRunning,
-    hasCurrentTask,
-    swipePending,
-    metadataKey,
-    trackerHashes,
-  } = snapshot;
-
-  if (!isValidProcessorMetadata(state)) {
-    findings.push(createRuntimeFinding({
-      id: "postturn-invalid-metadata",
-      subsystem: "post-turn-processor",
-      severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-      message: "Persisted post-turn processor metadata is malformed.",
-      reasonCode: RUNTIME_REASON_CODES.INVALID_PERSISTED_METADATA,
-      repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-      repairActionId: "rebuild-postturn-metadata",
-      context: { state },
-    }));
-
-    requiresConfirmation.push(createRuntimeRepair({
-      id: "rebuild-postturn-metadata",
-      label: "Rebuild persisted post-turn metadata",
-      repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-      reasonCode: RUNTIME_REASON_CODES.INVALID_PERSISTED_METADATA,
-      context: {
-        metadataKey,
-      },
-    }));
-  }
-
-  if (state?.rollback != null && !isValidRollbackPayload(state.rollback)) {
-    findings.push(createRuntimeFinding({
-      id: "postturn-rollback-mismatch",
-      subsystem: "post-turn-processor",
-      severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-      message: "Persisted rollback payload is malformed or inconsistent.",
-      reasonCode: RUNTIME_REASON_CODES.ROLLBACK_MISMATCH,
-      repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-      repairActionId: "clear-postturn-rollback",
-      context: { rollback: state.rollback },
-    }));
-
-    requiresConfirmation.push(createRuntimeRepair({
-      id: "clear-postturn-rollback",
-      label: "Clear persisted rollback payload",
-      repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-      reasonCode: RUNTIME_REASON_CODES.ROLLBACK_MISMATCH,
-      context: {
-        metadataKey,
-      },
-    }));
-  }
-
-  if (gate.allowed && gate.reason !== "ready") {
-    findings.push(createRuntimeFinding({
-      id: "postturn-gate-inconsistent-ready",
-      subsystem: "post-turn-processor",
-      severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-      message: "Post-turn processor gate allows execution without reporting a ready state.",
-      reasonCode: RUNTIME_REASON_CODES.PROCESSOR_GATE_INCONSISTENCY,
-      context: { gate },
-    }));
-  } else if (!gate.allowed && !gate.reason) {
-    findings.push(createRuntimeFinding({
-      id: "postturn-gate-missing-reason",
-      subsystem: "post-turn-processor",
-      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-      message: "Post-turn processor gate denied execution without a reason code.",
-      reasonCode: RUNTIME_REASON_CODES.PROCESSOR_GATE_INCONSISTENCY,
-      context: { gate },
-    }));
-  }
-
-  findings.push(...auditTrackerHashMetadata(trackerHashes));
-
-  if (processorRunning && !hasCurrentTask) {
-    findings.push(createRuntimeFinding({
-      id: "postturn-running-without-task",
-      subsystem: "post-turn-processor",
-      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-      message: "Post-turn processor is marked running without an active task handle.",
-      reasonCode: RUNTIME_REASON_CODES.PROCESSOR_GATE_INCONSISTENCY,
-      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-      repairActionId: "reset-postturn-ephemeral-state",
-      context: {
-        processorRunning,
-        hasCurrentTask,
-      },
-    }));
-
-    safeRepairs.push(createRuntimeRepair({
-      id: "reset-postturn-ephemeral-state",
-      label: "Reset post-turn ephemeral state",
-      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-      reasonCode: RUNTIME_REASON_CODES.PROCESSOR_GATE_INCONSISTENCY,
-      context: {
-        processorRunning,
-        swipePending,
-      },
-    }));
-  }
-
-  if (findings.length === 0) {
-    findings.push(createRuntimeFinding({
-      id: "postturn-runtime-valid",
-      subsystem: "post-turn-processor",
-      severity: RUNTIME_AUDIT_SEVERITIES.INFO,
-      message: "Post-turn processor integrity validated.",
-      context: {
-        gate,
-        processorRunning,
-        hasRollback: Boolean(state?.rollback),
-      },
-    }));
-  }
-
-  return createRuntimeAuditResult({
-    group: RUNTIME_AUDIT_GROUPS.POST_TURN,
-    ok: findings.every(
-      finding => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR,
-    ),
-    summary: findings.some(
-      finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.ERROR,
-    )
-      ? "Post-turn processor audit found integrity issues."
-      : findings.some(
-          finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN,
-        )
-        ? "Post-turn processor audit found coordination issues."
-        : "Post-turn processor audit passed.",
-    findings,
-    safeRepairs,
-    requiresConfirmation,
-    context: snapshot,
-  });
+  return auditPostTurnProcessorRuntimeImpl(snapshot);
 }
 
 export function resetPostTurnEphemeralState() {
-  const hadEphemeralState = _processorRunning || Boolean(_currentTask) || _swipePending;
-  _processorRunning = false;
-  _currentTask = null;
-  _swipePending = false;
+  const hadEphemeralState = postTurnRuntimeState.processorRunning || Boolean(postTurnRuntimeState.currentTask) || postTurnRuntimeState.swipePending;
+  postTurnRuntimeState.processorRunning = false;
+  postTurnRuntimeState.currentTask = null;
+  postTurnRuntimeState.swipePending = false;
   return hadEphemeralState;
 }
 
@@ -484,14 +192,14 @@ export function rebuildPostTurnMetadata() {
     rebuilt.rollback = state.rollback;
   }
 
-  _liveRollback = isValidRollbackPayload(rebuilt.rollback) ? rebuilt.rollback : null;
+  postTurnRuntimeState.liveRollback = isValidRollbackPayload(rebuilt.rollback) ? rebuilt.rollback : null;
   setProcessorState(Object.keys(rebuilt).length > 0 ? rebuilt : null);
   return true;
 }
 
 export function clearPostTurnRollback() {
   const state = getProcessorState();
-  if (!state?.rollback && !_liveRollback) {
+  if (!state?.rollback && !postTurnRuntimeState.liveRollback) {
     return false;
   }
 
@@ -499,7 +207,7 @@ export function clearPostTurnRollback() {
     ? { ...state }
     : {};
   delete nextState.rollback;
-  _liveRollback = null;
+  postTurnRuntimeState.liveRollback = null;
   setProcessorState(Object.keys(nextState).length > 0 ? nextState : null);
   return true;
 }
@@ -547,9 +255,9 @@ async function loadTrackerEntries(activeBooks) {
  * @returns {Promise<Object|null>} Processing result summary, or null
  */
 export async function runPostTurnProcessor(force = false) {
-  if (_processorRunning) return null;
+  if (postTurnRuntimeState.processorRunning) return null;
   if (!force) {
-    const gate = getProcessingGateState();
+    const gate = getPostTurnProcessorRuntimeSnapshotImpl().gate;
     if (!gate.allowed) return null;
   }
 
@@ -567,17 +275,17 @@ export async function runPostTurnProcessor(force = false) {
   const { book: targetBook, error } = resolveTargetBook(activeBooks[0]);
   if (error || !targetBook) return null;
 
-  _processorRunning = true;
+  postTurnRuntimeState.processorRunning = true;
   const task = registerBackgroundTask({
     label: "Post-turn",
     icon: "fa-brain",
     color: "#6c5ce7",
   });
-  _currentTask = task;
+  postTurnRuntimeState.currentTask = task;
 
   // Initialize live rollback immediately so cancellation at any point
   // can undo whatever was created so far
-  _liveRollback = { createdUids: [], trackerReverts: [], book: targetBook };
+  postTurnRuntimeState.liveRollback = { createdUids: [], trackerReverts: [], book: targetBook };
   persistLiveRollback();
 
   const state = getProcessorState();
@@ -587,9 +295,9 @@ export async function runPostTurnProcessor(force = false) {
   const recentExcerpt = formatRecentExchange(chat, excerptCount);
 
   if (!recentExcerpt.trim()) {
-    _liveRollback = null;
-    _processorRunning = false;
-    _currentTask = null;
+    postTurnRuntimeState.liveRollback = null;
+    postTurnRuntimeState.processorRunning = false;
+    postTurnRuntimeState.currentTask = null;
     task.end();
     return null;
   }
@@ -682,7 +390,7 @@ export async function runPostTurnProcessor(force = false) {
       result.sceneArchived = archiveResult.archived;
       result.sceneTitle = archiveResult.title;
       result.errors += archiveResult.errors;
-      if (archiveResult.archived) _lastArchivedAt = Date.now();
+      if (archiveResult.archived) postTurnRuntimeState.lastArchivedAt = Date.now();
     }
 
     if (task.cancelled) return null;
@@ -707,7 +415,7 @@ export async function runPostTurnProcessor(force = false) {
       lastProcessedMsgIdx: chat.length - 1,
       lastProcessedAt: Date.now(),
       lastResult: result,
-      rollback: _liveRollback ? { ..._liveRollback } : null,
+      rollback: postTurnRuntimeState.liveRollback ? { ...postTurnRuntimeState.liveRollback } : null,
     });
 
     const details = [];
@@ -763,21 +471,21 @@ export async function runPostTurnProcessor(force = false) {
       error: e.message || "Unknown error",
       taskId: task.id,
     });
-    _liveRollback = null;
-    _processorRunning = false;
-    _currentTask = null;
+    postTurnRuntimeState.liveRollback = null;
+    postTurnRuntimeState.processorRunning = false;
+    postTurnRuntimeState.currentTask = null;
     task.fail(e, () => runPostTurnProcessor(true));
     return null;
   } finally {
     if (!task._ended) {
-      _liveRollback = null;
-      _processorRunning = false;
-      _currentTask = null;
+      postTurnRuntimeState.liveRollback = null;
+      postTurnRuntimeState.processorRunning = false;
+      postTurnRuntimeState.currentTask = null;
       task.end();
     }
 
-    if (_swipePending) {
-      _swipePending = false;
+    if (postTurnRuntimeState.swipePending) {
+      postTurnRuntimeState.swipePending = false;
       rollbackLastPostTurn().then(() => {
         runPostTurnProcessor().catch((e) => {
           console.error(
@@ -1059,8 +767,8 @@ async function persistFactEntry(targetBook, fact, result) {
 
   result.factsCreated++;
   result.createdUids.push(entryResult.uid);
-  if (_liveRollback) {
-    _liveRollback.createdUids.push(entryResult.uid);
+  if (postTurnRuntimeState.liveRollback) {
+    postTurnRuntimeState.liveRollback.createdUids.push(entryResult.uid);
     persistLiveRollback();
   }
 }
@@ -1430,8 +1138,8 @@ export async function updateTrackers(trackers, recentExcerpt, chatId) {
             changeFraction,
           });
         }
-        if (_liveRollback) {
-          _liveRollback.trackerReverts.push({
+        if (postTurnRuntimeState.liveRollback) {
+          postTurnRuntimeState.liveRollback.trackerReverts.push({
             uid: tracker.uid,
             book: tracker.book,
             previousContent,
@@ -1842,7 +1550,7 @@ export async function createTrackerForCharacter(characterName) {
 
 async function rollbackLastPostTurn() {
   // Prefer live rollback (accurate during mid-run cancellation) over persisted state
-  const rb = _liveRollback || getProcessorState()?.rollback;
+  const rb = postTurnRuntimeState.liveRollback || getProcessorState()?.rollback;
   if (!rb) return;
 
   const state = getProcessorState();
@@ -1878,7 +1586,7 @@ async function rollbackLastPostTurn() {
     }
   }
 
-  _liveRollback = null;
+  postTurnRuntimeState.liveRollback = null;
 
   // Reset processor state so the next run is allowed
   setProcessorState({
@@ -1923,18 +1631,18 @@ function onAiMessageReceived() {
 
   const chatLength = getContext().chat?.length || 0;
 
-  if (_chatRef.lastChatId !== chatId) {
-    _chatRef.lastChatId = chatId;
-    _chatRef.lastChatLength = Math.max(chatLength - 1, 0);
+  if (postTurnRuntimeState.chatRef.lastChatId !== chatId) {
+    postTurnRuntimeState.chatRef.lastChatId = chatId;
+    postTurnRuntimeState.chatRef.lastChatLength = Math.max(chatLength - 1, 0);
   }
 
-  const isSwipe = chatLength > 0 && chatLength <= _chatRef.lastChatLength;
+  const isSwipe = chatLength > 0 && chatLength <= postTurnRuntimeState.chatRef.lastChatLength;
 
   if (isSwipe) {
-    _chatRef.lastChatLength = chatLength;
-    if (_processorRunning) {
-      _swipePending = true;
-      if (_currentTask) _currentTask.cancelled = true;
+    postTurnRuntimeState.chatRef.lastChatLength = chatLength;
+    if (postTurnRuntimeState.processorRunning) {
+      postTurnRuntimeState.swipePending = true;
+      if (postTurnRuntimeState.currentTask) postTurnRuntimeState.currentTask.cancelled = true;
     } else {
       rollbackLastPostTurn().then(() => {
         runPostTurnProcessor().catch((e) => {
@@ -1948,7 +1656,7 @@ function onAiMessageReceived() {
     return;
   }
 
-  _chatRef.lastChatLength = chatLength;
+  postTurnRuntimeState.chatRef.lastChatLength = chatLength;
 
   if (shouldProcess()) {
     runPostTurnProcessor().catch((e) => {
@@ -1961,13 +1669,13 @@ function onChatChanged() {
   try {
     const chatId = getChatId();
     const chatLength = getContext().chat?.length || 0;
-    if (_chatRef.lastChatId !== chatId) {
-      _chatRef.lastChatId = chatId;
-      _chatRef.lastChatLength = chatLength;
+    if (postTurnRuntimeState.chatRef.lastChatId !== chatId) {
+      postTurnRuntimeState.chatRef.lastChatId = chatId;
+      postTurnRuntimeState.chatRef.lastChatLength = chatLength;
     }
   } catch {
-    _chatRef.lastChatLength = 0;
-    _chatRef.lastChatId = null;
+    postTurnRuntimeState.chatRef.lastChatLength = 0;
+    postTurnRuntimeState.chatRef.lastChatId = null;
   }
 }
 
@@ -2001,10 +1709,10 @@ export function getLastProcessedIndex() {
 
 /** Check if the processor is currently running. */
 export function isProcessorRunning() {
-  return _processorRunning;
+  return postTurnRuntimeState.processorRunning;
 }
 
 /** Returns true if a scene was archived within the last 30 seconds. */
 export function hasRecentArchive() {
-  return _lastArchivedAt > 0 && Date.now() - _lastArchivedAt < SCENE_ARCHIVE_COOLDOWN_MS;
+  return postTurnRuntimeState.lastArchivedAt > 0 && Date.now() - postTurnRuntimeState.lastArchivedAt < SCENE_ARCHIVE_COOLDOWN_MS;
 }

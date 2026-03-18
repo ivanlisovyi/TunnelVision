@@ -54,7 +54,7 @@ vi.mock('../prompt-injection-runtime.js', () => ({
     auditPromptInjectionRuntime: vi.fn(async () => getMockState().runtimeAudits.promptInjection),
 }));
 
-vi.mock('../post-turn-processor.js', () => ({
+vi.mock('../post-turn-runtime.js', () => ({
     auditPostTurnProcessorRuntime: vi.fn(() => getMockState().runtimeAudits.postTurn),
 }));
 
@@ -64,6 +64,19 @@ vi.mock('../smart-context-runtime.js', () => ({
 
 vi.mock('../world-state-runtime.js', () => ({
     auditWorldStateRuntime: vi.fn(() => getMockState().runtimeAudits.worldState),
+}));
+
+vi.mock('../entry-manager-runtime.js', () => ({
+    buildUidMap: vi.fn(entries => {
+        const map = new Map();
+        for (const entry of Object.values(entries || {})) {
+            if (entry && Number.isFinite(entry.uid)) {
+                map.set(entry.uid, entry);
+            }
+        }
+        return map;
+    }),
+    auditEntryManagerRuntime: vi.fn(() => getMockState().runtimeAudits.entryManager),
 }));
 
 vi.mock('../entry-manager.js', () => ({
@@ -77,7 +90,6 @@ vi.mock('../entry-manager.js', () => ({
         return map;
     }),
     getCachedWorldInfo: vi.fn(async bookName => getMockState().lorebooks.get(bookName) || null),
-    auditEntryManagerRuntime: vi.fn(() => getMockState().runtimeAudits.entryManager),
 }));
 
 vi.mock('../runtime-orchestration.js', () => ({

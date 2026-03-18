@@ -49,7 +49,7 @@ vi.mock('../prompt-injection-runtime.js', () => ({
     auditPromptInjectionRuntime: vi.fn(async () => mockState.audits.promptInjection),
 }));
 
-vi.mock('../post-turn-processor.js', () => ({
+vi.mock('../post-turn-runtime.js', () => ({
     auditPostTurnProcessorRuntime: vi.fn(() => mockState.audits.postTurn),
 }));
 
@@ -61,7 +61,7 @@ vi.mock('../world-state-runtime.js', () => ({
     auditWorldStateRuntime: vi.fn(() => mockState.audits.worldState),
 }));
 
-vi.mock('../entry-manager.js', () => ({
+vi.mock('../entry-manager-runtime.js', () => ({
     auditEntryManagerRuntime: vi.fn(() => mockState.audits.entryManager),
 }));
 
