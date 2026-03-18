@@ -656,31 +656,58 @@ export async function renderTimelineView() {
     titleEl.append(' Timeline');
     headerRow.appendChild(titleEl);
 
-    const enrichBtn = el('button', 'tv-float-panel-btn', 'Enrich from Temporal');
-    enrichBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px; margin-right: 6px;';
+    const actionsEl = el('div', 'tv-timeline-actions');
+
+    const enrichBtn = el('button', 'tv-timeline-action-btn');
+    enrichBtn.type = 'button';
+    enrichBtn.title = 'Enrich from Temporal';
+    enrichBtn.setAttribute('aria-label', 'Enrich from Temporal');
+    enrichBtn.appendChild(icon('fa-wand-magic-sparkles'));
     enrichBtn.addEventListener('click', async () => {
         enrichBtn.disabled = true;
-        const originalText = enrichBtn.textContent;
-        enrichBtn.textContent = 'Enriching...';
+        const iconEl = enrichBtn.querySelector('i');
+        const originalTitle = enrichBtn.title;
+        const originalLabel = enrichBtn.getAttribute('aria-label');
+        if (iconEl) {
+            iconEl.className = 'fa-solid fa-spinner fa-spin';
+        }
+        enrichBtn.title = 'Enriching from Temporal...';
+        enrichBtn.setAttribute('aria-label', 'Enriching from Temporal');
         try {
             const result = await enrichFactsFromTemporalData();
             console.log(`[TunnelVision] Temporal enrich complete: updated=${result.updated}, skippedNoTemporal=${result.skippedNoTemporal}, skippedHasTimestamp=${result.skippedHasTimestamp}, skippedInvalid=${result.skippedInvalid}`);
             await renderTimelineView();
         } catch (err) {
             console.warn('[TunnelVision] Temporal enrich failed:', err);
-            enrichBtn.textContent = 'Failed';
-            setTimeout(() => { enrichBtn.textContent = originalText; enrichBtn.disabled = false; }, 1200);
+            if (iconEl) {
+                iconEl.className = 'fa-solid fa-triangle-exclamation';
+            }
+            enrichBtn.title = 'Temporal enrich failed';
+            enrichBtn.setAttribute('aria-label', 'Temporal enrich failed');
+            setTimeout(() => {
+                if (iconEl) {
+                    iconEl.className = 'fa-solid fa-wand-magic-sparkles';
+                }
+                enrichBtn.title = originalTitle;
+                enrichBtn.setAttribute('aria-label', originalLabel || 'Enrich from Temporal');
+                enrichBtn.disabled = false;
+            }, 1200);
             return;
         }
-        enrichBtn.textContent = originalText;
+        if (iconEl) {
+            iconEl.className = 'fa-solid fa-wand-magic-sparkles';
+        }
+        enrichBtn.title = originalTitle;
+        enrichBtn.setAttribute('aria-label', originalLabel || 'Enrich from Temporal');
         enrichBtn.disabled = false;
     });
-    headerRow.appendChild(enrichBtn);
+    actionsEl.appendChild(enrichBtn);
 
     const backBtn = el('button', 'tv-float-panel-btn', 'Back to Feed');
     backBtn.style.cssText = 'font-size: 0.8em; padding: 2px 8px;';
     backBtn.addEventListener('click', exitTimelineView);
-    headerRow.appendChild(backBtn);
+    actionsEl.appendChild(backBtn);
+    headerRow.appendChild(actionsEl);
     container.appendChild(headerRow);
 
     // Loading state

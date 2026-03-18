@@ -113,20 +113,20 @@ describe('feed-stats', () => {
 
             const label = bar.querySelector('.tv-context-usage-text');
             expect(label).not.toBeNull();
-            expect(label.textContent).toContain('TV: ~250 tok');
+            expect(label.textContent).toContain('Injected: ~250 tok');
             expect(label.textContent).toContain('/ 500');
             expect(label.textContent).toContain('(50.0%)');
 
+            const sourcePills = Array.from(bar.querySelectorAll('.tv-context-source-pill')).map((el) => el.textContent?.replace(/\s+/g, ' ').trim());
+            expect(sourcePills).toEqual([
+                'Prompt 100 tok',
+                'World State 50 tok',
+                'Smart Context 75 tok',
+                'Notebook 25 tok',
+            ]);
+
             const segments = bar.querySelectorAll('.tv-budget-seg');
             expect(segments.length).toBe(5);
-
-            const legendItems = Array.from(bar.querySelectorAll('.tv-budget-legend-item')).map(el => el.textContent);
-            expect(legendItems).toEqual([
-                'Prompt 100',
-                'World State 50',
-                'Smart Context 75',
-                'Notebook 25',
-            ]);
 
             expect(bar.title).toContain('TunnelVision injection: 1000 chars (~250 tokens)');
             expect(bar.title).toContain('Prompt: 400');
@@ -167,7 +167,7 @@ describe('feed-stats', () => {
             const bar = buildContextUsageBar();
             const label = bar.querySelector('.tv-context-usage-text');
 
-            expect(label.textContent).toBe('TV: ~50 tok');
+            expect(label.textContent).toBe('Injected: ~50 tok');
             expect(bar.querySelectorAll('.tv-budget-seg')).toHaveLength(2);
             expect(bar.querySelector('.tv-budget-seg-headroom')).toBeNull();
         });

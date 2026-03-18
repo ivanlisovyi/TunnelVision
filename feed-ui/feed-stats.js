@@ -179,7 +179,7 @@ export function buildContextUsageBar() {
     labelRow.appendChild(labelIcon);
 
     const tokensUsed = Math.round(sizes.total / CHARS_PER_TOKEN);
-    let labelText = `TV: ~${tokensUsed.toLocaleString()} tok`;
+    let labelText = `Injected: ~${tokensUsed.toLocaleString()} tok`;
     if (maxTokens > 0) {
         const pct = ((sizes.total / maxChars) * 100).toFixed(1);
         labelText += ` / ${maxTokens.toLocaleString()} (${pct}%)`;
@@ -194,6 +194,28 @@ export function buildContextUsageBar() {
         { key: 'smartContext', label: 'Smart Context', color: '#6c5ce7' },
         { key: 'notebook', label: 'Notebook', color: '#fdcb6e' },
     ];
+
+    const sourceOverview = el('div', 'tv-context-source-overview');
+    for (const slot of SLOT_CONFIG) {
+        const val = sizes[slot.key] || 0;
+        if (val === 0) continue;
+
+        const share = sizes.total > 0 ? Math.round((val / sizes.total) * 100) : 0;
+        const item = el('span', 'tv-context-source-pill');
+        item.title = `${slot.label}: ${val.toLocaleString()} chars (~${Math.round(val / CHARS_PER_TOKEN)} tok, ${share}% of TV injection)`;
+
+        const dot = el('span', 'tv-context-source-dot');
+        dot.style.background = slot.color;
+        item.appendChild(dot);
+
+        const label = el('span', 'tv-context-source-label', slot.label);
+        item.appendChild(label);
+        item.appendChild(document.createTextNode(' '));
+
+        item.appendChild(el('span', 'tv-context-source-value', `${Math.round(val / CHARS_PER_TOKEN)} tok`));
+        sourceOverview.appendChild(item);
+    }
+    wrapper.appendChild(sourceOverview);
 
     const barBase = maxChars > 0 ? maxChars : sizes.total;
     const barOuter = el('div', 'tv-budget-bar');
@@ -220,20 +242,6 @@ export function buildContextUsageBar() {
     }
 
     wrapper.appendChild(barOuter);
-
-    const legend = el('div', 'tv-budget-legend');
-    for (const slot of SLOT_CONFIG) {
-        const val = sizes[slot.key] || 0;
-        if (val === 0) continue;
-
-        const item = el('span', 'tv-budget-legend-item');
-        const dot = el('span', 'tv-budget-legend-dot');
-        dot.style.background = slot.color;
-        item.appendChild(dot);
-        item.appendChild(document.createTextNode(`${slot.label} ${Math.round(val / CHARS_PER_TOKEN)}`));
-        legend.appendChild(item);
-    }
-    wrapper.appendChild(legend);
 
     const parts = [];
     if (sizes.mandatory) parts.push(`Prompt: ${sizes.mandatory}`);

@@ -2930,12 +2930,51 @@
     flex-direction: column;
     gap: 8px;
     height: 100%;
+    min-height: 0;
+    box-sizing: border-box;
 }
 
 .tv-timeline-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
+}
+
+.tv-timeline-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.tv-timeline-action-btn {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #fdcb6e;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+
+.tv-timeline-action-btn:hover:not(:disabled) {
+    background: rgba(253, 203, 110, 0.12);
+    border-color: rgba(253, 203, 110, 0.3);
+}
+
+.tv-timeline-action-btn:disabled {
+    opacity: 0.65;
+    cursor: wait;
+}
+
+.tv-timeline-action-btn i {
+    font-size: 11px;
 }
 
 .tv-timeline-title {
@@ -2968,10 +3007,10 @@
 }
 
 .tv-timeline-body {
-    flex: 1;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
     scrollbar-width: thin;
-    max-height: 280px;
 }
 
 .tv-timeline-day-header {
@@ -3308,7 +3347,7 @@
 .tv-context-usage {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 6px;
     width: 100%;
     grid-column: 1 / -1;
     padding-top: 4px;
@@ -3327,6 +3366,41 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.tv-context-source-overview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.tv-context-source-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 0.68em;
+    color: var(--SmartThemeQuoteColor, #aaa);
+    white-space: nowrap;
+}
+
+.tv-context-source-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.tv-context-source-label {
+    color: var(--SmartThemeBodyColor, #ddd);
+}
+
+.tv-context-source-value {
+    font-weight: 600;
+    color: var(--SmartThemeEmColor, #fff);
 }
 
 .tv-budget-bar {
@@ -3358,29 +3432,6 @@
 
 .tv-budget-seg-headroom {
     background: rgba(255, 255, 255, 0.04);
-}
-
-.tv-budget-legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: 0.68em;
-    opacity: 0.75;
-}
-
-.tv-budget-legend-item {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    white-space: nowrap;
-}
-
-.tv-budget-legend-dot {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
 }
 
 /* ── Health Dashboard ──────────────────────────────────────────── */

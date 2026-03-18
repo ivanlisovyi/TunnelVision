@@ -77,7 +77,9 @@ import { getCachedWorldInfo, getEntryTemporal, persistWorldInfo } from '../entry
 
 function findButtonByTextContains(substr) {
     return Array.from(document.querySelectorAll('button'))
-        .find((btn) => (btn.textContent || '').includes(substr));
+        .find((btn) => (btn.textContent || '').includes(substr)
+            || (btn.getAttribute('aria-label') || '').includes(substr)
+            || (btn.title || '').includes(substr));
 }
 
 async function flushMicrotasks(times = 3) {
