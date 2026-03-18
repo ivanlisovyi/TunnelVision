@@ -80,12 +80,33 @@ vi.mock('../entry-manager.js', () => ({
     auditEntryManagerRuntime: vi.fn(() => getMockState().runtimeAudits.entryManager),
 }));
 
+vi.mock('../runtime-orchestration.js', () => ({
+    getOrchestrationRuntimeSnapshot: vi.fn(() => getMockState().orchestrationSnapshot),
+}));
+
+vi.mock('../llm-sidecar.js', () => ({
+    auditSidecarRuntime: vi.fn(() => getMockState().runtimeAudits.sidecar),
+}));
+
+vi.mock('../background-events.js', () => ({
+    auditBackgroundTaskRuntime: vi.fn(() => getMockState().runtimeAudits.backgroundTasks),
+}));
+
 vi.mock('../runtime-health.js', () => ({
     RUNTIME_AUDIT_SEVERITIES: {
         INFO: 'info',
         WARN: 'warn',
         ERROR: 'error',
     },
+    RUNTIME_REASON_CODES: {
+        STALE_PROMPT_PLAN: 'stale_prompt_plan',
+        RUNTIME_SYNC_BACKOFF: 'runtime_sync_backoff',
+        RUNTIME_SYNC_EXHAUSTED: 'runtime_sync_exhausted',
+    },
+    RUNTIME_REPAIR_CLASSES: {
+        SAFE_AUTO: 'safe-auto',
+    },
+    createRuntimeRepair: vi.fn((repair) => repair),
     countRuntimeFindingsBySeverity: vi.fn((findings = []) => {
         const counts = { info: 0, warn: 0, error: 0 };
         for (const finding of findings) {
@@ -106,6 +127,11 @@ vi.mock('../runtime-repairs.js', () => ({
         }
         return state.runtimeRepairResult || { attempted: 0, applied: [], failed: [] };
     }),
+}));
+
+vi.mock('../runtime-telemetry.js', () => ({
+    createNamedCorrelationId: vi.fn(() => 'audit-correlation-id'),
+    logRuntimeDiagnosticsSummary: vi.fn(),
 }));
 
 vi.mock('../../../st-context.js', () => ({
@@ -196,6 +222,39 @@ function resetMockState() {
                 requiresConfirmation: [],
                 context: null,
             },
+            sidecar: {
+                group: 'sidecar-integrity',
+                ok: true,
+                summary: 'Sidecar audit passed.',
+                findings: [{ severity: 'info', reasonCode: null }],
+                reasonCodes: [],
+                safeRepairs: [],
+                requiresConfirmation: [],
+                context: null,
+            },
+            backgroundTasks: {
+                group: 'background-task-integrity',
+                ok: true,
+                summary: 'Background task audit passed.',
+                findings: [{ severity: 'info', reasonCode: null }],
+                reasonCodes: [],
+                safeRepairs: [],
+                requiresConfirmation: [],
+                context: null,
+            },
+        },
+        orchestrationSnapshot: {
+            syncInFlight: false,
+            lastSyncReason: null,
+            pendingInvalidationReasons: [],
+            hasPendingSync: false,
+            pendingSyncReasons: [],
+            pendingSyncCounts: {},
+            activeSyncPlan: null,
+            lastGenerationContext: null,
+            syncRetryCount: 0,
+            syncRetryBackoffUntil: 0,
+            lastExhaustedSyncPlan: null,
         },
         runtimeRepairResult: { attempted: 0, applied: [], failed: [] },
         runtimeRepairRun: null,
