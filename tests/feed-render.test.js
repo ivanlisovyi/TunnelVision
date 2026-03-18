@@ -49,7 +49,9 @@ vi.mock('../feed-ui/feed-panel.js', () => ({
 }));
 
 import { getPanelEl, getShowingHealth } from '../feed-state.js';
-import { buildItemElement, toggleBackgroundExpand, refreshActiveTasksInPanel, registerFeedRenderCallbacks } from '../feed-ui/feed-render.js';
+import { getPanelBody, getFeedItemsRaw } from '../feed-state.js';
+import { getActiveTab } from '../feed-ui/feed-panel.js';
+import { buildItemElement, toggleBackgroundExpand, refreshActiveTasksInPanel, registerFeedRenderCallbacks, renderAllItems } from '../feed-ui/feed-render.js';
 
 describe('feed rendering', () => {
     beforeEach(() => {
@@ -195,5 +197,25 @@ describe('feed rendering', () => {
         refreshActiveTasksInPanel();
 
         expect(renderAllItems).not.toHaveBeenCalled();
+    });
+
+    it('keeps the stats bar visible on the all tab even when the feed is empty', () => {
+        const panelBody = document.createElement('div');
+        const statsBar = document.createElement('div');
+        statsBar.className = 'tv-feed-stats';
+
+        vi.mocked(getPanelBody).mockReturnValue(panelBody);
+        vi.mocked(getFeedItemsRaw).mockReturnValue([]);
+        vi.mocked(getActiveTab).mockReturnValue('all');
+
+        registerFeedRenderCallbacks({
+            renderStatsBar: () => statsBar,
+        });
+
+        renderAllItems();
+
+        expect(panelBody.querySelector('.tv-feed-stats')).toBe(statsBar);
+        expect(panelBody.querySelector('.tv-float-empty')).not.toBeNull();
+        expect(panelBody.firstElementChild).toBe(statsBar);
     });
 });

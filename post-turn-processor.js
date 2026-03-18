@@ -1091,7 +1091,8 @@ export async function updateTrackers(trackers, recentExcerpt, chatId) {
       const tracker = trackerMap.get(Number(update.uid));
       if (!tracker) continue;
 
-      const newContent = String(update.content).trim();
+      let newContent = String(update.content).trim();
+      newContent = newContent.replace(/(?:\s*-{3,})+\s*$/, '');
       if (tracker.content.trim() === newContent) continue;
 
       // Rebase guard: if another source modified the tracker since
@@ -1500,6 +1501,9 @@ export async function createTrackerForCharacter(characterName) {
         () => generateAnalytical({ prompt }),
         { label: "Tracker creation", maxRetries: 1 },
       );
+      if (typeof trackerContent === 'string') {
+        trackerContent = trackerContent.replace(/(?:\s*-{3,})+\s*$/, '').trim();
+      }
     } catch (e) {
       console.warn(
         "[TunnelVision] Tracker creation LLM call failed, using fallback:",

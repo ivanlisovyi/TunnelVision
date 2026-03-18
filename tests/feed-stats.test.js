@@ -1,6 +1,12 @@
 /* @vitest-environment jsdom */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { getInjectionSizes, getLastInjectionPayload, getMaxContextTokens } from '../agent-utils.js';
+import {
+    getInjectionSizes,
+    getLastInjectionPayload,
+    getMaxContextTokens,
+    setInjectionSizes,
+    setLastInjectionPayload,
+} from '../agent-utils.js';
 
 vi.mock('../tool-registry.js', () => ({
     getActiveTunnelVisionBooks: vi.fn(),
@@ -23,12 +29,19 @@ vi.mock('../agent-utils.js', () => ({
     getInjectionSizes: vi.fn(),
     getLastInjectionPayload: vi.fn(),
     getMaxContextTokens: vi.fn(),
+    setInjectionSizes: vi.fn(),
+    setLastInjectionPayload: vi.fn(),
+}));
+
+vi.mock('../prompt-injection-runtime.js', () => ({
+    getPromptInjectionRuntimeSnapshot: vi.fn(),
 }));
 
 import { getActiveTunnelVisionBooks } from '../tool-registry.js';
 import { isSummaryTitle, isTrackerTitle } from '../tree-store.js';
 import { getCachedWorldInfo } from '../entry-manager.js';
 import { countStaleEntries } from '../entry-scoring.js';
+import { getPromptInjectionRuntimeSnapshot } from '../prompt-injection-runtime.js';
 
 import {
     getFeedItemsRaw,
@@ -148,6 +161,51 @@ describe('feed-stats', () => {
             expect(bar.title).toContain('WS: 200');
             expect(bar.title).toContain('SC: 300');
             expect(bar.title).toContain('NB: 100');
+        });
+
+        it('hydrates the usage bar from the current prompt snapshot when reload cleared in-memory sizes', async () => {
+            getInjectionSizes.mockReturnValue({
+                mandatory: 0,
+                worldState: 0,
+                smartContext: 0,
+                notebook: 0,
+                total: 0,
+            });
+            getLastInjectionPayload.mockReturnValue({
+                mandatory: '',
+                worldState: '',
+                smartContext: '',
+                notebook: '',
+                updatedAt: 0,
+            });
+            getPromptInjectionRuntimeSnapshot.mockResolvedValue({
+                prompts: {
+                    mandatory: 'MANDATORY',
+                    worldState: 'WORLD STATE',
+                    smartContext: '',
+                    notebook: 'NOTEBOOK',
+                },
+            });
+
+            const bar = renderStatsBar();
+            expect(bar.querySelector('.tv-context-usage')).toBeNull();
+
+            await Promise.resolve();
+            await Promise.resolve();
+
+            expect(getPromptInjectionRuntimeSnapshot).toHaveBeenCalledTimes(1);
+            expect(setInjectionSizes).toHaveBeenCalledWith({
+                mandatory: 9,
+                worldState: 11,
+                smartContext: 0,
+                notebook: 8,
+            });
+            expect(setLastInjectionPayload).toHaveBeenCalledWith({
+                mandatory: 'MANDATORY',
+                worldState: 'WORLD STATE',
+                smartContext: '',
+                notebook: 'NOTEBOOK',
+            });
         });
 
         it('opens an inline inspector with the exact source text when a source pill is clicked', () => {

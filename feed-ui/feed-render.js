@@ -107,8 +107,11 @@ export function registerFeedRenderCallbacks({
 export function renderEmptyState(tab = 'all') {
     const panelBody = getPanelBody();
     if (!panelBody) return;
-    panelBody.replaceChildren();
 
+    panelBody.replaceChildren(buildEmptyStateElement(tab));
+}
+
+function buildEmptyStateElement(tab = 'all') {
     const empty = el('div', 'tv-float-empty');
     empty.appendChild(icon('fa-satellite-dish'));
 
@@ -128,7 +131,7 @@ export function renderEmptyState(tab = 'all') {
 
     empty.appendChild(el('span', null, message));
     empty.appendChild(el('span', 'tv-float-empty-sub', subMessage));
-    panelBody.appendChild(empty);
+    return empty;
 }
 
 export function renderAllItems() {
@@ -139,7 +142,7 @@ export function renderAllItems() {
 
     panelBody.replaceChildren();
 
-    if (tab === 'all' && feedItems.length > 0) {
+    if (tab === 'all') {
         panelBody.appendChild(_renderStatsBar());
     }
 
@@ -169,7 +172,7 @@ export function renderAllItems() {
     });
 
     if (filtered.length === 0 && !showActiveTasks && !showFailedTasks) {
-        renderEmptyState(tab);
+        panelBody.appendChild(buildEmptyStateElement(tab));
         return;
     }
 

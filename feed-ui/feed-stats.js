@@ -11,7 +11,8 @@ import { isSummaryTitle, isTrackerTitle } from '../tree-store.js';
 import { getCachedWorldInfo } from '../entry-manager.js';
 import { countStaleEntries } from '../entry-scoring.js';
 import { CHARS_PER_TOKEN } from '../constants.js';
-import { getInjectionSizes, getLastInjectionPayload, getMaxContextTokens } from '../agent-utils.js';
+import { getInjectionSizes, getLastInjectionPayload, getMaxContextTokens, setInjectionSizes, setLastInjectionPayload } from '../agent-utils.js';
+import { getPromptInjectionRuntimeSnapshot } from '../prompt-injection-runtime.js';
 import {
     getFeedItemsRaw,
     getLorebookStatsCache,
@@ -70,6 +71,49 @@ function buildInjectionInspector({ slot, text, size, updatedAt, onClose }) {
     inspector.appendChild(body);
 
     return inspector;
+}
+
+async function hydrateContextUsageBar(statsBar) {
+    if (!(statsBar instanceof HTMLElement)) return;
+    if (statsBar.dataset.tvUsageHydrating === 'true') return;
+    if (statsBar.querySelector('.tv-context-usage')) return;
+    if (getInjectionSizes().total > 0) {
+        const currentBar = buildContextUsageBar();
+        if (currentBar) statsBar.appendChild(currentBar);
+        return;
+    }
+
+    statsBar.dataset.tvUsageHydrating = 'true';
+    try {
+        const snapshot = await getPromptInjectionRuntimeSnapshot();
+        const prompts = snapshot?.prompts;
+        if (!prompts) return;
+
+        const hydratedSizes = {
+            mandatory: prompts.mandatory?.length || 0,
+            worldState: prompts.worldState?.length || 0,
+            smartContext: prompts.smartContext?.length || 0,
+            notebook: prompts.notebook?.length || 0,
+        };
+        const total = hydratedSizes.mandatory + hydratedSizes.worldState + hydratedSizes.smartContext + hydratedSizes.notebook;
+        if (total === 0) return;
+
+        setInjectionSizes(hydratedSizes);
+        setLastInjectionPayload({
+            mandatory: prompts.mandatory || '',
+            worldState: prompts.worldState || '',
+            smartContext: prompts.smartContext || '',
+            notebook: prompts.notebook || '',
+        });
+
+        if (!statsBar.isConnected || statsBar.querySelector('.tv-context-usage')) return;
+        const hydratedBar = buildContextUsageBar();
+        if (hydratedBar) statsBar.appendChild(hydratedBar);
+    } catch {
+        // Ignore hydration failures; the bar will appear on the next prompt refresh.
+    } finally {
+        delete statsBar.dataset.tvUsageHydrating;
+    }
 }
 
 // ── Public API ───────────────────────────────────────────────────
@@ -148,6 +192,7 @@ export function renderStatsBar() {
 
     const usageBar = buildContextUsageBar();
     if (usageBar) bar.appendChild(usageBar);
+    else void hydrateContextUsageBar(bar);
 
     return bar;
 }
