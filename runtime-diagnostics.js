@@ -92,6 +92,7 @@ export function auditOrchestrationRuntime() {
     const findings = [];
     const reasonCodes = [];
     const generationContext = snapshot.lastGenerationContext;
+    const activeSyncPlan = snapshot.activeSyncPlan;
 
     if (snapshot.syncInFlight && !snapshot.lastSyncReason) {
         findings.push({
@@ -110,6 +111,44 @@ export function auditOrchestrationRuntime() {
             reasonCode: 'invalidation_not_coalesced',
         });
         reasonCodes.push('invalidation_not_coalesced');
+    }
+
+    if (
+        snapshot.hasPendingSync
+        && (
+            !Array.isArray(snapshot.pendingSyncReasons)
+            || snapshot.pendingSyncReasons.length === 0
+            || hasReasonCountMismatch(snapshot.pendingSyncReasons, snapshot.pendingSyncCounts)
+        )
+    ) {
+        findings.push({
+            severity: 'warn',
+            reasonCode: 'lost_invalidation_reason',
+        });
+        reasonCodes.push('lost_invalidation_reason');
+    }
+
+    if (snapshot.syncInFlight && snapshot.lastSyncReason && !activeSyncPlan) {
+        findings.push({
+            severity: 'warn',
+            reasonCode: 'lost_invalidation_reason',
+        });
+        reasonCodes.push('lost_invalidation_reason');
+    }
+
+    if (
+        activeSyncPlan
+        && (
+            hasReasonCountMismatch(activeSyncPlan.syncReasons, activeSyncPlan.syncReasonCounts)
+            || hasReasonCountMismatch(activeSyncPlan.invalidationReasons, activeSyncPlan.invalidationCounts)
+            || (snapshot.lastSyncReason && activeSyncPlan.syncReason !== snapshot.lastSyncReason)
+        )
+    ) {
+        findings.push({
+            severity: 'warn',
+            reasonCode: 'lost_invalidation_reason',
+        });
+        reasonCodes.push('lost_invalidation_reason');
     }
 
     if (

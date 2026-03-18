@@ -120,6 +120,18 @@ function resetMockState() {
         lastSyncAt: 2500,
         syncInFlight: false,
         syncCount: 1,
+        pendingSyncReasons: [],
+        pendingSyncCounts: {},
+        pendingSyncEffects: {
+            invalidateActiveBookCache: false,
+            invalidateWorldInfoCache: false,
+            invalidatePreWarmCache: false,
+            refreshUI: false,
+        },
+        pendingSyncRequestedAt: 0,
+        hasPendingSync: false,
+        activeSyncPlan: null,
+        lastSyncPlan: null,
         lastGenerationStartedAt: 3000,
         lastGenerationContext: {
             pendingInvalidationReasons: [],
@@ -321,6 +333,68 @@ describe('collectRuntimeAudits', () => {
                 ...mockState.orchestrationSnapshot.lastGenerationContext,
                 consumedInvalidationReasons: ['chat_changed'],
                 consumedInvalidationCounts: { worldinfo_updated: 1 },
+            },
+        };
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[6]).toEqual({
+            group: 'orchestration-integrity',
+            ok: true,
+            summary: 'Orchestration audit found coordination issues.',
+            findings: [
+                { severity: 'warn', reasonCode: 'lost_invalidation_reason' },
+            ],
+            reasonCodes: ['lost_invalidation_reason'],
+            safeRepairs: [],
+            requiresConfirmation: [],
+            context: mockState.orchestrationSnapshot,
+        });
+    });
+
+    it('builds a warning orchestration audit when pending sync bookkeeping is inconsistent', async () => {
+        mockState.orchestrationSnapshot = {
+            ...mockState.orchestrationSnapshot,
+            hasPendingSync: true,
+            pendingSyncReasons: ['chat-changed'],
+            pendingSyncCounts: { 'worldinfo-updated': 1 },
+        };
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[6]).toEqual({
+            group: 'orchestration-integrity',
+            ok: true,
+            summary: 'Orchestration audit found coordination issues.',
+            findings: [
+                { severity: 'warn', reasonCode: 'lost_invalidation_reason' },
+            ],
+            reasonCodes: ['lost_invalidation_reason'],
+            safeRepairs: [],
+            requiresConfirmation: [],
+            context: mockState.orchestrationSnapshot,
+        });
+    });
+
+    it('builds a warning orchestration audit when the active sync plan diverges from the running sync reason', async () => {
+        mockState.orchestrationSnapshot = {
+            ...mockState.orchestrationSnapshot,
+            syncInFlight: true,
+            lastSyncReason: 'chat-changed',
+            activeSyncPlan: {
+                id: 1,
+                syncReason: 'worldinfo-updated',
+                syncReasons: ['worldinfo-updated'],
+                syncReasonCounts: { 'worldinfo-updated': 1 },
+                invalidationReasons: ['worldinfo_updated'],
+                invalidationCounts: { worldinfo_updated: 1 },
+                effects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: true,
+                    invalidatePreWarmCache: true,
+                    refreshUI: true,
+                },
+                requestedAt: 1000,
             },
         };
 
@@ -552,6 +626,23 @@ describe('runRuntimeAuditDiagnostics', () => {
                 consumedInvalidationReasons: ['chat_changed'],
                 consumedInvalidationCounts: { worldinfo_updated: 1 },
             },
+        };
+
+        const results = await runRuntimeAuditDiagnostics();
+
+        expect(results[6]).toEqual({
+            status: 'warn',
+            message: 'Orchestration audit found coordination issues. Findings: 0 error(s), 1 warning(s), 0 info item(s). Reasons: lost_invalidation_reason.',
+            fix: null,
+        });
+    });
+
+    it('reports pending sync bookkeeping drift as a warning', async () => {
+        mockState.orchestrationSnapshot = {
+            ...mockState.orchestrationSnapshot,
+            hasPendingSync: true,
+            pendingSyncReasons: ['chat-changed'],
+            pendingSyncCounts: { 'worldinfo-updated': 1 },
         };
 
         const results = await runRuntimeAuditDiagnostics();
