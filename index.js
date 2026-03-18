@@ -45,11 +45,13 @@ import {
     requestRuntimeSync,
     beginRuntimeSyncPlan,
     completeRuntimeSyncPlan,
+    getRuntimeSyncBackoffDelay,
     updateLastGenerationContext,
     recordGenerationPreflightSummary,
     getOrchestrationRuntimeSnapshot,
     __orchestrationDebug,
 } from './runtime-orchestration.js';
+import { logRuntimeEvent } from './runtime-telemetry.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const EXTENSION_FOLDER = `third-party/TunnelVision`;
@@ -69,12 +71,17 @@ async function syncToolRegistration(reason) {
 
 async function drainRuntimeSyncQueue() {
     while (true) {
+        const backoffDelay = getRuntimeSyncBackoffDelay();
+        if (backoffDelay > 0) {
+            await new Promise(resolve => setTimeout(resolve, backoffDelay));
+            continue;
+        }
+
         const plan = beginRuntimeSyncPlan();
         if (!plan) {
             return;
         }
 
-        let syncFailed = false;
         try {
             if (plan.effects.invalidateActiveBookCache) {
                 invalidateActiveBookCache();
@@ -91,14 +98,62 @@ async function drainRuntimeSyncQueue() {
 
             await syncToolRegistration(plan.syncReason);
         } catch (error) {
-            syncFailed = true;
-            completeRuntimeSyncPlan({ requeue: true });
-            throw error;
-        } finally {
-            if (!syncFailed) {
-                completeRuntimeSyncPlan();
+            const outcome = completeRuntimeSyncPlan({
+                requeue: true,
+                errorMessage: error?.message || 'Unknown runtime sync error',
+            });
+
+            if (outcome.requeued) {
+                logRuntimeEvent({
+                    severity: 'warn',
+                    category: 'runtime-sync',
+                    source: 'runtime-orchestration',
+                    status: 'retry-scheduled',
+                    title: plan.syncReason,
+                    summary: `Runtime sync failed and will retry in ${outcome.backoffMs}ms.`,
+                    details: [
+                        `Attempt ${outcome.failureCount}/${outcome.maxFailures}`,
+                        error?.message || 'Unknown runtime sync error',
+                    ],
+                    context: {
+                        backoffMs: outcome.backoffMs,
+                        planId: plan.id,
+                    },
+                });
+                continue;
             }
+
+            logRuntimeEvent({
+                severity: 'error',
+                category: 'runtime-sync',
+                source: 'runtime-orchestration',
+                status: 'retry-exhausted',
+                title: plan.syncReason,
+                summary: error?.message || 'Runtime sync exhausted its retry budget.',
+                details: [`Attempts exhausted: ${outcome.failureCount}/${outcome.maxFailures}`],
+                context: {
+                    planId: plan.id,
+                },
+            });
+            return;
         }
+
+        if (plan.previousFailureCount > 0) {
+            logRuntimeEvent({
+                severity: 'info',
+                category: 'runtime-sync',
+                source: 'runtime-orchestration',
+                status: 'retry-recovered',
+                title: plan.syncReason,
+                summary: 'Runtime sync recovered after retry backoff.',
+                details: [`Recovered after ${plan.previousFailureCount} failure(s)`],
+                context: {
+                    planId: plan.id,
+                },
+            });
+        }
+
+        completeRuntimeSyncPlan();
     }
 }
 

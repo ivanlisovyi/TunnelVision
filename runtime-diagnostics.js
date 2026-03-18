@@ -15,6 +15,8 @@ import { auditSmartContextRuntime } from './smart-context.js';
 import { auditWorldStateRuntime } from './world-state.js';
 import { auditEntryManagerRuntime } from './entry-manager.js';
 import { getOrchestrationRuntimeSnapshot } from './runtime-orchestration.js';
+import { auditSidecarRuntime } from './llm-sidecar.js';
+import { auditBackgroundTaskRuntime } from './background-events.js';
 import {
     countRuntimeFindingsBySeverity,
     createRuntimeRepair,
@@ -257,6 +259,27 @@ export function auditOrchestrationRuntime({ registrationSnapshot = null, promptC
         }
     }
 
+    if (
+        !snapshot.syncInFlight
+        && snapshot.hasPendingSync
+        && snapshot.syncRetryCount > 0
+        && snapshot.syncRetryBackoffUntil > 0
+    ) {
+        findings.push({
+            severity: 'warn',
+            reasonCode: RUNTIME_REASON_CODES.RUNTIME_SYNC_BACKOFF,
+        });
+        reasonCodes.push(RUNTIME_REASON_CODES.RUNTIME_SYNC_BACKOFF);
+    }
+
+    if (snapshot.lastExhaustedSyncPlan) {
+        findings.push({
+            severity: 'error',
+            reasonCode: RUNTIME_REASON_CODES.RUNTIME_SYNC_EXHAUSTED,
+        });
+        reasonCodes.push(RUNTIME_REASON_CODES.RUNTIME_SYNC_EXHAUSTED);
+    }
+
     if (findings.length === 0) {
         findings.push({
             severity: 'info',
@@ -326,6 +349,8 @@ export async function collectRuntimeAudits() {
             registrationSnapshot: audits[0]?.context || null,
             promptContext: audits[1]?.context || null,
         }),
+        auditSidecarRuntime(),
+        auditBackgroundTaskRuntime(),
     ];
 }
 

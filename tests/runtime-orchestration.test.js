@@ -8,6 +8,7 @@ import {
     requestRuntimeSync,
     beginRuntimeSyncPlan,
     completeRuntimeSyncPlan,
+    getRuntimeSyncBackoffDelay,
     hasPendingRuntimeSync,
     beginSync,
     completeSync,
@@ -45,7 +46,13 @@ describe('runtime-orchestration', () => {
                     refreshUI: false,
                 },
                 pendingSyncRequestedAt: 0,
+                syncRetryCount: 0,
+                syncRetryBackoffUntil: 0,
+                syncRetryLastFailureAt: 0,
+                syncRetryLastErrorMessage: null,
                 hasPendingSync: false,
+                runtimeSyncBackoffDelay: 0,
+                lastExhaustedSyncPlan: null,
                 activeSyncPlan: null,
                 lastSyncPlan: null,
                 lastGenerationStartedAt: 0,
@@ -225,6 +232,11 @@ describe('runtime-orchestration', () => {
                     refreshUI: true,
                 },
                 requestedAt: 100,
+                retryAttempt: 1,
+                previousFailureCount: 0,
+                lastFailureAt: 0,
+                lastFailureMessage: null,
+                maxFailures: 3,
             });
 
             expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
@@ -277,15 +289,26 @@ describe('runtime-orchestration', () => {
             });
 
             const plan = beginRuntimeSyncPlan(200);
-            completeRuntimeSyncPlan({ requeue: true });
+            const result = completeRuntimeSyncPlan({ requeue: true, errorMessage: 'sync failed', now: 250 });
 
             expect(plan?.syncReason).toBe('chat-changed');
+            expect(result).toEqual({
+                requeued: true,
+                exhausted: false,
+                failureCount: 1,
+                backoffMs: 1000,
+                maxFailures: 3,
+            });
             expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
                 syncInFlight: false,
                 pendingSyncReasons: ['chat-changed'],
                 pendingSyncCounts: {
                     'chat-changed': 1,
                 },
+                syncRetryCount: 1,
+                syncRetryBackoffUntil: 1250,
+                syncRetryLastFailureAt: 250,
+                syncRetryLastErrorMessage: 'sync failed',
                 pendingSyncEffects: {
                     invalidateActiveBookCache: true,
                     invalidateWorldInfoCache: false,
@@ -294,6 +317,84 @@ describe('runtime-orchestration', () => {
                 },
                 hasPendingSync: true,
                 activeSyncPlan: null,
+            });
+            expect(getRuntimeSyncBackoffDelay(250)).toBe(1000);
+            expect(beginRuntimeSyncPlan(1249)).toBeNull();
+            expect(beginRuntimeSyncPlan(1250)).toMatchObject({
+                retryAttempt: 2,
+                previousFailureCount: 1,
+                lastFailureAt: 250,
+                lastFailureMessage: 'sync failed',
+            });
+        });
+
+        it('drops a queued sync batch after exhausting the retry ceiling', () => {
+            requestRuntimeSync({
+                eventName: 'chat-changed',
+                invalidationReason: 'chat_changed',
+                syncReason: 'chat-changed',
+                now: 100,
+                effects: {
+                    invalidateActiveBookCache: true,
+                    refreshUI: true,
+                },
+            });
+
+            beginRuntimeSyncPlan(200);
+            completeRuntimeSyncPlan({ requeue: true, errorMessage: 'first failure', now: 250 });
+            beginRuntimeSyncPlan(1250);
+            completeRuntimeSyncPlan({ requeue: true, errorMessage: 'second failure', now: 1300 });
+            beginRuntimeSyncPlan(3300);
+            const result = completeRuntimeSyncPlan({ requeue: true, errorMessage: 'third failure', now: 3350 });
+
+            expect(result).toEqual({
+                requeued: false,
+                exhausted: true,
+                failureCount: 3,
+                backoffMs: 0,
+                maxFailures: 3,
+            });
+            expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
+                hasPendingSync: false,
+                syncRetryCount: 0,
+                syncRetryBackoffUntil: 0,
+                syncRetryLastFailureAt: 3350,
+                syncRetryLastErrorMessage: 'third failure',
+                lastExhaustedSyncPlan: {
+                    syncReason: 'chat-changed',
+                    retryAttempt: 3,
+                    previousFailureCount: 3,
+                    lastFailureAt: 3350,
+                    lastFailureMessage: 'third failure',
+                    maxFailures: 3,
+                },
+            });
+        });
+
+        it('clears retry metadata after a subsequent successful sync', () => {
+            requestRuntimeSync({
+                eventName: 'chat-changed',
+                invalidationReason: 'chat_changed',
+                syncReason: 'chat-changed',
+                now: 100,
+                effects: {
+                    invalidateActiveBookCache: true,
+                    refreshUI: true,
+                },
+            });
+
+            beginRuntimeSyncPlan(200);
+            completeRuntimeSyncPlan({ requeue: true, errorMessage: 'sync failed', now: 250 });
+            beginRuntimeSyncPlan(1250);
+            completeRuntimeSyncPlan();
+
+            expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
+                hasPendingSync: false,
+                syncRetryCount: 0,
+                syncRetryBackoffUntil: 0,
+                syncRetryLastFailureAt: 0,
+                syncRetryLastErrorMessage: null,
+                lastExhaustedSyncPlan: null,
             });
         });
     });
@@ -435,6 +536,30 @@ describe('runtime-orchestration', () => {
                     refreshUI: true,
                 },
                 pendingSyncRequestedAt: 35,
+                syncRetryCount: 1,
+                syncRetryBackoffUntil: 1035,
+                syncRetryLastFailureAt: 35,
+                syncRetryLastErrorMessage: 'sync failed',
+                lastExhaustedSyncPlan: {
+                    id: 5,
+                    syncReason: 'chat-changed',
+                    syncReasons: ['chat-changed'],
+                    syncReasonCounts: { 'chat-changed': 1 },
+                    invalidationReasons: ['chat_changed'],
+                    invalidationCounts: { chat_changed: 1 },
+                    effects: {
+                        invalidateActiveBookCache: true,
+                        invalidateWorldInfoCache: true,
+                        invalidatePreWarmCache: true,
+                        refreshUI: true,
+                    },
+                    requestedAt: 30,
+                    retryAttempt: 3,
+                    previousFailureCount: 3,
+                    lastFailureAt: 35,
+                    lastFailureMessage: 'sync failed',
+                    maxFailures: 3,
+                },
                 activeSyncPlan: {
                     id: 7,
                     syncReason: 'coalesced:chat-changed+worldinfo-updated',
@@ -449,6 +574,11 @@ describe('runtime-orchestration', () => {
                         refreshUI: true,
                     },
                     requestedAt: 35,
+                    retryAttempt: 2,
+                    previousFailureCount: 1,
+                    lastFailureAt: 35,
+                    lastFailureMessage: 'sync failed',
+                    maxFailures: 3,
                 },
                 lastSyncPlan: {
                     id: 6,
@@ -464,6 +594,11 @@ describe('runtime-orchestration', () => {
                         refreshUI: true,
                     },
                     requestedAt: 20,
+                    retryAttempt: 1,
+                    previousFailureCount: 0,
+                    lastFailureAt: 0,
+                    lastFailureMessage: null,
+                    maxFailures: 3,
                 },
                 lastGenerationStartedAt: 50,
                 lastGenerationContext: {
@@ -506,7 +641,32 @@ describe('runtime-orchestration', () => {
                     refreshUI: true,
                 },
                 pendingSyncRequestedAt: 35,
+                syncRetryCount: 1,
+                syncRetryBackoffUntil: 1035,
+                syncRetryLastFailureAt: 35,
+                syncRetryLastErrorMessage: 'sync failed',
                 hasPendingSync: true,
+                runtimeSyncBackoffDelay: expect.any(Number),
+                lastExhaustedSyncPlan: {
+                    id: 5,
+                    syncReason: 'chat-changed',
+                    syncReasons: ['chat-changed'],
+                    syncReasonCounts: { 'chat-changed': 1 },
+                    invalidationReasons: ['chat_changed'],
+                    invalidationCounts: { chat_changed: 1 },
+                    effects: {
+                        invalidateActiveBookCache: true,
+                        invalidateWorldInfoCache: true,
+                        invalidatePreWarmCache: true,
+                        refreshUI: true,
+                    },
+                    requestedAt: 30,
+                    retryAttempt: 3,
+                    previousFailureCount: 3,
+                    lastFailureAt: 35,
+                    lastFailureMessage: 'sync failed',
+                    maxFailures: 3,
+                },
                 activeSyncPlan: {
                     id: 7,
                     syncReason: 'coalesced:chat-changed+worldinfo-updated',
@@ -521,6 +681,11 @@ describe('runtime-orchestration', () => {
                         refreshUI: true,
                     },
                     requestedAt: 35,
+                    retryAttempt: 2,
+                    previousFailureCount: 1,
+                    lastFailureAt: 35,
+                    lastFailureMessage: 'sync failed',
+                    maxFailures: 3,
                 },
                 lastSyncPlan: {
                     id: 6,
@@ -536,6 +701,11 @@ describe('runtime-orchestration', () => {
                         refreshUI: true,
                     },
                     requestedAt: 20,
+                    retryAttempt: 1,
+                    previousFailureCount: 0,
+                    lastFailureAt: 0,
+                    lastFailureMessage: null,
+                    maxFailures: 3,
                 },
                 lastGenerationStartedAt: 50,
                 lastGenerationContext: {

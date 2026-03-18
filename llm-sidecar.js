@@ -16,6 +16,13 @@
 
 import { getSettings } from './tree-store.js';
 import { CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_BREAKER_COOLDOWN_MS, SIDECAR_DEFAULT_TIMEOUT_MS, SIDECAR_CONNECTIVITY_TIMEOUT_MS } from './constants.js';
+import {
+    RUNTIME_AUDIT_GROUPS,
+    RUNTIME_AUDIT_SEVERITIES,
+    RUNTIME_REASON_CODES,
+    createRuntimeAuditResult,
+    createRuntimeFinding,
+} from './runtime-health.js';
 
 let _consecutiveFailures = 0;
 let _circuitOpenUntil = 0;
@@ -74,6 +81,84 @@ function recordFailure(error) {
 export function resetCircuitBreaker() {
     _consecutiveFailures = 0;
     _circuitOpenUntil = 0;
+}
+
+export function getSidecarRuntimeSnapshot(now = Date.now()) {
+    const config = getSidecarConfig();
+    const circuitOpen = now < _circuitOpenUntil;
+
+    return {
+        configured: Boolean(config),
+        available: isSidecarConfigured(),
+        format: config?.format || null,
+        model: config?.model || null,
+        endpoint: config?.endpoint || null,
+        consecutiveFailures: _consecutiveFailures,
+        circuitOpen,
+        circuitOpenUntil: _circuitOpenUntil,
+        cooldownRemainingMs: circuitOpen ? Math.max(_circuitOpenUntil - now, 0) : 0,
+        threshold: CIRCUIT_BREAKER_THRESHOLD,
+        cooldownMs: CIRCUIT_BREAKER_COOLDOWN_MS,
+    };
+}
+
+export function auditSidecarRuntime(snapshot = getSidecarRuntimeSnapshot()) {
+    const findings = [];
+
+    if (snapshot.circuitOpen) {
+        findings.push(createRuntimeFinding({
+            id: 'sidecar-circuit-open',
+            subsystem: 'llm-sidecar',
+            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+            message: 'The sidecar circuit breaker is open, so background sidecar work is currently disabled.',
+            reasonCode: RUNTIME_REASON_CODES.SIDECAR_CIRCUIT_OPEN,
+            context: {
+                cooldownRemainingMs: snapshot.cooldownRemainingMs,
+                circuitOpenUntil: snapshot.circuitOpenUntil,
+            },
+        }));
+    } else if (snapshot.configured && snapshot.consecutiveFailures > 0) {
+        findings.push(createRuntimeFinding({
+            id: 'sidecar-failure-streak',
+            subsystem: 'llm-sidecar',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: 'The sidecar has recent consecutive failures and may be degrading.',
+            reasonCode: RUNTIME_REASON_CODES.SIDECAR_FAILURE_STREAK,
+            context: {
+                consecutiveFailures: snapshot.consecutiveFailures,
+                threshold: snapshot.threshold,
+            },
+        }));
+    }
+
+    if (findings.length === 0) {
+        findings.push(createRuntimeFinding({
+            id: 'sidecar-runtime-valid',
+            subsystem: 'llm-sidecar',
+            severity: RUNTIME_AUDIT_SEVERITIES.INFO,
+            message: snapshot.configured
+                ? 'Sidecar runtime is available.'
+                : 'Sidecar is not configured for this workspace.',
+            context: {
+                configured: snapshot.configured,
+                available: snapshot.available,
+                format: snapshot.format,
+                model: snapshot.model,
+            },
+        }));
+    }
+
+    return createRuntimeAuditResult({
+        group: RUNTIME_AUDIT_GROUPS.SIDECAR,
+        ok: findings.every(finding => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR),
+        summary: findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.ERROR)
+            ? 'Sidecar audit found integrity issues.'
+            : findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN)
+                ? 'Sidecar audit found degraded runtime state.'
+                : 'Sidecar audit passed.',
+        findings,
+        context: snapshot,
+    });
 }
 
 // ── API Format Builders ──────────────────────────────────────────

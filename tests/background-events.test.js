@@ -14,6 +14,8 @@ import {
     cancelBackgroundTask,
     getActiveTasks,
     getFailedTasks,
+    getBackgroundTaskRuntimeSnapshot,
+    auditBackgroundTaskRuntime,
     retryFailedTask,
     dismissFailedTask,
     getTrackerSuggestionNames,
@@ -217,6 +219,44 @@ describe('background task lifecycle', () => {
         dismissFailedTask(failedId);
 
         expect(getFailedTasks().has(failedId)).toBe(false);
+    });
+
+    it('builds a runtime snapshot for active and failed background tasks', () => {
+        const activeTask = registerBackgroundTask({ label: 'World state refresh' });
+        activeTask.startedAt = 1_000;
+        const failedTask = registerBackgroundTask({ label: 'Auto-summary' });
+        failedTask.fail(new Error('temporary'), vi.fn(async () => {}));
+
+        const snapshot = getBackgroundTaskRuntimeSnapshot(11_000);
+
+        expect(snapshot).toMatchObject({
+            activeCount: 1,
+            failedCount: 1,
+            retryingCount: 0,
+            oldestActiveAgeMs: 10_000,
+            activeTasks: [expect.objectContaining({ label: 'World state refresh' })],
+            failedTasks: [expect.objectContaining({ label: 'Auto-summary', errorMessage: 'temporary' })],
+        });
+    });
+
+    it('warns when background failures or long-running tasks are present', () => {
+        const audit = auditBackgroundTaskRuntime({
+            activeCount: 1,
+            failedCount: 1,
+            retryingCount: 0,
+            activeBackgroundCount: 1,
+            oldestActiveAgeMs: 400000,
+            stallThresholdMs: 300000,
+            activeTasks: [],
+            failedTasks: [],
+        });
+
+        expect(audit).toEqual(expect.objectContaining({
+            group: 'background-task-integrity',
+            ok: true,
+            summary: 'Background task audit found degraded runtime state.',
+            reasonCodes: ['background_task_failures', 'background_task_stalled'],
+        }));
     });
 });
 

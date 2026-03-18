@@ -14,6 +14,8 @@ import {
     getSidecarConfig,
     resetCircuitBreaker,
     sidecarGenerate,
+    getSidecarRuntimeSnapshot,
+    auditSidecarRuntime,
     getEmbeddingConfig,
     isEmbeddingSupported,
     computeEmbeddings,
@@ -155,6 +157,73 @@ describe('isSidecarConfigured', () => {
     it('returns false when not enabled', () => {
         mockSidecarProfile = { ...validProfile, enabled: false };
         expect(isSidecarConfigured()).toBe(false);
+    });
+});
+
+describe('getSidecarRuntimeSnapshot', () => {
+    it('reports configured sidecar state when healthy', () => {
+        mockSidecarProfile = { ...validProfile };
+
+        expect(getSidecarRuntimeSnapshot(1000)).toMatchObject({
+            configured: true,
+            available: true,
+            format: 'openai',
+            model: 'gpt-4o-mini',
+            consecutiveFailures: 0,
+            circuitOpen: false,
+            cooldownRemainingMs: 0,
+        });
+    });
+});
+
+describe('auditSidecarRuntime', () => {
+    it('returns an info audit when the sidecar is healthy', () => {
+        const audit = auditSidecarRuntime({
+            configured: true,
+            available: true,
+            format: 'openai',
+            model: 'gpt-4o-mini',
+            endpoint: 'https://api.example.com/v1',
+            consecutiveFailures: 0,
+            circuitOpen: false,
+            circuitOpenUntil: 0,
+            cooldownRemainingMs: 0,
+            threshold: 3,
+            cooldownMs: 300000,
+        });
+
+        expect(audit).toEqual(expect.objectContaining({
+            group: 'sidecar-integrity',
+            ok: true,
+            summary: 'Sidecar audit passed.',
+            reasonCodes: [],
+            findings: [
+                expect.objectContaining({ severity: 'info' }),
+            ],
+        }));
+    });
+
+    it('returns an error audit when the circuit breaker is open', () => {
+        const audit = auditSidecarRuntime({
+            configured: true,
+            available: false,
+            format: 'openai',
+            model: 'gpt-4o-mini',
+            endpoint: 'https://api.example.com/v1',
+            consecutiveFailures: 0,
+            circuitOpen: true,
+            circuitOpenUntil: 9000,
+            cooldownRemainingMs: 5000,
+            threshold: 3,
+            cooldownMs: 300000,
+        });
+
+        expect(audit).toEqual(expect.objectContaining({
+            group: 'sidecar-integrity',
+            ok: false,
+            summary: 'Sidecar audit found integrity issues.',
+            reasonCodes: ['sidecar_circuit_open'],
+        }));
     });
 });
 

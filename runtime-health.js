@@ -14,6 +14,8 @@ export const RUNTIME_AUDIT_GROUPS = Object.freeze({
     WORLD_STATE: 'world-state-integrity',
     METADATA: 'metadata-integrity',
     INVALIDATION: 'invalidation-integrity',
+    SIDECAR: 'sidecar-integrity',
+    BACKGROUND_TASKS: 'background-task-integrity',
 });
 
 export const RUNTIME_AUDIT_SEVERITIES = Object.freeze({
@@ -56,6 +58,12 @@ export const RUNTIME_REASON_CODES = Object.freeze({
     INVALIDATION_NOT_COALESCED: 'invalidation_not_coalesced',
     GENERATION_PREFLIGHT_ORDER_VIOLATION: 'generation_preflight_order_violation',
     LOST_INVALIDATION_REASON: 'lost_invalidation_reason',
+    RUNTIME_SYNC_BACKOFF: 'runtime_sync_backoff',
+    RUNTIME_SYNC_EXHAUSTED: 'runtime_sync_exhausted',
+    SIDECAR_CIRCUIT_OPEN: 'sidecar_circuit_open',
+    SIDECAR_FAILURE_STREAK: 'sidecar_failure_streak',
+    BACKGROUND_TASK_FAILURES: 'background_task_failures',
+    BACKGROUND_TASK_STALLED: 'background_task_stalled',
 });
 
 function toArray(value) {

@@ -66,6 +66,32 @@ describe('runtime-dashboard-view', () => {
                 ],
                 reasonCodes: ['lost_invalidation_reason'],
             },
+            {
+                group: 'sidecar-integrity',
+                summary: 'Sidecar audit passed.',
+                findings: [
+                    { severity: 'info', reasonCode: null },
+                ],
+                reasonCodes: [],
+                context: {
+                    configured: true,
+                    circuitOpen: false,
+                    consecutiveFailures: 0,
+                },
+            },
+            {
+                group: 'background-task-integrity',
+                summary: 'Background task audit found degraded runtime state.',
+                findings: [
+                    { severity: 'warn', reasonCode: 'background_task_failures' },
+                ],
+                reasonCodes: ['background_task_failures'],
+                context: {
+                    activeCount: 1,
+                    failedCount: 1,
+                    oldestActiveAgeMs: 12000,
+                },
+            },
         ];
         mockState.events = [
             {
@@ -100,6 +126,9 @@ describe('runtime-dashboard-view', () => {
 
         expect(dashboard.textContent).toContain('Runtime Actions');
         expect(dashboard.textContent).toContain('Runtime Overview');
+        expect(dashboard.textContent).toContain('Subsystem Health');
+        expect(dashboard.textContent).toContain('Sidecar');
+        expect(dashboard.textContent).toContain('Background Queue');
         expect(dashboard.textContent).toContain('Recent Runtime Events');
         expect(dashboard.textContent).toContain('World state update failed');
         expect(dashboard.textContent).toContain('Correlation: bg-task-7');

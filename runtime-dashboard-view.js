@@ -72,6 +72,55 @@ function buildRuntimeOverviewSection(runtimeAudits, runtimeEvents) {
     return section;
 }
 
+function buildSubsystemStatusSection(runtimeAudits) {
+    const section = el('div', 'tv-health-section');
+    section.appendChild(el('div', 'tv-health-section-title', 'Subsystem Health'));
+
+    const grid = el('div', 'tv-health-type-grid');
+    const sidecarAudit = runtimeAudits.find(audit => audit?.group === 'sidecar-integrity');
+    const backgroundAudit = runtimeAudits.find(audit => audit?.group === 'background-task-integrity');
+
+    const sidecarContext = sidecarAudit?.context || {};
+    const sidecarLabel = sidecarContext.circuitOpen
+        ? 'Circuit open'
+        : sidecarContext.configured
+            ? 'Ready'
+            : 'Not configured';
+    addHealthStat(
+        grid,
+        'Sidecar',
+        sidecarLabel,
+        sidecarContext.circuitOpen ? '#ef4444' : sidecarContext.configured ? '#4ade80' : '#94a3b8',
+    );
+
+    const backgroundContext = backgroundAudit?.context || {};
+    addHealthStat(
+        grid,
+        'Background Queue',
+        `${backgroundContext.activeCount || 0} active / ${backgroundContext.failedCount || 0} failed`,
+        (backgroundContext.failedCount || 0) > 0 ? '#fdcb6e' : '#4ade80',
+    );
+
+    if (sidecarContext.configured) {
+        addHealthStat(grid, 'Sidecar Failures', sidecarContext.consecutiveFailures || 0, (sidecarContext.consecutiveFailures || 0) > 0 ? '#fdcb6e' : '#74b9ff');
+    }
+
+    if ((backgroundContext.activeCount || 0) > 0) {
+        addHealthStat(grid, 'Oldest Task', `${Math.round((backgroundContext.oldestActiveAgeMs || 0) / 1000)}s`, '#a29bfe');
+    }
+
+    section.appendChild(grid);
+
+    const summary = el('div', 'tv-health-avg');
+    const summaryParts = [];
+    if (sidecarAudit?.summary) summaryParts.push(sidecarAudit.summary);
+    if (backgroundAudit?.summary) summaryParts.push(backgroundAudit.summary);
+    summary.textContent = summaryParts.join(' ') || 'No subsystem health data available.';
+    section.appendChild(summary);
+
+    return section;
+}
+
 function buildRuntimeIssues(runtimeAudits) {
     return runtimeAudits
         .filter(audit => Array.isArray(audit?.findings) && audit.findings.some(finding => finding?.severity === 'error' || finding?.severity === 'warn'))
@@ -299,6 +348,7 @@ export async function buildRuntimeDashboard({ onRefresh = null } = {}) {
         },
     }));
     container.appendChild(buildRuntimeOverviewSection(runtimeAudits, runtimeEvents));
+    container.appendChild(buildSubsystemStatusSection(runtimeAudits));
     container.appendChild(issuesHost);
     container.appendChild(eventsHost);
 

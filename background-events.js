@@ -13,6 +13,15 @@
  */
 
 import { createTaskCorrelationId, logRuntimeEvent, logRuntimeFailure } from './runtime-telemetry.js';
+import {
+    RUNTIME_AUDIT_GROUPS,
+    RUNTIME_AUDIT_SEVERITIES,
+    RUNTIME_REASON_CODES,
+    createRuntimeAuditResult,
+    createRuntimeFinding,
+} from './runtime-health.js';
+
+const BACKGROUND_TASK_STALLED_MS = 5 * 60 * 1000;
 
 // ── UI Callbacks (registered by activity-feed.js at init) ────────
 
@@ -344,6 +353,97 @@ export async function retryFailedTask(failedId) {
 export function dismissFailedTask(failedId) {
     _failedTasks.delete(failedId);
     _refreshTasksUI?.();
+}
+
+export function getBackgroundTaskRuntimeSnapshot(now = Date.now()) {
+    const activeTasks = [..._activeTasks.values()];
+    const failedTasks = [..._failedTasks.values()];
+    const oldestActiveStartedAt = activeTasks.reduce((oldest, task) => {
+        if (!Number.isFinite(task?.startedAt)) return oldest;
+        if (!Number.isFinite(oldest) || task.startedAt < oldest) return task.startedAt;
+        return oldest;
+    }, NaN);
+
+    return {
+        activeCount: activeTasks.length,
+        failedCount: failedTasks.length,
+        retryingCount: failedTasks.filter(task => task?.retrying === true).length,
+        activeBackgroundCount: _activeBackgroundCount,
+        oldestActiveAgeMs: Number.isFinite(oldestActiveStartedAt) ? Math.max(now - oldestActiveStartedAt, 0) : 0,
+        stallThresholdMs: BACKGROUND_TASK_STALLED_MS,
+        activeTasks: activeTasks.map(task => ({
+            id: task.id,
+            label: task.label,
+            startedAt: task.startedAt,
+            cancelled: task.cancelled === true,
+        })),
+        failedTasks: failedTasks.map(task => ({
+            id: task.id,
+            label: task.label,
+            failedAt: task.failedAt,
+            errorMessage: task.errorMessage,
+            retrying: task.retrying === true,
+            correlationId: task.correlationId || null,
+        })),
+    };
+}
+
+export function auditBackgroundTaskRuntime(snapshot = getBackgroundTaskRuntimeSnapshot()) {
+    const findings = [];
+
+    if (snapshot.failedCount > 0) {
+        findings.push(createRuntimeFinding({
+            id: 'background-task-failures',
+            subsystem: 'background-events',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: `${snapshot.failedCount} background task${snapshot.failedCount === 1 ? '' : 's'} failed and ${snapshot.retryingCount > 0 ? 'are' : 'remain'} in the retry queue.`,
+            reasonCode: RUNTIME_REASON_CODES.BACKGROUND_TASK_FAILURES,
+            context: {
+                failedCount: snapshot.failedCount,
+                retryingCount: snapshot.retryingCount,
+            },
+        }));
+    }
+
+    if (snapshot.activeCount > 0 && snapshot.oldestActiveAgeMs >= snapshot.stallThresholdMs) {
+        findings.push(createRuntimeFinding({
+            id: 'background-task-stalled',
+            subsystem: 'background-events',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: 'A background task has been running longer than the expected stall threshold.',
+            reasonCode: RUNTIME_REASON_CODES.BACKGROUND_TASK_STALLED,
+            context: {
+                activeCount: snapshot.activeCount,
+                oldestActiveAgeMs: snapshot.oldestActiveAgeMs,
+                stallThresholdMs: snapshot.stallThresholdMs,
+            },
+        }));
+    }
+
+    if (findings.length === 0) {
+        findings.push(createRuntimeFinding({
+            id: 'background-task-runtime-valid',
+            subsystem: 'background-events',
+            severity: RUNTIME_AUDIT_SEVERITIES.INFO,
+            message: snapshot.activeCount > 0
+                ? 'Background task queue is active and healthy.'
+                : 'Background task queue is idle and healthy.',
+            context: {
+                activeCount: snapshot.activeCount,
+                failedCount: snapshot.failedCount,
+            },
+        }));
+    }
+
+    return createRuntimeAuditResult({
+        group: RUNTIME_AUDIT_GROUPS.BACKGROUND_TASKS,
+        ok: findings.every(finding => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR),
+        summary: findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN)
+            ? 'Background task audit found degraded runtime state.'
+            : 'Background task audit passed.',
+        findings,
+        context: snapshot,
+    });
 }
 
 // ── Feed Query Helpers ───────────────────────────────────────────

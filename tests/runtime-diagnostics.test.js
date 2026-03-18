@@ -8,6 +8,8 @@ const mockState = {
         smartContext: null,
         worldState: null,
         entryManager: null,
+        sidecar: null,
+        backgroundTasks: null,
     },
     orchestrationSnapshot: null,
     repairExecution: {
@@ -63,6 +65,14 @@ vi.mock('../entry-manager.js', () => ({
     auditEntryManagerRuntime: vi.fn(() => mockState.audits.entryManager),
 }));
 
+vi.mock('../llm-sidecar.js', () => ({
+    auditSidecarRuntime: vi.fn(() => mockState.audits.sidecar),
+}));
+
+vi.mock('../background-events.js', () => ({
+    auditBackgroundTaskRuntime: vi.fn(() => mockState.audits.backgroundTasks),
+}));
+
 vi.mock('../runtime-repairs.js', () => ({
     executeSafeRuntimeAuditRepairs: vi.fn(async (audits) => {
         if (typeof mockState.repairExecution.run === 'function') {
@@ -88,6 +98,12 @@ vi.mock('../runtime-telemetry.js', () => ({
 vi.mock('../runtime-health.js', () => ({
     RUNTIME_REASON_CODES: {
         STALE_PROMPT_PLAN: 'stale_prompt_plan',
+        RUNTIME_SYNC_BACKOFF: 'runtime_sync_backoff',
+        RUNTIME_SYNC_EXHAUSTED: 'runtime_sync_exhausted',
+        SIDECAR_CIRCUIT_OPEN: 'sidecar_circuit_open',
+        SIDECAR_FAILURE_STREAK: 'sidecar_failure_streak',
+        BACKGROUND_TASK_FAILURES: 'background_task_failures',
+        BACKGROUND_TASK_STALLED: 'background_task_stalled',
     },
     RUNTIME_REPAIR_CLASSES: {
         SAFE_AUTO: 'safe_auto',
@@ -157,6 +173,14 @@ function resetMockState() {
             group: 'metadata-integrity',
             summary: 'Entry-manager audit passed.',
         }),
+        sidecar: makeAudit({
+            group: 'sidecar-integrity',
+            summary: 'Sidecar audit passed.',
+        }),
+        backgroundTasks: makeAudit({
+            group: 'background-task-integrity',
+            summary: 'Background task audit passed.',
+        }),
     };
     mockState.orchestrationSnapshot = {
         initialized: true,
@@ -179,7 +203,13 @@ function resetMockState() {
             refreshUI: false,
         },
         pendingSyncRequestedAt: 0,
+        syncRetryCount: 0,
+        syncRetryBackoffUntil: 0,
+        syncRetryLastFailureAt: 0,
+        syncRetryLastErrorMessage: null,
         hasPendingSync: false,
+        runtimeSyncBackoffDelay: 0,
+        lastExhaustedSyncPlan: null,
         activeSyncPlan: null,
         lastSyncPlan: null,
         lastGenerationStartedAt: 3000,
@@ -365,7 +395,33 @@ describe('collectRuntimeAudits', () => {
                 requiresConfirmation: [],
                 context: mockState.orchestrationSnapshot,
             },
+            mockState.audits.sidecar,
+            mockState.audits.backgroundTasks,
         ]);
+    });
+
+    it('includes sidecar and background task audits after orchestration', async () => {
+        mockState.audits.sidecar = makeAudit({
+            group: 'sidecar-integrity',
+            ok: false,
+            summary: 'Sidecar audit found integrity issues.',
+            findings: [{ severity: 'error', reasonCode: 'sidecar_circuit_open' }],
+            reasonCodes: ['sidecar_circuit_open'],
+            context: { circuitOpen: true },
+        });
+        mockState.audits.backgroundTasks = makeAudit({
+            group: 'background-task-integrity',
+            ok: true,
+            summary: 'Background task audit found degraded runtime state.',
+            findings: [{ severity: 'warn', reasonCode: 'background_task_failures' }],
+            reasonCodes: ['background_task_failures'],
+            context: { failedCount: 1 },
+        });
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[7]).toEqual(mockState.audits.sidecar);
+        expect(audits[8]).toEqual(mockState.audits.backgroundTasks);
     });
 
     it('builds a pass orchestration audit when the snapshot is coordinated', async () => {
@@ -480,6 +536,68 @@ describe('collectRuntimeAudits', () => {
                 { severity: 'warn', reasonCode: 'lost_invalidation_reason' },
             ],
             reasonCodes: ['lost_invalidation_reason'],
+            safeRepairs: [],
+            requiresConfirmation: [],
+            context: mockState.orchestrationSnapshot,
+        });
+    });
+
+    it('builds a warning orchestration audit when a failed sync batch is backing off before retry', async () => {
+        mockState.orchestrationSnapshot = {
+            ...mockState.orchestrationSnapshot,
+            hasPendingSync: true,
+            pendingSyncReasons: ['chat-changed'],
+            pendingSyncCounts: { 'chat-changed': 1 },
+            syncRetryCount: 2,
+            syncRetryBackoffUntil: 5000,
+        };
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[6]).toEqual({
+            group: 'orchestration-integrity',
+            ok: true,
+            summary: 'Orchestration audit found coordination issues.',
+            findings: [
+                { severity: 'warn', reasonCode: 'runtime_sync_backoff' },
+            ],
+            reasonCodes: ['runtime_sync_backoff'],
+            safeRepairs: [],
+            requiresConfirmation: [],
+            context: mockState.orchestrationSnapshot,
+        });
+    });
+
+    it('builds a failure orchestration audit when runtime sync retries are exhausted', async () => {
+        mockState.orchestrationSnapshot = {
+            ...mockState.orchestrationSnapshot,
+            lastExhaustedSyncPlan: {
+                id: 3,
+                syncReason: 'chat-changed',
+                syncReasons: ['chat-changed'],
+                syncReasonCounts: { 'chat-changed': 1 },
+                invalidationReasons: ['chat_changed'],
+                invalidationCounts: { chat_changed: 1 },
+                effects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: true,
+                    invalidatePreWarmCache: true,
+                    refreshUI: true,
+                },
+                requestedAt: 1000,
+            },
+        };
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[6]).toEqual({
+            group: 'orchestration-integrity',
+            ok: false,
+            summary: 'Orchestration audit found integrity issues.',
+            findings: [
+                { severity: 'error', reasonCode: 'runtime_sync_exhausted' },
+            ],
+            reasonCodes: ['runtime_sync_exhausted'],
             safeRepairs: [],
             requiresConfirmation: [],
             context: mockState.orchestrationSnapshot,
@@ -694,6 +812,16 @@ describe('runRuntimeAuditDiagnostics', () => {
                 message: 'Orchestration audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).',
                 fix: null,
             },
+            {
+                status: 'pass',
+                message: 'Sidecar audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).',
+                fix: null,
+            },
+            {
+                status: 'pass',
+                message: 'Background task audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).',
+                fix: null,
+            },
         ]);
     });
 
@@ -768,6 +896,16 @@ describe('runRuntimeAuditDiagnostics', () => {
             {
                 status: 'warn',
                 message: 'Orchestration audit found coordination issues. Findings: 0 error(s), 1 warning(s), 0 info item(s). Reasons: invalidation_not_coalesced.',
+                fix: null,
+            },
+            {
+                status: 'pass',
+                message: 'Sidecar audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).',
+                fix: null,
+            },
+            {
+                status: 'pass',
+                message: 'Background task audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).',
                 fix: null,
             },
         ]);
