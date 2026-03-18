@@ -766,6 +766,28 @@ describe('preWarmSmartContext', () => {
         ]));
     });
 
+    it('can build prompts without emitting injected-entry feed events', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena heads toward the Grand Cathedral.' },
+        );
+
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        await preWarmSmartContext({ source: 'smart-context' });
+        vi.mocked(addEntryActivationEvents).mockClear();
+
+        const prompt = buildSmartContextPrompt({ mode: 'audit' });
+
+        expect(prompt).toContain('Elena');
+        expect(addEntryActivationEvents).not.toHaveBeenCalled();
+    });
+
     it('skips prewarm when smart context is disabled', async () => {
         mockState.settings = {
             ...mockState.settings,

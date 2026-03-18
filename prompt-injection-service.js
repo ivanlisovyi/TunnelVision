@@ -244,6 +244,7 @@ export function applyPromptBudget(prompts, budget, deps = {}) {
  * @param {Function} [deps.buildWorldStatePromptImpl]
  * @param {Function} [deps.buildSmartContextPromptImpl]
  * @param {Function} [deps.buildNotebookPromptImpl]
+ * @param {'default'|'audit'|'read-only'} [deps.promptBuildMode]
  * @param {Function} [deps.setInjectionSizesImpl]
  * @param {Function} [deps.resetTurnEntryCountImpl]
  * @param {Function} [deps.invalidateDirtyWorldInfoCacheImpl]
@@ -290,6 +291,7 @@ export async function buildPromptInjectionPlan(deps = {}) {
         stripOldToolResultsImpl = stripOldToolResults,
         isRecursiveToolPassImpl = isRecursiveToolPass,
     } = deps;
+    const promptBuildMode = deps.promptBuildMode || 'default';
 
     const settings = getSettingsImpl();
     const recursive = isRecursiveToolPassImpl({ getContextImpl: deps.getContextImpl });
@@ -363,17 +365,17 @@ export async function buildPromptInjectionPlan(deps = {}) {
         }
 
         if (settings.worldStateEnabled) {
-            prompts.worldState = buildWorldStatePromptImpl();
+            prompts.worldState = buildWorldStatePromptImpl({ mode: promptBuildMode });
         }
 
         if (settings.smartContextEnabled) {
-            prompts.smartContext = buildSmartContextPromptImpl();
+            prompts.smartContext = buildSmartContextPromptImpl({ mode: promptBuildMode });
         } else {
             console.log(`${TV_PROMPT_LOG_PREFIX} Smart context skipped: disabled in settings`);
         }
 
         if (settings.notebookEnabled !== false) {
-            prompts.notebook = buildNotebookPromptImpl();
+            prompts.notebook = buildNotebookPromptImpl({ mode: promptBuildMode });
         }
     }
 
@@ -429,6 +431,7 @@ export async function buildPromptInjectionPlan(deps = {}) {
 export async function getPromptInjectionRuntimeSnapshot(deps = {}) {
     const payload = await buildPromptInjectionPlan({
         ...deps,
+        promptBuildMode: deps.promptBuildMode || 'audit',
         setInjectionSizesImpl: () => {},
         resetTurnEntryCountImpl: () => {},
         invalidateDirtyWorldInfoCacheImpl: () => {},

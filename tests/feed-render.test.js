@@ -6,6 +6,7 @@ vi.mock('../feed-state.js', () => ({
     getPanelBody: vi.fn(() => null),
     getPanelEl: vi.fn(() => null),
     getShowingArcs: vi.fn(() => false),
+    getShowingHealth: vi.fn(() => false),
     getShowingTimeline: vi.fn(() => false),
     getShowingWorldState: vi.fn(() => false),
     getFeedItemsRaw: vi.fn(() => []),
@@ -47,11 +48,13 @@ vi.mock('../feed-ui/feed-panel.js', () => ({
     getActiveTab: vi.fn(() => 'all'),
 }));
 
-import { buildItemElement, toggleBackgroundExpand } from '../feed-ui/feed-render.js';
+import { getPanelEl, getShowingHealth } from '../feed-state.js';
+import { buildItemElement, toggleBackgroundExpand, refreshActiveTasksInPanel, registerFeedRenderCallbacks } from '../feed-ui/feed-render.js';
 
 describe('feed rendering', () => {
     beforeEach(() => {
         document.body.replaceChildren();
+        vi.clearAllMocks();
     });
 
     it('adds a distinct class and icon for post-turn triggered entries', () => {
@@ -177,5 +180,20 @@ describe('feed rendering', () => {
         });
 
         expect(row.classList.contains('tv-float-item-prewarm-smart-context')).toBe(true);
+    });
+
+    it('does not replace the health dashboard when background tasks refresh the panel', () => {
+        const renderAllItems = vi.fn();
+        registerFeedRenderCallbacks({ renderAllItems });
+        vi.mocked(getPanelEl).mockReturnValue({
+            classList: {
+                contains: vi.fn(() => true),
+            },
+        });
+        vi.mocked(getShowingHealth).mockReturnValue(true);
+
+        refreshActiveTasksInPanel();
+
+        expect(renderAllItems).not.toHaveBeenCalled();
     });
 });

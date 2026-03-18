@@ -6,7 +6,7 @@
  * separate from UI behavior.
  */
 
-import { getPanelBody, getPanelEl, getShowingArcs, getShowingTimeline, getShowingWorldState, getFeedItemsRaw, MAX_RENDERED_RETRIEVED_ENTRIES, setLorebookStatsCache } from '../feed-state.js';
+import { getPanelBody, getPanelEl, getShowingArcs, getShowingHealth, getShowingTimeline, getShowingWorldState, getFeedItemsRaw, MAX_RENDERED_RETRIEVED_ENTRIES, setLorebookStatsCache } from '../feed-state.js';
 import { formatTime, formatEntrySummary, formatRetrievedEntryLabel, shouldIncludeLorebookForEntries, buildVersionHistoryPanel } from '../feed-helpers.js';
 import { getActiveTasks, getFailedTasks, cancelBackgroundTask, retryFailedTask, dismissFailedTask, addBackgroundEvent } from '../background-events.js';
 import { findEntry, getEntryVersions } from '../entry-manager.js';
@@ -645,6 +645,6 @@ export async function handleCreateTrackerAction(action, btn, item) {
 
 export function refreshActiveTasksInPanel() {
     if (!getPanelEl()?.classList.contains('open')) return;
-    if (getShowingWorldState() || getShowingTimeline() || getShowingArcs()) return;
+    if (getShowingWorldState() || getShowingTimeline() || getShowingArcs() || getShowingHealth()) return;
     _renderAllItems();
 }

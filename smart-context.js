@@ -1634,7 +1634,20 @@ function reportPreWarmCandidates(candidates, cacheKey, source = "smart-context")
   });
 }
 
-export function buildSmartContextPrompt() {
+function shouldApplyPromptBuildSideEffects(options = {}) {
+  if (options?.mode === "audit" || options?.mode === "read-only") {
+    return false;
+  }
+
+  if (typeof options?.applySideEffects === "boolean") {
+    return options.applySideEffects;
+  }
+
+  return true;
+}
+
+export function buildSmartContextPrompt(options = {}) {
+  const applySideEffects = shouldApplyPromptBuildSideEffects(options);
   const settings = getSettings();
   if (!settings.smartContextEnabled || settings.globalEnabled === false)
     return "";
@@ -1762,12 +1775,14 @@ export function buildSmartContextPrompt() {
     `${SMART_CONTEXT_LOG_PREFIX} Injecting ${selected.length} entr${selected.length === 1 ? "y" : "ies"}`,
   );
 
-  _lastInjectedEntries = selectedEntryInfo;
-  reportSmartContextSelections(selectedEntryInfo, selectionSource);
-  if (selectedUids.length > 0) touchRelevance(selectedUids);
+  if (applySideEffects) {
+    _lastInjectedEntries = selectedEntryInfo;
+    reportSmartContextSelections(selectedEntryInfo, selectionSource);
+    if (selectedUids.length > 0) touchRelevance(selectedUids);
 
-  // 1B: Record injections for cooldown
-  recordInjections(selectedUids);
+    // 1B: Record injections for cooldown
+    recordInjections(selectedUids);
+  }
 
   return [
     `[TunnelVision Smart Context — ${selected.length} relevant entries auto-retrieved based on current scene. This is supplemental memory; the AI can search for more with TunnelVision_Search if needed.]`,

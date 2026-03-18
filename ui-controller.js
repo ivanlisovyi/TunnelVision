@@ -1296,7 +1296,7 @@ function onSmartContextSettingChange() {
     const settings = getSettings();
     settings.smartContextLookback = Math.min(Math.max(Math.round(Number($('#tv_smart_context_lookback').val())) || 6, 2), 30);
     settings.smartContextMaxEntries = Math.min(Math.max(Math.round(Number($('#tv_smart_context_max_entries').val())) || 8, 1), 30);
-    settings.smartContextMaxChars = Math.min(Math.max(Math.round(Number($('#tv_smart_context_max_chars').val())) || 4000, 500), 20000);
+    settings.smartContextMaxChars = Math.min(Math.max(Math.round(Number($('#tv_smart_context_max_chars').val())) || 4000, 500), 100000);
     $('#tv_smart_context_lookback').val(settings.smartContextLookback);
     $('#tv_smart_context_max_entries').val(settings.smartContextMaxEntries);
     $('#tv_smart_context_max_chars').val(settings.smartContextMaxChars);

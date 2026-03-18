@@ -125,6 +125,9 @@ import {
     TV_NOTEBOOK_KEY,
     auditPromptInjectionRuntime,
 } from '../prompt-injection-service.js';
+import { buildSmartContextPrompt } from '../smart-context.js';
+import { buildWorldStatePrompt } from '../world-state.js';
+import { buildNotebookPrompt } from '../tools/notebook.js';
 import { resetTurnEntryCount, invalidateDirtyWorldInfoCache } from '../entry-manager.js';
 import { setInjectionSizes } from '../agent-utils.js';
 import { resetNotebookWriteGuard } from '../tools/notebook.js';
@@ -252,6 +255,9 @@ describe('buildPromptInjectionPlan', () => {
         expect(plan.prompts.worldState).toBe('WORLD STATE');
         expect(plan.prompts.smartContext).toBe('SMART CONTEXT');
         expect(plan.prompts.notebook).toBe('NOTEBOOK');
+        expect(buildWorldStatePrompt).toHaveBeenCalledWith({ mode: 'default' });
+        expect(buildSmartContextPrompt).toHaveBeenCalledWith({ mode: 'default' });
+        expect(buildNotebookPrompt).toHaveBeenCalledWith({ mode: 'default' });
         expect(mockState.cachedWorldInfoCalls).toEqual([]);
     });
 
@@ -498,6 +504,46 @@ describe('buildPromptInjectionPlan sync behavior', () => {
 });
 
 describe('auditPromptInjectionRuntime', () => {
+    it('builds runtime snapshots with side-effect-free smart context prompt generation', async () => {
+        mockState.settings = makeSettings({
+            smartContextEnabled: true,
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.smartContextPrompt = 'SMART';
+
+        const snapshot = await getPromptInjectionRuntimeSnapshot({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(snapshot.prompts.smartContext).toBe('SMART');
+        expect(buildWorldStatePrompt).not.toHaveBeenCalled();
+        expect(buildSmartContextPrompt).toHaveBeenCalledWith({ mode: 'audit' });
+        expect(buildNotebookPrompt).toHaveBeenCalledWith({ mode: 'audit' });
+    });
+
+    it('uses audit mode for all enabled prompt builders in runtime snapshots', async () => {
+        mockState.settings = makeSettings({
+            worldStateEnabled: true,
+            smartContextEnabled: true,
+            notebookEnabled: true,
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.worldStatePrompt = 'WORLD';
+        mockState.smartContextPrompt = 'SMART';
+        mockState.notebookPrompt = 'NOTE';
+
+        const snapshot = await getPromptInjectionRuntimeSnapshot({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(snapshot.prompts.worldState).toBe('WORLD');
+        expect(snapshot.prompts.smartContext).toBe('SMART');
+        expect(snapshot.prompts.notebook).toBe('NOTE');
+        expect(buildWorldStatePrompt).toHaveBeenCalledWith({ mode: 'audit' });
+        expect(buildSmartContextPrompt).toHaveBeenCalledWith({ mode: 'audit' });
+        expect(buildNotebookPrompt).toHaveBeenCalledWith({ mode: 'audit' });
+    });
+
     it('returns an info finding for a healthy prompt plan', async () => {
         mockState.settings = makeSettings({
             worldStateEnabled: true,

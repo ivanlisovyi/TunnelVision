@@ -285,9 +285,10 @@ function scoreSectionRelevance(sectionName, sectionBody, recentText) {
  * Build the world state string for injection into the AI's context.
  * Uses section-aware assembly when sections are available, falling back
  * to the flat text for backward compatibility.
+ * @param {{ mode?: 'default' | 'audit' | 'read-only' }} [options]
  * @returns {string}
  */
-export function buildWorldStatePrompt() {
+export function buildWorldStatePrompt(options = {}) {
     const state = getWorldState();
     if (!state?.text) return '';
 

@@ -59,9 +59,10 @@ function saveNotebook() {
 /**
  * Build the notebook content string for injection into the AI's context.
  * Returns empty string if no notes exist.
+ * @param {{ mode?: 'default' | 'audit' | 'read-only' }} [options]
  * @returns {string}
  */
-export function buildNotebookPrompt() {
+export function buildNotebookPrompt(options = {}) {
     const context = getContext();
     const notes = context.chatMetadata?.[METADATA_KEY];
     if (!notes || notes.length === 0) return '';
