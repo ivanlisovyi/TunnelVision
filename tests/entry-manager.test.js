@@ -332,6 +332,12 @@ describe('getEntryManagerRuntimeSnapshot', () => {
             cachedEntries: [
                 ['Beta', beta],
             ],
+            bookEpochs: [
+                ['Alpha', 1],
+            ],
+            cachedBookEpochs: [
+                ['Beta', 0],
+            ],
         });
     });
 
@@ -342,7 +348,36 @@ describe('getEntryManagerRuntimeSnapshot', () => {
             cacheKeys: [],
             dirtyBooks: [],
             cachedEntries: [],
+            bookEpochs: [],
+            cachedBookEpochs: [],
         });
+    });
+});
+
+describe('entry-manager cache epochs', () => {
+    beforeEach(() => {
+        for (const key of Object.keys(mockMetadata)) delete mockMetadata[key];
+        mockSaveDebounced.mockClear();
+        vi.clearAllMocks();
+        invalidateWorldInfoCache();
+    });
+
+    it('reports stale cache epochs as a warning', () => {
+        const audit = auditEntryManagerRuntime({
+            cacheKeys: ['Book A'],
+            dirtyBooks: [],
+            cachedEntries: [['Book A', { entries: {} }]],
+            bookEpochs: [['Book A', 2]],
+            cachedBookEpochs: [['Book A', 1]],
+        });
+
+        expect(audit.ok).toBe(true);
+        expect(audit.summary).toBe('Entry-manager audit found coordination issues.');
+        expect(audit.findings.some(finding =>
+            finding.id === 'entrymanager-stale-cache-epoch'
+            && finding.reasonCode === 'stale_cache_epoch'
+            && finding.severity === 'warn'
+        )).toBe(true);
     });
 });
 

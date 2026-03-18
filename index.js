@@ -42,8 +42,9 @@ import {
     completeInitialization,
     recordOrchestrationEvent,
     consumePendingInvalidationState,
-    beginSync,
-    completeSync,
+    requestRuntimeSync,
+    beginRuntimeSyncPlan,
+    completeRuntimeSyncPlan,
     updateLastGenerationContext,
     recordGenerationPreflightSummary,
     getOrchestrationRuntimeSnapshot,
@@ -52,23 +53,80 @@ import {
 
 const EXTENSION_NAME = 'tunnelvision';
 const EXTENSION_FOLDER = `third-party/TunnelVision`;
+let _runtimeSyncDrainPromise = null;
 
 async function syncToolRegistration(reason) {
-    beginSync(reason);
+    const settings = getSettings();
+    if (settings.globalEnabled === false) {
+        unregisterTools();
+        console.log(`[TunnelVision] Tools unregistered (${reason}: extension disabled)`);
+        return;
+    }
 
-    try {
-        const settings = getSettings();
-        if (settings.globalEnabled === false) {
-            unregisterTools();
-            console.log(`[TunnelVision] Tools unregistered (${reason}: extension disabled)`);
+    await registerTools();
+    console.log(`[TunnelVision] Tool registration synced (${reason})`);
+}
+
+async function drainRuntimeSyncQueue() {
+    while (true) {
+        const plan = beginRuntimeSyncPlan();
+        if (!plan) {
             return;
         }
 
-        await registerTools();
-        console.log(`[TunnelVision] Tool registration synced (${reason})`);
-    } finally {
-        completeSync();
+        let syncFailed = false;
+        try {
+            if (plan.effects.invalidateActiveBookCache) {
+                invalidateActiveBookCache();
+            }
+            if (plan.effects.invalidateWorldInfoCache) {
+                invalidateWorldInfoCache();
+            }
+            if (plan.effects.invalidatePreWarmCache) {
+                invalidatePreWarmCache();
+            }
+            if (plan.effects.refreshUI) {
+                refreshUI();
+            }
+
+            await syncToolRegistration(plan.syncReason);
+        } catch (error) {
+            syncFailed = true;
+            completeRuntimeSyncPlan({ requeue: true });
+            throw error;
+        } finally {
+            if (!syncFailed) {
+                completeRuntimeSyncPlan();
+            }
+        }
     }
+}
+
+function requestCanonicalRuntimeSync({
+    eventName,
+    invalidationReason = null,
+    syncReason = null,
+    refreshUI: shouldRefreshUI = true,
+} = {}) {
+    requestRuntimeSync({
+        eventName,
+        invalidationReason,
+        syncReason,
+        effects: {
+            invalidateActiveBookCache: !!invalidationReason,
+            invalidateWorldInfoCache: !!invalidationReason,
+            invalidatePreWarmCache: !!invalidationReason,
+            refreshUI: shouldRefreshUI,
+        },
+    });
+
+    if (!_runtimeSyncDrainPromise) {
+        _runtimeSyncDrainPromise = drainRuntimeSyncQueue().finally(() => {
+            _runtimeSyncDrainPromise = null;
+        });
+    }
+
+    return _runtimeSyncDrainPromise;
 }
 
 async function init() {
@@ -163,26 +221,29 @@ async function init() {
 }
 
 async function onChatChanged() {
-    recordOrchestrationEvent('chat-changed', { invalidationReason: 'chat_changed' });
-    invalidateActiveBookCache();
-    invalidateWorldInfoCache();
-    invalidatePreWarmCache();
-    refreshUI();
-    await syncToolRegistration('chat-changed');
+    await requestCanonicalRuntimeSync({
+        eventName: 'chat-changed',
+        invalidationReason: 'chat_changed',
+        syncReason: 'chat-changed',
+        refreshUI: true,
+    });
 }
 
 async function onWorldInfoUpdated() {
-    recordOrchestrationEvent('worldinfo-updated', { invalidationReason: 'worldinfo_updated' });
-    invalidateActiveBookCache();
-    invalidateWorldInfoCache();
-    invalidatePreWarmCache();
-    refreshUI();
-    await syncToolRegistration('worldinfo-updated');
+    await requestCanonicalRuntimeSync({
+        eventName: 'worldinfo-updated',
+        invalidationReason: 'worldinfo_updated',
+        syncReason: 'worldinfo-updated',
+        refreshUI: true,
+    });
 }
 
 async function onAppReady() {
-    recordOrchestrationEvent('app-ready');
-    await syncToolRegistration('app-ready');
+    await requestCanonicalRuntimeSync({
+        eventName: 'app-ready',
+        syncReason: 'app-ready',
+        refreshUI: false,
+    });
 }
 
 /**
@@ -288,7 +349,8 @@ async function onGenerationStarted(type, opts) {
     recordOrchestrationEvent('generation-started', {
         generationType: type || null,
         hasOptions: !!opts,
-        invalidationReason: 'generation_started',
+        pendingInvalidationReasons: consumedInvalidations.reasons,
+        pendingInvalidationCounts: consumedInvalidations.counts,
         consumedInvalidationReasons: consumedInvalidations.reasons,
         consumedInvalidationCounts: consumedInvalidations.counts,
     });

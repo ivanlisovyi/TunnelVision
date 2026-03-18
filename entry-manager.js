@@ -137,9 +137,20 @@ export const FACT_EXTRACTION_PROMPT = [
 
 const _worldInfoCache = new Map();
 const _dirtyBooks = new Set();
+const _bookEpochs = new Map();
+const _cachedBookEpochs = new Map();
 
 function isPlainObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getBookEpoch(bookName) {
+    return _bookEpochs.get(bookName) || 0;
+}
+
+function bumpBookEpoch(bookName) {
+    if (typeof bookName !== 'string' || !bookName.trim()) return;
+    _bookEpochs.set(bookName, getBookEpoch(bookName) + 1);
 }
 
 /**
@@ -151,7 +162,10 @@ function isPlainObject(value) {
 export async function getCachedWorldInfo(bookName) {
     if (_worldInfoCache.has(bookName)) return _worldInfoCache.get(bookName);
     const data = await loadWorldInfo(bookName);
-    if (data) _worldInfoCache.set(bookName, data);
+    if (data) {
+        _worldInfoCache.set(bookName, data);
+        _cachedBookEpochs.set(bookName, getBookEpoch(bookName));
+    }
     return data;
 }
 
@@ -174,10 +188,14 @@ export function getCachedWorldInfoSync(bookName) {
 export function invalidateWorldInfoCache(bookName) {
     if (bookName) {
         _worldInfoCache.delete(bookName);
+        _cachedBookEpochs.delete(bookName);
         _dirtyBooks.add(bookName);
+        bumpBookEpoch(bookName);
     } else {
         _worldInfoCache.clear();
         _dirtyBooks.clear();
+        _bookEpochs.clear();
+        _cachedBookEpochs.clear();
     }
 }
 
@@ -189,6 +207,7 @@ export function invalidateWorldInfoCache(bookName) {
 export function invalidateDirtyWorldInfoCache() {
     for (const bookName of _dirtyBooks) {
         _worldInfoCache.delete(bookName);
+        _cachedBookEpochs.delete(bookName);
     }
     _dirtyBooks.clear();
 }
@@ -210,13 +229,17 @@ export function getEntryManagerRuntimeSnapshot() {
         cacheKeys: [..._worldInfoCache.keys()],
         dirtyBooks: [..._dirtyBooks],
         cachedEntries: [..._worldInfoCache.entries()],
+        bookEpochs: [..._bookEpochs.entries()],
+        cachedBookEpochs: [..._cachedBookEpochs.entries()],
     };
 }
 
 export function auditEntryManagerRuntime(snapshot = getEntryManagerRuntimeSnapshot()) {
     const findings = [];
     const safeRepairs = [];
-    const { cacheKeys, dirtyBooks, cachedEntries } = snapshot;
+    const { cacheKeys, dirtyBooks, cachedEntries, bookEpochs = [], cachedBookEpochs = [] } = snapshot;
+    const liveEpochs = new Map(bookEpochs);
+    const cachedEpochs = new Map(cachedBookEpochs);
 
     for (const [bookName, bookData] of cachedEntries) {
         if (typeof bookName !== 'string' || !bookName.trim()) {
@@ -257,6 +280,23 @@ export function auditEntryManagerRuntime(snapshot = getEntryManagerRuntimeSnapsh
                 repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
                 repairActionId: 'reset-entry-manager-cache',
                 context: { bookName },
+            }));
+        }
+
+        if ((cachedEpochs.get(bookName) || 0) !== (liveEpochs.get(bookName) || 0)) {
+            findings.push(createRuntimeFinding({
+                id: 'entrymanager-stale-cache-epoch',
+                subsystem: 'entry-manager',
+                severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+                message: `World-info cache entry for "${bookName}" was built against a stale cache epoch.`,
+                reasonCode: RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                repairActionId: 'reset-entry-manager-cache',
+                context: {
+                    bookName,
+                    cachedEpoch: cachedEpochs.get(bookName) || 0,
+                    currentEpoch: liveEpochs.get(bookName) || 0,
+                },
             }));
         }
     }
@@ -317,6 +357,8 @@ export function auditEntryManagerRuntime(snapshot = getEntryManagerRuntimeSnapsh
                 dirtyBooks,
                 cachedBookCount: cacheKeys.length,
                 dirtyBookCount: dirtyBooks.length,
+                bookEpochs,
+                cachedBookEpochs,
             },
         }));
     }

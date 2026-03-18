@@ -86,6 +86,8 @@ beforeEach(() => {
         cachedKey: null,
         preWarmSource: 'smart-context',
         preWarmCachedAt: 0,
+        preWarmEpoch: 0,
+        cachedPreWarmEpoch: 0,
         lastInjectedEntries: [],
     });
     __smartContextDebug.clearDerivedKeyCache();
@@ -793,6 +795,8 @@ describe('preWarmSmartContext', () => {
                 cachedKey: 'snapshot-key',
                 preWarmSource: 'smart-context',
                 preWarmCachedAt: Date.now(),
+                preWarmEpoch: 1,
+                cachedPreWarmEpoch: 1,
                 lastInjectedEntries: [{ uid: 1, title: 'Elena', keys: ['elena'], bookName: 'Book A' }],
             });
 
@@ -803,6 +807,8 @@ describe('preWarmSmartContext', () => {
                 chatLength: 2,
                 cachedKey: 'snapshot-key',
                 preWarmSource: 'smart-context',
+                preWarmEpoch: 1,
+                cachedPreWarmEpoch: 1,
                 preWarmedCandidateCount: 1,
                 injectedEntryCount: 1,
             });
@@ -844,6 +850,8 @@ describe('preWarmSmartContext', () => {
                 preWarmedCandidates: { broken: true },
                 cachedKey: null,
                 preWarmCachedAt: Date.now(),
+                preWarmEpoch: 2,
+                cachedPreWarmEpoch: 1,
             });
 
             const audit = auditSmartContextRuntime();
@@ -874,12 +882,19 @@ describe('preWarmSmartContext', () => {
                 preWarmedCandidates: [{ entry: makeEntry(), score: 10, bookName: 'Book A', isTracker: false, isSummary: false }],
                 cachedKey: 'stale-key',
                 preWarmCachedAt: Date.now(),
+                preWarmEpoch: 2,
+                cachedPreWarmEpoch: 1,
                 lastInjectedEntries: [{ uid: 'bad-uid' }],
             });
 
             const audit = auditSmartContextRuntime();
 
             expect(audit.ok).toBe(true);
+            expect(audit.findings.some(finding =>
+                finding.id === 'smartcontext-stale-cache-epoch'
+                && finding.reasonCode === 'stale_cache_epoch'
+                && finding.severity === 'warn'
+            )).toBe(true);
             expect(audit.findings.some(finding =>
                 finding.id === 'smartcontext-stale-cache-key'
                 && finding.reasonCode === 'stale_cache_epoch'

@@ -5,6 +5,10 @@ import {
     completeInitialization,
     recordOrchestrationEvent,
     consumePendingInvalidationState,
+    requestRuntimeSync,
+    beginRuntimeSyncPlan,
+    completeRuntimeSyncPlan,
+    hasPendingRuntimeSync,
     beginSync,
     completeSync,
     updateLastGenerationContext,
@@ -32,6 +36,18 @@ describe('runtime-orchestration', () => {
                 lastSyncAt: 0,
                 syncInFlight: false,
                 syncCount: 0,
+                pendingSyncReasons: [],
+                pendingSyncCounts: {},
+                pendingSyncEffects: {
+                    invalidateActiveBookCache: false,
+                    invalidateWorldInfoCache: false,
+                    invalidatePreWarmCache: false,
+                    refreshUI: false,
+                },
+                pendingSyncRequestedAt: 0,
+                hasPendingSync: false,
+                activeSyncPlan: null,
+                lastSyncPlan: null,
                 lastGenerationStartedAt: 0,
                 lastGenerationContext: null,
             });
@@ -59,6 +75,20 @@ describe('runtime-orchestration', () => {
                 lastEvent: 'chat-changed',
                 lastEventAt: 1200,
                 pendingInvalidationReasons: ['chat_changed', 'worldinfo_updated', 'chat_changed'],
+                pendingInvalidationCounts: {
+                    chat_changed: 2,
+                    worldinfo_updated: 1,
+                },
+            });
+        });
+
+        it('coalesces adjacent duplicate invalidation reasons while preserving counts', () => {
+            recordOrchestrationEvent('chat-changed', { invalidationReason: 'chat_changed' }, 1000);
+            recordOrchestrationEvent('chat-changed', { invalidationReason: 'chat_changed' }, 1100);
+            recordOrchestrationEvent('worldinfo-updated', { invalidationReason: 'worldinfo_updated' }, 1200);
+
+            expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
+                pendingInvalidationReasons: ['chat_changed', 'worldinfo_updated'],
                 pendingInvalidationCounts: {
                     chat_changed: 2,
                     worldinfo_updated: 1,
@@ -146,6 +176,126 @@ describe('runtime-orchestration', () => {
                 syncCount: 2,
             });
         });
+
+        it('queues runtime sync work and begins one canonical sync plan', () => {
+            requestRuntimeSync({
+                eventName: 'chat-changed',
+                invalidationReason: 'chat_changed',
+                syncReason: 'chat-changed',
+                now: 100,
+                effects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: true,
+                    invalidatePreWarmCache: true,
+                    refreshUI: true,
+                },
+            });
+            requestRuntimeSync({
+                eventName: 'worldinfo-updated',
+                invalidationReason: 'worldinfo_updated',
+                syncReason: 'worldinfo-updated',
+                now: 150,
+                effects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: true,
+                    invalidatePreWarmCache: true,
+                    refreshUI: true,
+                },
+            });
+
+            const plan = beginRuntimeSyncPlan(200);
+
+            expect(plan).toEqual({
+                id: 1,
+                syncReason: 'coalesced:chat-changed+worldinfo-updated',
+                syncReasons: ['chat-changed', 'worldinfo-updated'],
+                syncReasonCounts: {
+                    'chat-changed': 1,
+                    'worldinfo-updated': 1,
+                },
+                invalidationReasons: ['chat_changed', 'worldinfo_updated'],
+                invalidationCounts: {
+                    chat_changed: 1,
+                    worldinfo_updated: 1,
+                },
+                effects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: true,
+                    invalidatePreWarmCache: true,
+                    refreshUI: true,
+                },
+                requestedAt: 100,
+            });
+
+            expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
+                lastSyncReason: 'coalesced:chat-changed+worldinfo-updated',
+                syncInFlight: true,
+                syncCount: 1,
+                pendingSyncReasons: [],
+                hasPendingSync: false,
+                activeSyncPlan: plan,
+                lastSyncPlan: plan,
+            });
+        });
+
+        it('coalesces adjacent sync requests while preserving their counts', () => {
+            requestRuntimeSync({
+                eventName: 'chat-changed',
+                invalidationReason: 'chat_changed',
+                syncReason: 'chat-changed',
+                now: 100,
+                effects: { refreshUI: true },
+            });
+            requestRuntimeSync({
+                eventName: 'chat-changed',
+                invalidationReason: 'chat_changed',
+                syncReason: 'chat-changed',
+                now: 110,
+                effects: { refreshUI: true },
+            });
+
+            expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
+                pendingSyncReasons: ['chat-changed'],
+                pendingSyncCounts: {
+                    'chat-changed': 2,
+                },
+                pendingSyncRequestedAt: 100,
+                hasPendingSync: true,
+            });
+        });
+
+        it('requeues an active sync plan when completion requests retry', () => {
+            requestRuntimeSync({
+                eventName: 'chat-changed',
+                invalidationReason: 'chat_changed',
+                syncReason: 'chat-changed',
+                now: 100,
+                effects: {
+                    invalidateActiveBookCache: true,
+                    refreshUI: true,
+                },
+            });
+
+            const plan = beginRuntimeSyncPlan(200);
+            completeRuntimeSyncPlan({ requeue: true });
+
+            expect(plan?.syncReason).toBe('chat-changed');
+            expect(getOrchestrationRuntimeSnapshot()).toMatchObject({
+                syncInFlight: false,
+                pendingSyncReasons: ['chat-changed'],
+                pendingSyncCounts: {
+                    'chat-changed': 1,
+                },
+                pendingSyncEffects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: false,
+                    invalidatePreWarmCache: false,
+                    refreshUI: true,
+                },
+                hasPendingSync: true,
+                activeSyncPlan: null,
+            });
+        });
     });
 
     describe('generation context updates', () => {
@@ -210,6 +360,12 @@ describe('runtime-orchestration', () => {
             __orchestrationDebug.setRuntimeState({
                 pendingInvalidationReasons: ['chat_changed'],
                 pendingInvalidationCounts: { chat_changed: 1 },
+                pendingSyncReasons: ['chat-changed'],
+                pendingSyncCounts: { 'chat-changed': 1 },
+                pendingSyncEffects: {
+                    refreshUI: true,
+                },
+                pendingSyncRequestedAt: 12,
                 lastGenerationContext: {
                     pendingInvalidationReasons: ['chat_changed'],
                     pendingInvalidationCounts: { chat_changed: 1 },
@@ -229,6 +385,9 @@ describe('runtime-orchestration', () => {
 
             snapshot.pendingInvalidationReasons.push('worldinfo_updated');
             snapshot.pendingInvalidationCounts.chat_changed = 99;
+            snapshot.pendingSyncReasons.push('worldinfo-updated');
+            snapshot.pendingSyncCounts['chat-changed'] = 42;
+            snapshot.pendingSyncEffects.refreshUI = false;
             snapshot.lastGenerationContext.pendingInvalidationReasons.push('generation_started');
             snapshot.lastGenerationContext.pendingInvalidationCounts.chat_changed = 42;
             snapshot.lastGenerationContext.consumedInvalidationReasons.push('worldinfo_updated');
@@ -239,6 +398,14 @@ describe('runtime-orchestration', () => {
 
             expect(freshSnapshot.pendingInvalidationReasons).toEqual(['chat_changed']);
             expect(freshSnapshot.pendingInvalidationCounts).toEqual({ chat_changed: 1 });
+            expect(freshSnapshot.pendingSyncReasons).toEqual(['chat-changed']);
+            expect(freshSnapshot.pendingSyncCounts).toEqual({ 'chat-changed': 1 });
+            expect(freshSnapshot.pendingSyncEffects).toEqual({
+                invalidateActiveBookCache: false,
+                invalidateWorldInfoCache: false,
+                invalidatePreWarmCache: false,
+                refreshUI: true,
+            });
             expect(freshSnapshot.lastGenerationContext.pendingInvalidationReasons).toEqual(['chat_changed']);
             expect(freshSnapshot.lastGenerationContext.pendingInvalidationCounts).toEqual({ chat_changed: 1 });
             expect(freshSnapshot.lastGenerationContext.consumedInvalidationReasons).toEqual(['chat_changed']);
@@ -259,6 +426,45 @@ describe('runtime-orchestration', () => {
                 lastSyncAt: 40,
                 syncInFlight: true,
                 syncCount: 3,
+                pendingSyncReasons: ['chat-changed', 'worldinfo-updated'],
+                pendingSyncCounts: { 'chat-changed': 2, 'worldinfo-updated': 1 },
+                pendingSyncEffects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: true,
+                    invalidatePreWarmCache: true,
+                    refreshUI: true,
+                },
+                pendingSyncRequestedAt: 35,
+                activeSyncPlan: {
+                    id: 7,
+                    syncReason: 'coalesced:chat-changed+worldinfo-updated',
+                    syncReasons: ['chat-changed', 'worldinfo-updated'],
+                    syncReasonCounts: { 'chat-changed': 2, 'worldinfo-updated': 1 },
+                    invalidationReasons: ['chat_changed', 'worldinfo_updated'],
+                    invalidationCounts: { chat_changed: 2, worldinfo_updated: 1 },
+                    effects: {
+                        invalidateActiveBookCache: true,
+                        invalidateWorldInfoCache: true,
+                        invalidatePreWarmCache: true,
+                        refreshUI: true,
+                    },
+                    requestedAt: 35,
+                },
+                lastSyncPlan: {
+                    id: 6,
+                    syncReason: 'chat-changed',
+                    syncReasons: ['chat-changed'],
+                    syncReasonCounts: { 'chat-changed': 1 },
+                    invalidationReasons: ['chat_changed'],
+                    invalidationCounts: { chat_changed: 1 },
+                    effects: {
+                        invalidateActiveBookCache: true,
+                        invalidateWorldInfoCache: true,
+                        invalidatePreWarmCache: true,
+                        refreshUI: true,
+                    },
+                    requestedAt: 20,
+                },
                 lastGenerationStartedAt: 50,
                 lastGenerationContext: {
                     generationType: 'normal',
@@ -291,6 +497,46 @@ describe('runtime-orchestration', () => {
                 lastSyncAt: 40,
                 syncInFlight: true,
                 syncCount: 3,
+                pendingSyncReasons: ['chat-changed', 'worldinfo-updated'],
+                pendingSyncCounts: { 'chat-changed': 2, 'worldinfo-updated': 1 },
+                pendingSyncEffects: {
+                    invalidateActiveBookCache: true,
+                    invalidateWorldInfoCache: true,
+                    invalidatePreWarmCache: true,
+                    refreshUI: true,
+                },
+                pendingSyncRequestedAt: 35,
+                hasPendingSync: true,
+                activeSyncPlan: {
+                    id: 7,
+                    syncReason: 'coalesced:chat-changed+worldinfo-updated',
+                    syncReasons: ['chat-changed', 'worldinfo-updated'],
+                    syncReasonCounts: { 'chat-changed': 2, 'worldinfo-updated': 1 },
+                    invalidationReasons: ['chat_changed', 'worldinfo_updated'],
+                    invalidationCounts: { chat_changed: 2, worldinfo_updated: 1 },
+                    effects: {
+                        invalidateActiveBookCache: true,
+                        invalidateWorldInfoCache: true,
+                        invalidatePreWarmCache: true,
+                        refreshUI: true,
+                    },
+                    requestedAt: 35,
+                },
+                lastSyncPlan: {
+                    id: 6,
+                    syncReason: 'chat-changed',
+                    syncReasons: ['chat-changed'],
+                    syncReasonCounts: { 'chat-changed': 1 },
+                    invalidationReasons: ['chat_changed'],
+                    invalidationCounts: { chat_changed: 1 },
+                    effects: {
+                        invalidateActiveBookCache: true,
+                        invalidateWorldInfoCache: true,
+                        invalidatePreWarmCache: true,
+                        refreshUI: true,
+                    },
+                    requestedAt: 20,
+                },
                 lastGenerationStartedAt: 50,
                 lastGenerationContext: {
                     generationType: 'normal',

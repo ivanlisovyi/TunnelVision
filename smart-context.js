@@ -93,6 +93,8 @@ let _preWarmCacheKey = null;
 let _preWarmSource = "smart-context";
 let _lastReportedPreWarmKey = null;
 let _preWarmCachedAt = 0;
+let _preWarmEpoch = 0;
+let _cachedPreWarmEpoch = 0;
 const PREWARM_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 
 function buildPreWarmCacheKey() {
@@ -134,10 +136,12 @@ function isPreWarmCacheFresh(cacheKey) {
 
 /** Invalidate the pre-warming cache when entries change or books are modified. */
 export function invalidatePreWarmCache() {
+  _preWarmEpoch += 1;
   _preWarmedCandidates = null;
   _preWarmCacheKey = null;
   _preWarmSource = "smart-context";
   _preWarmCachedAt = 0;
+  _cachedPreWarmEpoch = 0;
   _lastReportedPreWarmKey = null;
   _lastReportedInjectionKey = null;
   _derivedKeyCache.clear();
@@ -163,6 +167,8 @@ export function getSmartContextRuntimeSnapshot() {
     cacheFresh,
     cacheAgeMs,
     preWarmSource: _preWarmSource,
+    preWarmEpoch: _preWarmEpoch,
+    cachedPreWarmEpoch: _cachedPreWarmEpoch,
     preWarmedCandidates: _preWarmedCandidates,
     preWarmedCandidateCount: Array.isArray(_preWarmedCandidates)
       ? _preWarmedCandidates.length
@@ -190,6 +196,8 @@ export function auditSmartContextRuntime(snapshot = getSmartContextRuntimeSnapsh
     cachedKey,
     preWarmSource,
     preWarmCachedAt,
+    preWarmEpoch,
+    cachedPreWarmEpoch,
     lastInjectedEntries,
     derivedKeyCacheSize,
   } = snapshot;
@@ -208,6 +216,26 @@ export function auditSmartContextRuntime(snapshot = getSmartContextRuntimeSnapsh
       repairActionId: "reset-smart-context-cache",
       context: {
         cacheType: typeof preWarmedCandidates,
+      },
+    }));
+  }
+
+  if (
+    Array.isArray(preWarmedCandidates)
+    && preWarmedCandidates.length > 0
+    && cachedPreWarmEpoch !== preWarmEpoch
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-stale-cache-epoch",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+      message: "Smart-context prewarm cache was produced for an older cache epoch.",
+      reasonCode: RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        cachedPreWarmEpoch,
+        preWarmEpoch,
       },
     }));
   }
@@ -1821,6 +1849,7 @@ export async function preWarmSmartContext({ source = 'smart-context' } = {}) {
   _preWarmCacheKey = cacheKey;
   _preWarmSource = source;
   _preWarmCachedAt = Date.now();
+  _cachedPreWarmEpoch = _preWarmEpoch;
   reportPreWarmCandidates(candidates, cacheKey, source);
 }
 
@@ -1931,6 +1960,8 @@ export const __smartContextDebug = {
     cachedKey,
     preWarmSource,
     preWarmCachedAt,
+    preWarmEpoch,
+    cachedPreWarmEpoch,
     lastInjectedEntries,
   } = {}) => {
     if (preWarmedCandidates !== undefined)
@@ -1938,6 +1969,8 @@ export const __smartContextDebug = {
     if (cachedKey !== undefined) _preWarmCacheKey = cachedKey;
     if (preWarmSource !== undefined) _preWarmSource = preWarmSource;
     if (preWarmCachedAt !== undefined) _preWarmCachedAt = preWarmCachedAt;
+    if (preWarmEpoch !== undefined) _preWarmEpoch = preWarmEpoch;
+    if (cachedPreWarmEpoch !== undefined) _cachedPreWarmEpoch = cachedPreWarmEpoch;
     if (lastInjectedEntries !== undefined)
       _lastInjectedEntries = lastInjectedEntries;
   },

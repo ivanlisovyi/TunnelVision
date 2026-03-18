@@ -33,6 +33,76 @@ function cloneGenerationContext(context) {
     };
 }
 
+function cloneSyncEffects(effects) {
+    return {
+        invalidateActiveBookCache: effects?.invalidateActiveBookCache === true,
+        invalidateWorldInfoCache: effects?.invalidateWorldInfoCache === true,
+        invalidatePreWarmCache: effects?.invalidatePreWarmCache === true,
+        refreshUI: effects?.refreshUI === true,
+    };
+}
+
+function cloneSyncPlan(plan) {
+    if (!plan) return null;
+
+    return {
+        ...plan,
+        syncReasons: [...(plan.syncReasons || [])],
+        syncReasonCounts: { ...(plan.syncReasonCounts || {}) },
+        invalidationReasons: [...(plan.invalidationReasons || [])],
+        invalidationCounts: { ...(plan.invalidationCounts || {}) },
+        effects: cloneSyncEffects(plan.effects),
+    };
+}
+
+function createEmptySyncEffects() {
+    return {
+        invalidateActiveBookCache: false,
+        invalidateWorldInfoCache: false,
+        invalidatePreWarmCache: false,
+        refreshUI: false,
+    };
+}
+
+function appendOrderedReason(reasons, counts, reason) {
+    if (!reason) return;
+
+    if (reasons[reasons.length - 1] !== reason) {
+        reasons.push(reason);
+    }
+
+    counts[reason] = (counts[reason] || 0) + 1;
+}
+
+function mergeSyncEffects(target, source = {}) {
+    target.invalidateActiveBookCache ||= source.invalidateActiveBookCache === true;
+    target.invalidateWorldInfoCache ||= source.invalidateWorldInfoCache === true;
+    target.invalidatePreWarmCache ||= source.invalidatePreWarmCache === true;
+    target.refreshUI ||= source.refreshUI === true;
+}
+
+function buildSyncReason(reasons) {
+    if (!Array.isArray(reasons) || reasons.length === 0) {
+        return 'runtime-sync';
+    }
+
+    if (reasons.length === 1) {
+        return reasons[0];
+    }
+
+    return `coalesced:${reasons.join('+')}`;
+}
+
+function mergeReasonCounts(targetReasons, targetCounts, sourceReasons = [], sourceCounts = {}) {
+    for (const reason of sourceReasons) {
+        if (targetReasons[targetReasons.length - 1] !== reason) {
+            targetReasons.push(reason);
+        }
+
+        targetCounts[reason] = (targetCounts[reason] || 0) + (sourceCounts[reason] || 0);
+    }
+}
+
 function createInitialState() {
     return {
         initialized: false,
@@ -46,6 +116,13 @@ function createInitialState() {
         lastSyncAt: 0,
         syncInFlight: false,
         syncCount: 0,
+        pendingSyncReasons: [],
+        pendingSyncCounts: {},
+        pendingSyncEffects: createEmptySyncEffects(),
+        pendingSyncRequestedAt: 0,
+        nextSyncPlanId: 1,
+        activeSyncPlan: null,
+        lastSyncPlan: null,
         lastGenerationStartedAt: 0,
         lastGenerationContext: null,
     };
@@ -67,9 +144,11 @@ export function recordOrchestrationEvent(eventName, context = {}, now = Date.now
     _state.lastEventAt = now;
 
     if (context.invalidationReason) {
-        _state.pendingInvalidationReasons.push(context.invalidationReason);
-        _state.pendingInvalidationCounts[context.invalidationReason] =
-            (_state.pendingInvalidationCounts[context.invalidationReason] || 0) + 1;
+        appendOrderedReason(
+            _state.pendingInvalidationReasons,
+            _state.pendingInvalidationCounts,
+            context.invalidationReason,
+        );
     }
 
     if (eventName === 'generation-started') {
@@ -103,6 +182,91 @@ export function beginSync(reason, now = Date.now()) {
 
 export function completeSync() {
     _state.syncInFlight = false;
+}
+
+export function requestRuntimeSync({
+    eventName,
+    invalidationReason = null,
+    syncReason = null,
+    effects = {},
+    now = Date.now(),
+} = {}) {
+    recordOrchestrationEvent(eventName, { invalidationReason }, now);
+
+    appendOrderedReason(
+        _state.pendingSyncReasons,
+        _state.pendingSyncCounts,
+        syncReason || eventName || invalidationReason || 'runtime-sync',
+    );
+
+    mergeSyncEffects(_state.pendingSyncEffects, effects);
+
+    if (_state.pendingSyncRequestedAt === 0) {
+        _state.pendingSyncRequestedAt = now;
+    }
+
+    return getOrchestrationRuntimeSnapshot();
+}
+
+export function hasPendingRuntimeSync() {
+    return _state.pendingSyncReasons.length > 0;
+}
+
+export function beginRuntimeSyncPlan(now = Date.now()) {
+    if (_state.syncInFlight || _state.pendingSyncReasons.length === 0) {
+        return null;
+    }
+
+    const plan = {
+        id: _state.nextSyncPlanId++,
+        syncReason: buildSyncReason(_state.pendingSyncReasons),
+        syncReasons: [..._state.pendingSyncReasons],
+        syncReasonCounts: { ..._state.pendingSyncCounts },
+        invalidationReasons: [..._state.pendingInvalidationReasons],
+        invalidationCounts: { ..._state.pendingInvalidationCounts },
+        effects: cloneSyncEffects(_state.pendingSyncEffects),
+        requestedAt: _state.pendingSyncRequestedAt || now,
+    };
+
+    _state.activeSyncPlan = cloneSyncPlan(plan);
+    _state.lastSyncPlan = cloneSyncPlan(plan);
+    _state.pendingSyncReasons = [];
+    _state.pendingSyncCounts = {};
+    _state.pendingSyncEffects = createEmptySyncEffects();
+    _state.pendingSyncRequestedAt = 0;
+
+    beginSync(plan.syncReason, now);
+
+    return cloneSyncPlan(plan);
+}
+
+export function completeRuntimeSyncPlan({ requeue = false } = {}) {
+    if (requeue && _state.activeSyncPlan) {
+        const requeuedReasons = [];
+        const requeuedCounts = {};
+
+        mergeReasonCounts(
+            requeuedReasons,
+            requeuedCounts,
+            _state.activeSyncPlan.syncReasons,
+            _state.activeSyncPlan.syncReasonCounts,
+        );
+        mergeReasonCounts(
+            requeuedReasons,
+            requeuedCounts,
+            _state.pendingSyncReasons,
+            _state.pendingSyncCounts,
+        );
+
+        _state.pendingSyncReasons = requeuedReasons;
+        _state.pendingSyncCounts = requeuedCounts;
+        mergeSyncEffects(_state.activeSyncPlan.effects, _state.pendingSyncEffects);
+        _state.pendingSyncEffects = cloneSyncEffects(_state.activeSyncPlan.effects);
+        _state.pendingSyncRequestedAt ||= Date.now();
+    }
+
+    _state.activeSyncPlan = null;
+    completeSync();
 }
 
 export function updateLastGenerationContext(patch = {}) {
@@ -144,6 +308,13 @@ export function getOrchestrationRuntimeSnapshot() {
         lastSyncAt: _state.lastSyncAt,
         syncInFlight: _state.syncInFlight,
         syncCount: _state.syncCount,
+        pendingSyncReasons: [..._state.pendingSyncReasons],
+        pendingSyncCounts: { ..._state.pendingSyncCounts },
+        pendingSyncEffects: cloneSyncEffects(_state.pendingSyncEffects),
+        pendingSyncRequestedAt: _state.pendingSyncRequestedAt,
+        hasPendingSync: hasPendingRuntimeSync(),
+        activeSyncPlan: cloneSyncPlan(_state.activeSyncPlan),
+        lastSyncPlan: cloneSyncPlan(_state.lastSyncPlan),
         lastGenerationStartedAt: _state.lastGenerationStartedAt,
         lastGenerationContext: cloneGenerationContext(_state.lastGenerationContext),
     };
@@ -177,6 +348,24 @@ export const __orchestrationDebug = {
         if (patch.lastSyncAt !== undefined) _state.lastSyncAt = patch.lastSyncAt;
         if (patch.syncInFlight !== undefined) _state.syncInFlight = !!patch.syncInFlight;
         if (patch.syncCount !== undefined) _state.syncCount = patch.syncCount;
+        if (patch.pendingSyncReasons !== undefined) {
+            _state.pendingSyncReasons = Array.isArray(patch.pendingSyncReasons)
+                ? [...patch.pendingSyncReasons]
+                : [];
+        }
+        if (patch.pendingSyncCounts !== undefined) {
+            _state.pendingSyncCounts =
+                patch.pendingSyncCounts && typeof patch.pendingSyncCounts === 'object'
+                    ? { ...patch.pendingSyncCounts }
+                    : {};
+        }
+        if (patch.pendingSyncEffects !== undefined) {
+            _state.pendingSyncEffects = cloneSyncEffects(patch.pendingSyncEffects);
+        }
+        if (patch.pendingSyncRequestedAt !== undefined) _state.pendingSyncRequestedAt = patch.pendingSyncRequestedAt;
+        if (patch.nextSyncPlanId !== undefined) _state.nextSyncPlanId = patch.nextSyncPlanId;
+        if (patch.activeSyncPlan !== undefined) _state.activeSyncPlan = cloneSyncPlan(patch.activeSyncPlan);
+        if (patch.lastSyncPlan !== undefined) _state.lastSyncPlan = cloneSyncPlan(patch.lastSyncPlan);
         if (patch.lastGenerationStartedAt !== undefined) _state.lastGenerationStartedAt = patch.lastGenerationStartedAt;
         if (patch.lastGenerationContext !== undefined) {
             _state.lastGenerationContext = cloneGenerationContext(patch.lastGenerationContext);
