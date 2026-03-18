@@ -78,6 +78,7 @@ import {
     runPostTurnProcessor,
     shouldInvalidateSmartContextPreWarm,
     refreshSmartContextAfterPostTurn,
+    auditPostTurnProcessorRuntime,
 } from '../post-turn-processor.js';
 import { getSettings } from '../tree-store.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook } from '../tool-registry.js';
@@ -509,5 +510,116 @@ describe('refreshSmartContextAfterPostTurn', () => {
         const invalidateOrder = invalidatePreWarmCache.mock.invocationCallOrder[0];
         const prewarmOrder = preWarmSmartContext.mock.invocationCallOrder[0];
         expect(invalidateOrder).toBeLessThan(prewarmOrder);
+    });
+});
+
+describe('auditPostTurnProcessorRuntime', () => {
+    it('returns an info finding when processor metadata is healthy', () => {
+        getContext.mockReturnValue({
+            chat: [{ is_user: true, mes: 'Hi' }, { is_user: false, mes: 'Hello' }],
+            chatMetadata: {},
+            saveMetadataDebounced: vi.fn(),
+        });
+        getSettings.mockReturnValue({
+            postTurnEnabled: true,
+            globalEnabled: true,
+            postTurnCooldown: 1,
+        });
+        getActiveTunnelVisionBooks.mockReturnValue(['test-book']);
+
+        const audit = auditPostTurnProcessorRuntime();
+
+        expect(audit.group).toBe('post-turn-processor-integrity');
+        expect(audit.ok).toBe(true);
+        expect(audit.summary).toBe('Post-turn processor audit passed.');
+        expect(audit.findings).toHaveLength(1);
+        expect(audit.findings[0]).toMatchObject({
+            id: 'postturn-runtime-valid',
+            severity: 'info',
+            subsystem: 'post-turn-processor',
+        });
+        expect(audit.safeRepairs).toEqual([]);
+        expect(audit.requiresConfirmation).toEqual([]);
+    });
+
+    it('reports malformed persisted metadata as an integrity error', () => {
+        getContext.mockReturnValue({
+            chat: [{ is_user: true, mes: 'Hi' }, { is_user: false, mes: 'Hello' }],
+            chatMetadata: {
+                tunnelvision_postturn: 'broken-metadata',
+            },
+            saveMetadataDebounced: vi.fn(),
+        });
+        getSettings.mockReturnValue({
+            postTurnEnabled: true,
+            globalEnabled: true,
+            postTurnCooldown: 1,
+        });
+        getActiveTunnelVisionBooks.mockReturnValue(['test-book']);
+
+        const audit = auditPostTurnProcessorRuntime();
+
+        expect(audit.ok).toBe(false);
+        expect(audit.summary).toBe('Post-turn processor audit found integrity issues.');
+        expect(audit.findings.some(finding =>
+            finding.id === 'postturn-invalid-metadata'
+            && finding.reasonCode === 'invalid_persisted_metadata'
+            && finding.severity === 'error'
+        )).toBe(true);
+        expect(audit.requiresConfirmation).toEqual([
+            expect.objectContaining({
+                id: 'rebuild-postturn-metadata',
+                repairClass: 'explicit',
+            }),
+        ]);
+    });
+
+    it('reports malformed rollback payloads and invalid tracker hash metadata', () => {
+        getContext.mockReturnValue({
+            chat: [{ is_user: true, mes: 'Hi' }, { is_user: false, mes: 'Hello' }],
+            chatMetadata: {
+                tunnelvision_postturn: {
+                    lastProcessedMsgIdx: 0,
+                    rollback: {
+                        book: 'test-book',
+                        createdUids: ['oops'],
+                    },
+                },
+                tunnelvision_tracker_hashes: {
+                    'test-book:7': {
+                        hash: 'bad-hash',
+                        timestamp: 123,
+                    },
+                },
+            },
+            saveMetadataDebounced: vi.fn(),
+        });
+        getSettings.mockReturnValue({
+            postTurnEnabled: true,
+            globalEnabled: true,
+            postTurnCooldown: 1,
+        });
+        getActiveTunnelVisionBooks.mockReturnValue(['test-book']);
+
+        const audit = auditPostTurnProcessorRuntime();
+
+        expect(audit.ok).toBe(false);
+        expect(audit.findings.some(finding =>
+            finding.id === 'postturn-rollback-mismatch'
+            && finding.reasonCode === 'rollback_mismatch'
+            && finding.severity === 'error'
+        )).toBe(true);
+        expect(audit.findings.some(finding =>
+            finding.reasonCode === 'stale_tracker_metadata'
+            && (finding.id === 'postturn-tracker-hash-entry-fields-invalid' || finding.id === 'postturn-tracker-hash-metadata-invalid')
+        )).toBe(true);
+        expect(audit.requiresConfirmation).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    id: 'clear-postturn-rollback',
+                    repairClass: 'explicit',
+                }),
+            ]),
+        );
     });
 });

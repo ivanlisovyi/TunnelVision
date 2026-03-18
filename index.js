@@ -37,23 +37,43 @@ import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
 import { initCommands } from './commands.js';
 import { initAutoSummary } from './auto-summary.js';
+import {
+    beginInitialization,
+    completeInitialization,
+    recordOrchestrationEvent,
+    consumePendingInvalidationState,
+    beginSync,
+    completeSync,
+    updateLastGenerationContext,
+    recordGenerationPreflightSummary,
+    getOrchestrationRuntimeSnapshot,
+    __orchestrationDebug,
+} from './runtime-orchestration.js';
 
 const EXTENSION_NAME = 'tunnelvision';
 const EXTENSION_FOLDER = `third-party/TunnelVision`;
 
 async function syncToolRegistration(reason) {
-    const settings = getSettings();
-    if (settings.globalEnabled === false) {
-        unregisterTools();
-        console.log(`[TunnelVision] Tools unregistered (${reason}: extension disabled)`);
-        return;
-    }
+    beginSync(reason);
 
-    await registerTools();
-    console.log(`[TunnelVision] Tool registration synced (${reason})`);
+    try {
+        const settings = getSettings();
+        if (settings.globalEnabled === false) {
+            unregisterTools();
+            console.log(`[TunnelVision] Tools unregistered (${reason}: extension disabled)`);
+            return;
+        }
+
+        await registerTools();
+        console.log(`[TunnelVision] Tool registration synced (${reason})`);
+    } finally {
+        completeSync();
+    }
 }
 
 async function init() {
+    beginInitialization();
+
     // Ensure settings exist
     getSettings();
 
@@ -137,10 +157,13 @@ async function init() {
         eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
     }
 
+    completeInitialization();
+
     console.log('[TunnelVision] Extension loaded');
 }
 
 async function onChatChanged() {
+    recordOrchestrationEvent('chat-changed', { invalidationReason: 'chat_changed' });
     invalidateActiveBookCache();
     invalidateWorldInfoCache();
     invalidatePreWarmCache();
@@ -149,6 +172,7 @@ async function onChatChanged() {
 }
 
 async function onWorldInfoUpdated() {
+    recordOrchestrationEvent('worldinfo-updated', { invalidationReason: 'worldinfo_updated' });
     invalidateActiveBookCache();
     invalidateWorldInfoCache();
     invalidatePreWarmCache();
@@ -157,6 +181,7 @@ async function onWorldInfoUpdated() {
 }
 
 async function onAppReady() {
+    recordOrchestrationEvent('app-ready');
     await syncToolRegistration('app-ready');
 }
 
@@ -259,9 +284,25 @@ function stripOldToolResults() {
  * generations.
  */
 async function onGenerationStarted(type, opts) {
+    const consumedInvalidations = consumePendingInvalidationState();
+    recordOrchestrationEvent('generation-started', {
+        generationType: type || null,
+        hasOptions: !!opts,
+        invalidationReason: 'generation_started',
+        consumedInvalidationReasons: consumedInvalidations.reasons,
+        consumedInvalidationCounts: consumedInvalidations.counts,
+    });
+
     const { settings, isRecursiveToolPass } = await handleGenerationStartedPromptInjection({
         stripOldToolResults,
         preflightToolRuntimeState,
+    });
+
+    updateLastGenerationContext({
+        promptInjectionPrepared: true,
+        isRecursiveToolPass: !!isRecursiveToolPass,
+        mandatoryToolsEnabled: settings?.mandatoryTools === true,
+        globalEnabled: settings?.globalEnabled !== false,
     });
 
     if (
@@ -270,6 +311,8 @@ async function onGenerationStarted(type, opts) {
         && settings?.mandatoryTools
     ) {
         const runtimeState = await preflightToolRuntimeState({ repair: true, reason: 'generation', log: true });
+
+        recordGenerationPreflightSummary(runtimeState);
 
         if (
             runtimeState.activeBooks.length > 0
@@ -280,6 +323,8 @@ async function onGenerationStarted(type, opts) {
         }
     }
 }
+
+export { getOrchestrationRuntimeSnapshot, __orchestrationDebug };
 
 // Initialize
 await init();

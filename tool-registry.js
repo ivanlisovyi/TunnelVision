@@ -12,6 +12,15 @@ import { getCharaFilename } from '../../../utils.js';
 import { callGenericPopup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { isLorebookEnabled, getSettings, getTree, getBookDescription, syncTrackerUidsForLorebook } from './tree-store.js';
 import { escapeHtml } from './entry-manager.js';
+import {
+    RUNTIME_AUDIT_GROUPS,
+    RUNTIME_AUDIT_SEVERITIES,
+    RUNTIME_REASON_CODES,
+    RUNTIME_REPAIR_CLASSES,
+    createRuntimeAuditResult,
+    createRuntimeFinding,
+    createRuntimeRepair,
+} from './runtime-health.js';
 
 import { getDefinition as getSearchDef, getTreeOverview, TOOL_NAME as SEARCH_NAME } from './tools/search.js';
 import { getDefinition as getRememberDef, TOOL_NAME as REMEMBER_NAME } from './tools/remember.js';
@@ -55,6 +64,7 @@ const CONFIRMABLE_TOOLS = new Set([REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, SUMM
 /** Cached tracker list string — refreshed on each registerTools() call. */
 let _trackerListCache = '';
 let _lastAppliedRegistrationSignature = null;
+let _lastComputedRegistrationSignature = null;
 
 function getAllToolDefinitions() {
     return [
@@ -226,6 +236,12 @@ async function inspectToolRuntimeState() {
         stealthToolNames,
         eligibleToolNames,
         eligibilityErrors,
+        lastAppliedRegistrationSignature: _lastAppliedRegistrationSignature,
+        lastComputedRegistrationSignature: _lastComputedRegistrationSignature,
+        registerVersion: _registerVersion,
+        hasRegisterLock: Boolean(_registerLock),
+        trackerListCached: Boolean(_trackerListCache),
+        trackerListLength: _trackerListCache.length,
     };
 }
 
@@ -251,8 +267,12 @@ function logToolRuntimeSnapshot(snapshot, reason = 'runtime') {
     }
 }
 
+export async function getToolRegistrationRuntimeSnapshot() {
+    return await inspectToolRuntimeState();
+}
+
 export async function preflightToolRuntimeState({ repair = true, reason = 'generation', log = true } = {}) {
-    let snapshot = await inspectToolRuntimeState();
+    let snapshot = await getToolRegistrationRuntimeSnapshot();
     let repairApplied = false;
 
     if (
@@ -262,7 +282,7 @@ export async function preflightToolRuntimeState({ repair = true, reason = 'gener
     ) {
         await registerTools();
         repairApplied = true;
-        snapshot = await inspectToolRuntimeState();
+        snapshot = await getToolRegistrationRuntimeSnapshot();
     }
 
     const failureReasons = [];
@@ -289,6 +309,157 @@ export async function preflightToolRuntimeState({ repair = true, reason = 'gener
         logToolRuntimeSnapshot(result, reason);
     }
     return result;
+}
+
+export async function auditToolRegistrationRuntime({ repair = false, reason = 'diagnostics' } = {}) {
+    const snapshot = await preflightToolRuntimeState({ repair, reason, log: false });
+    const findings = [];
+    const safeRepairs = [];
+
+    if (snapshot.activeBooks.length === 0) {
+        return createRuntimeAuditResult({
+            group: RUNTIME_AUDIT_GROUPS.REGISTRATION,
+            ok: true,
+            summary: 'No active TunnelVision lorebooks; registration state is idle.',
+            findings: [
+                createRuntimeFinding({
+                    id: 'registration-idle',
+                    subsystem: 'tool-registry',
+                    severity: RUNTIME_AUDIT_SEVERITIES.INFO,
+                    message: 'No active TunnelVision lorebooks are selected, so no registration is required.',
+                    context: {
+                        activeBooks: snapshot.activeBooks,
+                    },
+                }),
+            ],
+            context: snapshot,
+        });
+    }
+
+    if (snapshot.expectedToolNames.length === 0) {
+        findings.push(createRuntimeFinding({
+            id: 'registration-no-enabled-tools',
+            subsystem: 'tool-registry',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: 'All TunnelVision tools are disabled in settings, so none are expected to be registered.',
+            reasonCode: RUNTIME_REASON_CODES.ELIGIBILITY_MISMATCH,
+            context: {
+                disabledToolNames: snapshot.disabledToolNames,
+                expectedToolNames: snapshot.expectedToolNames,
+            },
+        }));
+    }
+
+    if (snapshot.missingToolNames.length > 0) {
+        findings.push(createRuntimeFinding({
+            id: 'registration-missing-tools',
+            subsystem: 'tool-registry',
+            severity: snapshot.registeredToolNames.length === 0 ? RUNTIME_AUDIT_SEVERITIES.ERROR : RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: `Missing registered TunnelVision tools: ${snapshot.missingToolNames.join(', ')}`,
+            reasonCode: RUNTIME_REASON_CODES.MISSING_REGISTRATION,
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            repairActionId: 'rebuild-tool-registration',
+            context: {
+                missingToolNames: snapshot.missingToolNames,
+                expectedToolNames: snapshot.expectedToolNames,
+                registeredToolNames: snapshot.registeredToolNames,
+            },
+        }));
+        safeRepairs.push(createRuntimeRepair({
+            id: 'rebuild-tool-registration',
+            label: 'Rebuild active tool registration',
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            reasonCode: RUNTIME_REASON_CODES.MISSING_REGISTRATION,
+            context: {
+                reason,
+            },
+        }));
+    }
+
+    if (snapshot.stealthToolNames.length > 0) {
+        findings.push(createRuntimeFinding({
+            id: 'registration-stealth-tools',
+            subsystem: 'tool-registry',
+            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+            message: `TunnelVision tools unexpectedly marked as stealth: ${snapshot.stealthToolNames.join(', ')}`,
+            reasonCode: RUNTIME_REASON_CODES.STEALTH_REGISTRATION,
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            repairActionId: 'rebuild-tool-registration',
+            context: {
+                stealthToolNames: snapshot.stealthToolNames,
+            },
+        }));
+        if (!safeRepairs.some(repairAction => repairAction.id === 'rebuild-tool-registration')) {
+            safeRepairs.push(createRuntimeRepair({
+                id: 'rebuild-tool-registration',
+                label: 'Rebuild active tool registration',
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                reasonCode: RUNTIME_REASON_CODES.STEALTH_REGISTRATION,
+                context: {
+                    reason,
+                },
+            }));
+        }
+    }
+
+    if (snapshot.eligibilityErrors.length > 0) {
+        findings.push(createRuntimeFinding({
+            id: 'registration-eligibility-errors',
+            subsystem: 'tool-registry',
+            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+            message: `Tool eligibility checks failed: ${snapshot.eligibilityErrors.join(' | ')}`,
+            reasonCode: RUNTIME_REASON_CODES.ELIGIBILITY_MISMATCH,
+            context: {
+                eligibilityErrors: snapshot.eligibilityErrors,
+            },
+        }));
+    }
+
+    if (snapshot.expectedToolNames.length > 0 && snapshot.eligibleToolNames.length === 0) {
+        findings.push(createRuntimeFinding({
+            id: 'registration-no-eligible-tools',
+            subsystem: 'tool-registry',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: 'No TunnelVision tools are currently eligible for the next generation despite active lorebooks.',
+            reasonCode: RUNTIME_REASON_CODES.ELIGIBILITY_MISMATCH,
+            context: {
+                activeBooks: snapshot.activeBooks,
+                expectedToolNames: snapshot.expectedToolNames,
+                eligibleToolNames: snapshot.eligibleToolNames,
+            },
+        }));
+    }
+
+    if (
+        snapshot.lastAppliedRegistrationSignature
+        && snapshot.lastComputedRegistrationSignature
+        && snapshot.lastAppliedRegistrationSignature === snapshot.lastComputedRegistrationSignature
+        && snapshot.missingToolNames.length === 0
+        && snapshot.stealthToolNames.length === 0
+    ) {
+        findings.push(createRuntimeFinding({
+            id: 'registration-signature-stable',
+            subsystem: 'tool-registry',
+            severity: RUNTIME_AUDIT_SEVERITIES.INFO,
+            message: 'Tool registration signature is stable for the current runtime inputs.',
+            context: {
+                registrationSignature: snapshot.lastAppliedRegistrationSignature,
+            },
+        }));
+    }
+
+    return createRuntimeAuditResult({
+        group: RUNTIME_AUDIT_GROUPS.REGISTRATION,
+        ok: findings.every(finding => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR),
+        summary: snapshot.failureReasons.length > 0
+            ? `Tool registration audit found ${snapshot.failureReasons.length} runtime issue(s).`
+            : findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN)
+                ? 'Tool registration audit found coordination issues.'
+                : 'Tool registration audit passed.',
+        findings,
+        safeRepairs,
+        context: snapshot,
+    });
 }
 
 /**
@@ -514,6 +685,7 @@ async function _doRegisterTools() {
     }
 
     const signature = buildRegistrationSignature(preparedTools, activeBooks);
+    _lastComputedRegistrationSignature = signature;
     if (signature === _lastAppliedRegistrationSignature) {
         console.debug('[TunnelVision] Tool registration skipped: definitions unchanged');
         return;
@@ -553,6 +725,7 @@ export function unregisterTools() {
         }
     }
     _lastAppliedRegistrationSignature = null;
+    _lastComputedRegistrationSignature = null;
 }
 
 /**

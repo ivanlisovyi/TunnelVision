@@ -34,6 +34,15 @@ import {
     MAX_ENTRIES_PER_TURN,
     MAX_VERSIONS_PER_ENTRY,
 } from './constants.js';
+import {
+    RUNTIME_AUDIT_GROUPS,
+    RUNTIME_AUDIT_SEVERITIES,
+    RUNTIME_REASON_CODES,
+    RUNTIME_REPAIR_CLASSES,
+    createRuntimeAuditResult,
+    createRuntimeFinding,
+    createRuntimeRepair,
+} from './runtime-health.js';
 
 /**
  * Unified keyword generation instructions, used across all entry creation prompts.
@@ -129,6 +138,10 @@ export const FACT_EXTRACTION_PROMPT = [
 const _worldInfoCache = new Map();
 const _dirtyBooks = new Set();
 
+function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 /**
  * Load world info with per-turn caching. Avoids redundant disk reads
  * when multiple tool actions reference the same lorebook in one generation.
@@ -190,6 +203,141 @@ export async function persistWorldInfo(bookName, bookData) {
     await saveWorldInfo(bookName, bookData, true);
     invalidateWorldInfoCache(bookName);
     return bookData;
+}
+
+export function getEntryManagerRuntimeSnapshot() {
+    return {
+        cacheKeys: [..._worldInfoCache.keys()],
+        dirtyBooks: [..._dirtyBooks],
+        cachedEntries: [..._worldInfoCache.entries()],
+    };
+}
+
+export function auditEntryManagerRuntime(snapshot = getEntryManagerRuntimeSnapshot()) {
+    const findings = [];
+    const safeRepairs = [];
+    const { cacheKeys, dirtyBooks, cachedEntries } = snapshot;
+
+    for (const [bookName, bookData] of cachedEntries) {
+        if (typeof bookName !== 'string' || !bookName.trim()) {
+            findings.push(createRuntimeFinding({
+                id: 'entrymanager-invalid-cache-key',
+                subsystem: 'entry-manager',
+                severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+                message: 'World-info cache contains an invalid ownership key.',
+                reasonCode: RUNTIME_REASON_CODES.CACHE_OWNER_CONFLICT,
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                repairActionId: 'reset-entry-manager-cache',
+                context: { bookName },
+            }));
+            continue;
+        }
+
+        if (!isPlainObject(bookData)) {
+            findings.push(createRuntimeFinding({
+                id: 'entrymanager-invalid-cache-value',
+                subsystem: 'entry-manager',
+                severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+                message: `World-info cache entry for "${bookName}" is malformed.`,
+                reasonCode: RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                repairActionId: 'reset-entry-manager-cache',
+                context: { bookName, valueType: typeof bookData },
+            }));
+            continue;
+        }
+
+        if (!isPlainObject(bookData.entries)) {
+            findings.push(createRuntimeFinding({
+                id: 'entrymanager-missing-entries-map',
+                subsystem: 'entry-manager',
+                severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+                message: `World-info cache entry for "${bookName}" does not expose a valid entries map.`,
+                reasonCode: RUNTIME_REASON_CODES.DERIVED_CONTEXT_MISMATCH,
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                repairActionId: 'reset-entry-manager-cache',
+                context: { bookName },
+            }));
+        }
+    }
+
+    for (const bookName of _dirtyBooks.values()) {
+        if (typeof bookName !== 'string' || !bookName.trim()) {
+            findings.push(createRuntimeFinding({
+                id: 'entrymanager-invalid-dirty-book',
+                subsystem: 'entry-manager',
+                severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+                message: 'Dirty-book invalidation state contains an invalid ownership entry.',
+                reasonCode: RUNTIME_REASON_CODES.CACHE_OWNER_CONFLICT,
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                repairActionId: 'reset-entry-manager-cache',
+                context: { bookName },
+            }));
+            continue;
+        }
+
+        if (_worldInfoCache.has(bookName)) {
+            findings.push(createRuntimeFinding({
+                id: 'entrymanager-dirty-book-still-cached',
+                subsystem: 'entry-manager',
+                severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+                message: `Dirty lorebook "${bookName}" is still present in the active cache.`,
+                reasonCode: RUNTIME_REASON_CODES.CACHE_OWNER_CONFLICT,
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                repairActionId: 'invalidate-dirty-worldinfo-cache',
+                context: { bookName },
+            }));
+        }
+    }
+
+    if (findings.length > 0) {
+        safeRepairs.push(createRuntimeRepair({
+            id: 'invalidate-dirty-worldinfo-cache',
+            label: 'Invalidate dirty world-info cache entries',
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            reasonCode: RUNTIME_REASON_CODES.CACHE_OWNER_CONFLICT,
+            context: { dirtyBooks },
+        }));
+
+        safeRepairs.push(createRuntimeRepair({
+            id: 'reset-entry-manager-cache',
+            label: 'Reset all entry-manager world-info caches',
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            reasonCode: findings[0]?.reasonCode || RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+            context: { cacheKeys, dirtyBooks },
+        }));
+    } else {
+        findings.push(createRuntimeFinding({
+            id: 'entrymanager-runtime-valid',
+            subsystem: 'entry-manager',
+            severity: RUNTIME_AUDIT_SEVERITIES.INFO,
+            message: 'Entry-manager cache ownership and dirty-book invalidation state validated.',
+            context: {
+                cacheKeys,
+                dirtyBooks,
+                cachedBookCount: cacheKeys.length,
+                dirtyBookCount: dirtyBooks.length,
+            },
+        }));
+    }
+
+    return createRuntimeAuditResult({
+        group: RUNTIME_AUDIT_GROUPS.METADATA,
+        ok: findings.every(finding => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR),
+        summary: findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.ERROR)
+            ? 'Entry-manager audit found integrity issues.'
+            : findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN)
+                ? 'Entry-manager audit found coordination issues.'
+                : 'Entry-manager audit passed.',
+        findings,
+        safeRepairs,
+        requiresConfirmation: [],
+        context: {
+            ...snapshot,
+            cachedBookCount: cacheKeys.length,
+            dirtyBookCount: dirtyBooks.length,
+        },
+    });
 }
 
 // ── Turn-Scoped Rate Limiter ─────────────────────────────────────

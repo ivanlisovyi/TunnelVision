@@ -63,7 +63,7 @@ vi.mock('../../../st-context.js', () => ({
     }),
 }));
 
-import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD, buildSmartContextPrompt, preWarmSmartContext } from '../smart-context.js';
+import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD, buildSmartContextPrompt, preWarmSmartContext, auditSmartContextRuntime, getSmartContextRuntimeSnapshot, __smartContextDebug } from '../smart-context.js';
 import { addBackgroundEvent, addEntryActivationEvents } from '../background-events.js';
 
 beforeEach(() => {
@@ -81,6 +81,14 @@ beforeEach(() => {
     };
     vi.mocked(addBackgroundEvent).mockClear();
     vi.mocked(addEntryActivationEvents).mockClear();
+    __smartContextDebug.setRuntimeSnapshotState({
+        preWarmedCandidates: null,
+        cachedKey: null,
+        preWarmSource: 'smart-context',
+        preWarmCachedAt: 0,
+        lastInjectedEntries: [],
+    });
+    __smartContextDebug.clearDerivedKeyCache();
 });
 
 // ── scoreEntry ───────────────────────────────────────────────────
@@ -770,5 +778,122 @@ describe('preWarmSmartContext', () => {
         await preWarmSmartContext();
 
         expect(mockState.cachedWorldInfoCalls).toEqual([]);
+    });
+
+    describe('getSmartContextRuntimeSnapshot', () => {
+        it('returns a structured snapshot of current smart-context runtime state', () => {
+            mockState.activeBooks = ['Book A'];
+            mockChat.push(
+                { is_user: true, mes: 'Tell me about Elena.' },
+                { is_user: false, mes: 'Elena trained at the Grand Cathedral.' },
+            );
+
+            __smartContextDebug.setRuntimeSnapshotState({
+                preWarmedCandidates: [{ entry: makeEntry(), score: 12, bookName: 'Book A', isTracker: false, isSummary: false }],
+                cachedKey: 'snapshot-key',
+                preWarmSource: 'smart-context',
+                preWarmCachedAt: Date.now(),
+                lastInjectedEntries: [{ uid: 1, title: 'Elena', keys: ['elena'], bookName: 'Book A' }],
+            });
+
+            const snapshot = getSmartContextRuntimeSnapshot();
+
+            expect(snapshot).toMatchObject({
+                activeBooks: ['Book A'],
+                chatLength: 2,
+                cachedKey: 'snapshot-key',
+                preWarmSource: 'smart-context',
+                preWarmedCandidateCount: 1,
+                injectedEntryCount: 1,
+            });
+            expect(Array.isArray(snapshot.preWarmedCandidates)).toBe(true);
+            expect(Array.isArray(snapshot.lastInjectedEntries)).toBe(true);
+        });
+    });
+
+    describe('auditSmartContextRuntime', () => {
+        it('returns an info finding when smart-context state is healthy', () => {
+            mockState.activeBooks = ['Book A'];
+            mockChat.push(
+                { is_user: true, mes: 'Tell me about Elena.' },
+                { is_user: false, mes: 'Elena trained at the Grand Cathedral.' },
+            );
+
+            const audit = auditSmartContextRuntime();
+
+            expect(audit.group).toBe('smart-context-integrity');
+            expect(audit.ok).toBe(true);
+            expect(audit.summary).toBe('Smart-context audit passed.');
+            expect(audit.findings).toHaveLength(1);
+            expect(audit.findings[0]).toMatchObject({
+                id: 'smartcontext-runtime-valid',
+                severity: 'info',
+                subsystem: 'smart-context',
+            });
+            expect(audit.safeRepairs).toEqual([]);
+        });
+
+        it('reports malformed prewarm cache state as an integrity error', () => {
+            mockState.activeBooks = ['Book A'];
+            mockChat.push(
+                { is_user: true, mes: 'What does Elena know?' },
+                { is_user: false, mes: 'She knows the cathedral well.' },
+            );
+
+            __smartContextDebug.setRuntimeSnapshotState({
+                preWarmedCandidates: { broken: true },
+                cachedKey: null,
+                preWarmCachedAt: Date.now(),
+            });
+
+            const audit = auditSmartContextRuntime();
+
+            expect(audit.ok).toBe(false);
+            expect(audit.summary).toBe('Smart-context audit found integrity issues.');
+            expect(audit.findings.some(finding =>
+                finding.id === 'smartcontext-prewarm-cache-malformed'
+                && finding.reasonCode === 'stale_cache_epoch'
+                && finding.severity === 'error'
+            )).toBe(true);
+            expect(audit.safeRepairs).toEqual([
+                expect.objectContaining({
+                    id: 'reset-smart-context-cache',
+                    repairClass: 'safe_auto',
+                }),
+            ]);
+        });
+
+        it('reports stale prewarm cache keys and invalid injected-entry bookkeeping', () => {
+            mockState.activeBooks = ['Book A'];
+            mockChat.push(
+                { is_user: true, mes: 'Elena entered the archive.' },
+                { is_user: false, mes: 'The archive was hidden below the cathedral.' },
+            );
+
+            __smartContextDebug.setRuntimeSnapshotState({
+                preWarmedCandidates: [{ entry: makeEntry(), score: 10, bookName: 'Book A', isTracker: false, isSummary: false }],
+                cachedKey: 'stale-key',
+                preWarmCachedAt: Date.now(),
+                lastInjectedEntries: [{ uid: 'bad-uid' }],
+            });
+
+            const audit = auditSmartContextRuntime();
+
+            expect(audit.ok).toBe(true);
+            expect(audit.findings.some(finding =>
+                finding.id === 'smartcontext-stale-cache-key'
+                && finding.reasonCode === 'stale_cache_epoch'
+                && finding.severity === 'warn'
+            )).toBe(true);
+            expect(audit.findings.some(finding =>
+                finding.id === 'smartcontext-injection-bookkeeping-invalid-entry'
+                && finding.reasonCode === 'derived_context_mismatch'
+                && finding.severity === 'warn'
+            )).toBe(true);
+            expect(audit.reasonCodes).toEqual(expect.arrayContaining([
+                'stale_cache_epoch',
+                'derived_context_mismatch',
+            ]));
+        });
     });
 });

@@ -21,8 +21,18 @@ import {
     findConnectionProfile,
 } from './tree-store.js';
 import { getContext } from '../../../st-context.js';
-import { getActiveTunnelVisionBooks, ALL_TOOL_NAMES, CONFIRMABLE_TOOLS, preflightToolRuntimeState } from './tool-registry.js';
+import {
+    getActiveTunnelVisionBooks,
+    ALL_TOOL_NAMES,
+    CONFIRMABLE_TOOLS,
+    preflightToolRuntimeState,
+} from './tool-registry.js';
 import { buildUidMap, getCachedWorldInfo } from './entry-manager.js';
+import { runRuntimeAuditDiagnostics } from './runtime-diagnostics.js';
+
+async function checkRuntimeAuditIntegrity() {
+    return await runRuntimeAuditDiagnostics();
+}
 
 
 /**
@@ -66,6 +76,7 @@ export async function runDiagnostics() {
     await collect(checkEntryUidsValid);
     await collect(checkTreesValid);
     await collect(checkToolRuntimeDuringDiagnostics);
+    await collect(checkRuntimeAuditIntegrity);
     await collect(checkTrackerUids);
 
     // Phase 3: Independent read-only checks (parallel for speed)

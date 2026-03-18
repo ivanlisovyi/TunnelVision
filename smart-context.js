@@ -38,6 +38,15 @@ import { getCachedWorldInfoSync, getCachedWorldInfo } from "./entry-manager.js";
 import { getEntryTitle, getMaxContextTokens } from "./agent-utils.js";
 import { getWorldStateSections } from "./world-state.js";
 import { getActiveArcs } from "./arc-tracker.js";
+import {
+  RUNTIME_AUDIT_GROUPS,
+  RUNTIME_AUDIT_SEVERITIES,
+  RUNTIME_REASON_CODES,
+  RUNTIME_REPAIR_CLASSES,
+  createRuntimeAuditResult,
+  createRuntimeFinding,
+  createRuntimeRepair,
+} from "./runtime-health.js";
 import { addBackgroundEvent, addEntryActivationEvents } from "./background-events.js";
 import {
   shuffleArray,
@@ -132,6 +141,270 @@ export function invalidatePreWarmCache() {
   _lastReportedPreWarmKey = null;
   _lastReportedInjectionKey = null;
   _derivedKeyCache.clear();
+}
+
+export function getSmartContextRuntimeSnapshot() {
+  const cacheKey = buildPreWarmCacheKey();
+  const activeBooks = getActiveTunnelVisionBooks();
+  const settings = getSettings();
+  const context = getContext();
+  const chatLength = context?.chat?.length || 0;
+  const cacheAgeMs = _preWarmCachedAt
+    ? Math.max(Date.now() - _preWarmCachedAt, 0)
+    : null;
+  const cacheFresh = cacheKey ? isPreWarmCacheFresh(cacheKey) : false;
+
+  return {
+    activeBooks,
+    chatLength,
+    settings,
+    cacheKey,
+    cachedKey: _preWarmCacheKey,
+    cacheFresh,
+    cacheAgeMs,
+    preWarmSource: _preWarmSource,
+    preWarmedCandidates: _preWarmedCandidates,
+    preWarmedCandidateCount: Array.isArray(_preWarmedCandidates)
+      ? _preWarmedCandidates.length
+      : null,
+    preWarmCachedAt: _preWarmCachedAt,
+    lastInjectedEntries: _lastInjectedEntries,
+    injectedEntryCount: Array.isArray(_lastInjectedEntries)
+      ? _lastInjectedEntries.length
+      : null,
+    derivedKeyCacheSize: _derivedKeyCache.size,
+  };
+}
+
+export function auditSmartContextRuntime(snapshot = getSmartContextRuntimeSnapshot()) {
+  const findings = [];
+  const safeRepairs = [];
+  const {
+    cacheKey,
+    activeBooks,
+    settings,
+    chatLength,
+    cacheAgeMs,
+    cacheFresh,
+    preWarmedCandidates,
+    cachedKey,
+    preWarmSource,
+    preWarmCachedAt,
+    lastInjectedEntries,
+    derivedKeyCacheSize,
+  } = snapshot;
+
+  if (
+    preWarmedCandidates != null
+    && !Array.isArray(preWarmedCandidates)
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-prewarm-cache-malformed",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+      message: "Smart-context prewarm cache is malformed.",
+      reasonCode: RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        cacheType: typeof preWarmedCandidates,
+      },
+    }));
+  }
+
+  if (
+    Array.isArray(preWarmedCandidates)
+    && preWarmedCandidates.length > 0
+    && !cachedKey
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-missing-cache-key",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+      message: "Smart-context prewarm candidates exist without a cache key.",
+      reasonCode: RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        candidateCount: preWarmedCandidates.length,
+      },
+    }));
+  }
+
+  if (
+    Array.isArray(preWarmedCandidates)
+    && preWarmedCandidates.length > 0
+    && cachedKey
+    && cacheKey
+    && cachedKey !== cacheKey
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-stale-cache-key",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+      message: "Smart-context prewarm cache key no longer matches current runtime inputs.",
+      reasonCode: RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        cachedKey,
+        expectedKey: cacheKey,
+        cacheAgeMs,
+      },
+    }));
+  }
+
+  if (
+    Array.isArray(preWarmedCandidates)
+    && preWarmedCandidates.length > 0
+    && preWarmCachedAt
+    && !cacheFresh
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-expired-cache",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+      message: "Smart-context prewarm cache is older than the allowed freshness window.",
+      reasonCode: RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        cacheAgeMs,
+        maxAgeMs: PREWARM_CACHE_MAX_AGE_MS,
+      },
+    }));
+  }
+
+  if (
+    cachedKey == null
+    && preWarmCachedAt > 0
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-cache-owner-conflict",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+      message: "Smart-context cache freshness metadata exists without cache ownership state.",
+      reasonCode: RUNTIME_REASON_CODES.CACHE_OWNER_CONFLICT,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        preWarmCachedAt,
+        preWarmSource,
+      },
+    }));
+  }
+
+  if (
+    lastInjectedEntries != null
+    && !Array.isArray(lastInjectedEntries)
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-injection-bookkeeping-malformed",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
+      message: "Smart-context injected-entry bookkeeping is malformed.",
+      reasonCode: RUNTIME_REASON_CODES.DERIVED_CONTEXT_MISMATCH,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        injectedEntriesType: typeof lastInjectedEntries,
+      },
+    }));
+  }
+
+  if (
+    Array.isArray(lastInjectedEntries)
+    && lastInjectedEntries.some(entry => !entry || typeof entry !== "object" || !Number.isFinite(entry.uid))
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-injection-bookkeeping-invalid-entry",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+      message: "Smart-context injected-entry bookkeeping contains invalid entry metadata.",
+      reasonCode: RUNTIME_REASON_CODES.DERIVED_CONTEXT_MISMATCH,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        injectedEntries: lastInjectedEntries,
+      },
+    }));
+  }
+
+  if (
+    derivedKeyCacheSize > 0
+    && activeBooks.length === 0
+  ) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-derived-key-cache-without-books",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+      message: "Derived smart-context key cache is populated even though no active lorebooks are selected.",
+      reasonCode: RUNTIME_REASON_CODES.CACHE_OWNER_CONFLICT,
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      repairActionId: "reset-smart-context-cache",
+      context: {
+        derivedKeyCacheSize,
+      },
+    }));
+  }
+
+  if (findings.length > 0) {
+    safeRepairs.push(createRuntimeRepair({
+      id: "reset-smart-context-cache",
+      label: "Reset smart-context caches and derived bookkeeping",
+      repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+      reasonCode:
+        findings[0]?.reasonCode || RUNTIME_REASON_CODES.STALE_CACHE_EPOCH,
+      context: {
+        activeBooks,
+        chatLength,
+      },
+    }));
+  }
+
+  if (findings.length === 0) {
+    findings.push(createRuntimeFinding({
+      id: "smartcontext-runtime-valid",
+      subsystem: "smart-context",
+      severity: RUNTIME_AUDIT_SEVERITIES.INFO,
+      message: "Smart-context cache freshness and bookkeeping validated.",
+      context: {
+        activeBooks,
+        chatLength,
+        cacheKey,
+        cacheFresh,
+        cacheAgeMs,
+        preWarmSource,
+        smartContextEnabled: settings.smartContextEnabled !== false,
+      },
+    }));
+  }
+
+  return createRuntimeAuditResult({
+    group: RUNTIME_AUDIT_GROUPS.SMART_CONTEXT,
+    ok: findings.every(
+      (finding) => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR,
+    ),
+    summary: findings.some(
+      (finding) => finding.severity === RUNTIME_AUDIT_SEVERITIES.ERROR,
+    )
+      ? "Smart-context audit found integrity issues."
+      : findings.some(
+          (finding) => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN,
+        )
+        ? "Smart-context audit found coordination issues."
+        : "Smart-context audit passed.",
+    findings,
+    safeRepairs,
+    context: {
+      ...snapshot,
+      settingsSnapshot: {
+        smartContextEnabled: settings.smartContextEnabled !== false,
+        globalEnabled: settings.globalEnabled !== false,
+        smartContextLookback: settings.smartContextLookback || 6,
+      },
+    },
+  });
 }
 
 const RELEVANCE_KEY = "tunnelvision_relevance";
@@ -1650,3 +1923,25 @@ export function initSmartContext() {
     "[TunnelVision] Smart context feedback loop + pre-warming initialized",
   );
 }
+
+export const __smartContextDebug = {
+  getRuntimeSnapshot: getSmartContextRuntimeSnapshot,
+  setRuntimeSnapshotState: ({
+    preWarmedCandidates,
+    cachedKey,
+    preWarmSource,
+    preWarmCachedAt,
+    lastInjectedEntries,
+  } = {}) => {
+    if (preWarmedCandidates !== undefined)
+      _preWarmedCandidates = preWarmedCandidates;
+    if (cachedKey !== undefined) _preWarmCacheKey = cachedKey;
+    if (preWarmSource !== undefined) _preWarmSource = preWarmSource;
+    if (preWarmCachedAt !== undefined) _preWarmCachedAt = preWarmCachedAt;
+    if (lastInjectedEntries !== undefined)
+      _lastInjectedEntries = lastInjectedEntries;
+  },
+  clearDerivedKeyCache: () => {
+    _derivedKeyCache.clear();
+  },
+};

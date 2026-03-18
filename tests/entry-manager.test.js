@@ -29,6 +29,54 @@ vi.mock('./tree-store.js', () => ({
     setTrackerUid: vi.fn(),
 }));
 
+vi.mock('../runtime-health.js', () => ({
+    RUNTIME_AUDIT_GROUPS: {
+        METADATA: 'metadata-integrity',
+    },
+    RUNTIME_AUDIT_SEVERITIES: {
+        INFO: 'info',
+        WARN: 'warn',
+        ERROR: 'error',
+    },
+    RUNTIME_REASON_CODES: {
+        STALE_CACHE_EPOCH: 'stale_cache_epoch',
+        DERIVED_CONTEXT_MISMATCH: 'derived_context_mismatch',
+        CACHE_OWNER_CONFLICT: 'cache_owner_conflict',
+    },
+    RUNTIME_REPAIR_CLASSES: {
+        SAFE_AUTO: 'safe_auto',
+        EXPLICIT: 'explicit',
+        DESTRUCTIVE: 'destructive',
+    },
+    createRuntimeAuditResult: vi.fn((payload = {}) => ({
+        group: payload.group || 'metadata-integrity',
+        ok: payload.ok ?? true,
+        summary: payload.summary || '',
+        findings: payload.findings || [],
+        safeRepairs: payload.safeRepairs || [],
+        requiresConfirmation: payload.requiresConfirmation || [],
+        reasonCodes: payload.reasonCodes || [...new Set((payload.findings || []).map(f => f?.reasonCode).filter(Boolean))],
+        context: payload.context ?? null,
+    })),
+    createRuntimeFinding: vi.fn((payload = {}) => ({
+        id: payload.id || null,
+        subsystem: payload.subsystem || null,
+        severity: payload.severity || 'info',
+        message: payload.message || '',
+        reasonCode: payload.reasonCode || null,
+        repairClass: payload.repairClass || null,
+        repairActionId: payload.repairActionId || null,
+        context: payload.context ?? null,
+    })),
+    createRuntimeRepair: vi.fn((payload = {}) => ({
+        id: payload.id || null,
+        label: payload.label || '',
+        repairClass: payload.repairClass || 'explicit',
+        reasonCode: payload.reasonCode || null,
+        context: payload.context ?? null,
+    })),
+}));
+
 import {
     parseJsonFromLLM,
     cleanupEntryMetadata,
@@ -44,6 +92,8 @@ import {
     persistWorldInfo,
     buildUidMap,
     withEntryTransaction,
+    auditEntryManagerRuntime,
+    getEntryManagerRuntimeSnapshot,
 } from '../entry-manager.js';
 
 describe('entry manager cache and transaction invariants', () => {
@@ -170,6 +220,129 @@ describe('entry manager cache and transaction invariants', () => {
         })).rejects.toThrow('no snapshots');
 
         expect(saveWorldInfo).not.toHaveBeenCalled();
+    });
+});
+
+describe('auditEntryManagerRuntime', () => {
+    beforeEach(() => {
+        for (const key of Object.keys(mockMetadata)) delete mockMetadata[key];
+        mockSaveDebounced.mockClear();
+        vi.clearAllMocks();
+        invalidateWorldInfoCache();
+    });
+
+    it('returns an info finding when cache ownership state is healthy', async () => {
+        const bookData = { entries: { a: { uid: 1, comment: 'Alpha', content: 'One' } } };
+        loadWorldInfo.mockResolvedValue(bookData);
+
+        await getCachedWorldInfo('Book A');
+
+        const audit = auditEntryManagerRuntime();
+
+        expect(audit.group).toBe('metadata-integrity');
+        expect(audit.ok).toBe(true);
+        expect(audit.summary).toBe('Entry-manager audit passed.');
+        expect(audit.findings).toHaveLength(1);
+        expect(audit.findings[0]).toMatchObject({
+            id: 'entrymanager-runtime-valid',
+            severity: 'info',
+            subsystem: 'entry-manager',
+        });
+        expect(audit.safeRepairs).toEqual([]);
+        expect(audit.requiresConfirmation).toEqual([]);
+    });
+
+    it('reports malformed cache entries as integrity errors', async () => {
+        loadWorldInfo.mockResolvedValue('broken-cache-value');
+
+        await getCachedWorldInfo('Book A');
+
+        const audit = auditEntryManagerRuntime();
+
+        expect(audit.ok).toBe(false);
+        expect(audit.summary).toBe('Entry-manager audit found integrity issues.');
+        expect(audit.findings.some(finding =>
+            finding.id === 'entrymanager-invalid-cache-value'
+            && finding.reasonCode === 'stale_cache_epoch'
+            && finding.severity === 'error'
+        )).toBe(true);
+        expect(audit.safeRepairs).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                id: 'reset-entry-manager-cache',
+                repairClass: 'safe_auto',
+            }),
+        ]));
+    });
+
+    it('reports dirty books that are still cached as warnings', async () => {
+        const bookData = { entries: { a: { uid: 1, comment: 'Alpha', content: 'One' } } };
+        loadWorldInfo.mockResolvedValue(bookData);
+
+        await getCachedWorldInfo('Book A');
+        invalidateWorldInfoCache('Book A');
+        loadWorldInfo.mockResolvedValue(bookData);
+        await getCachedWorldInfo('Book A');
+
+        const audit = auditEntryManagerRuntime();
+
+        expect(audit.ok).toBe(true);
+        expect(audit.summary).toBe('Entry-manager audit found coordination issues.');
+        expect(audit.findings.some(finding =>
+            finding.id === 'entrymanager-dirty-book-still-cached'
+            && finding.reasonCode === 'cache_owner_conflict'
+            && finding.severity === 'warn'
+        )).toBe(true);
+        expect(audit.safeRepairs).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                id: 'invalidate-dirty-worldinfo-cache',
+                repairClass: 'safe_auto',
+            }),
+        ]));
+        expect(audit.reasonCodes).toContain('cache_owner_conflict');
+    });
+});
+
+describe('getEntryManagerRuntimeSnapshot', () => {
+    beforeEach(() => {
+        for (const key of Object.keys(mockMetadata)) delete mockMetadata[key];
+        mockSaveDebounced.mockClear();
+        vi.clearAllMocks();
+        invalidateWorldInfoCache();
+    });
+
+    it('returns a structured snapshot of cache ownership state', async () => {
+        const alpha = { entries: { a: { uid: 1, comment: 'Alpha', content: 'One' } } };
+        const beta = { entries: { b: { uid: 2, comment: 'Beta', content: 'Two' } } };
+
+        loadWorldInfo.mockImplementation(async (bookName) => {
+            if (bookName === 'Alpha') return alpha;
+            if (bookName === 'Beta') return beta;
+            return null;
+        });
+
+        await getCachedWorldInfo('Alpha');
+        await getCachedWorldInfo('Beta');
+        invalidateWorldInfoCache('Alpha');
+
+        const snapshot = getEntryManagerRuntimeSnapshot();
+
+        expect(snapshot).toEqual({
+            cacheKeys: ['Beta'],
+            dirtyBooks: ['Alpha'],
+            cachedEntries: [
+                ['Beta', beta],
+            ],
+        });
+    });
+
+    it('returns an empty snapshot when no cache entries are present', () => {
+        const snapshot = getEntryManagerRuntimeSnapshot();
+
+        expect(snapshot).toEqual({
+            cacheKeys: [],
+            dirtyBooks: [],
+            cachedEntries: [],
+        });
     });
 });
 
