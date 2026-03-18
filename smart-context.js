@@ -95,6 +95,10 @@ let _lastReportedPreWarmKey = null;
 let _preWarmCachedAt = 0;
 let _preWarmEpoch = 0;
 let _cachedPreWarmEpoch = 0;
+let _preWarmInFlight = false;
+let _preWarmPendingKey = null;
+let _preWarmPendingEpoch = 0;
+let _preWarmRequestId = 0;
 const PREWARM_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 
 function buildPreWarmCacheKey() {
@@ -142,6 +146,9 @@ export function invalidatePreWarmCache() {
   _preWarmSource = "smart-context";
   _preWarmCachedAt = 0;
   _cachedPreWarmEpoch = 0;
+  _preWarmInFlight = false;
+  _preWarmPendingKey = null;
+  _preWarmPendingEpoch = 0;
   _lastReportedPreWarmKey = null;
   _lastReportedInjectionKey = null;
   _derivedKeyCache.clear();
@@ -169,6 +176,9 @@ export function getSmartContextRuntimeSnapshot() {
     preWarmSource: _preWarmSource,
     preWarmEpoch: _preWarmEpoch,
     cachedPreWarmEpoch: _cachedPreWarmEpoch,
+    preWarmInFlight: _preWarmInFlight,
+    preWarmPendingKey: _preWarmPendingKey,
+    preWarmPendingEpoch: _preWarmPendingEpoch,
     preWarmedCandidates: _preWarmedCandidates,
     preWarmedCandidateCount: Array.isArray(_preWarmedCandidates)
       ? _preWarmedCandidates.length
@@ -198,9 +208,19 @@ export function auditSmartContextRuntime(snapshot = getSmartContextRuntimeSnapsh
     preWarmCachedAt,
     preWarmEpoch,
     cachedPreWarmEpoch,
+    preWarmInFlight,
+    preWarmPendingKey,
+    preWarmPendingEpoch,
     lastInjectedEntries,
     derivedKeyCacheSize,
   } = snapshot;
+  const awaitingFreshPreWarm = Boolean(
+    preWarmInFlight
+    && cacheKey
+    && preWarmPendingKey
+    && preWarmPendingKey === cacheKey
+    && preWarmPendingEpoch >= preWarmEpoch
+  );
 
   if (
     preWarmedCandidates != null
@@ -224,6 +244,7 @@ export function auditSmartContextRuntime(snapshot = getSmartContextRuntimeSnapsh
     Array.isArray(preWarmedCandidates)
     && preWarmedCandidates.length > 0
     && cachedPreWarmEpoch !== preWarmEpoch
+    && !awaitingFreshPreWarm
   ) {
     findings.push(createRuntimeFinding({
       id: "smartcontext-stale-cache-epoch",
@@ -265,6 +286,7 @@ export function auditSmartContextRuntime(snapshot = getSmartContextRuntimeSnapsh
     && cachedKey
     && cacheKey
     && cachedKey !== cacheKey
+    && !awaitingFreshPreWarm
   ) {
     findings.push(createRuntimeFinding({
       id: "smartcontext-stale-cache-key",
@@ -287,6 +309,7 @@ export function auditSmartContextRuntime(snapshot = getSmartContextRuntimeSnapsh
     && preWarmedCandidates.length > 0
     && preWarmCachedAt
     && !cacheFresh
+    && !awaitingFreshPreWarm
   ) {
     findings.push(createRuntimeFinding({
       id: "smartcontext-expired-cache",
@@ -1815,57 +1838,78 @@ export async function preWarmSmartContext({ source = 'smart-context' } = {}) {
   const cacheKey = buildPreWarmCacheKey();
   if (!cacheKey) return;
   if (isPreWarmCacheFresh(cacheKey)) return;
+  const startEpoch = _preWarmEpoch;
+  const requestId = ++_preWarmRequestId;
+  _preWarmInFlight = true;
+  _preWarmPendingKey = cacheKey;
+  _preWarmPendingEpoch = startEpoch;
 
-  const lookback = settings.smartContextLookback || 6;
-  const recentText = extractMentionsFromChat(chat, lookback);
-  if (!recentText) return;
-
-  // Ensure world info data is in cache (the async part that saves time later)
-  await Promise.all(activeBooks.map((book) => getCachedWorldInfo(book)));
-
-  const candidates = scoreCandidates(activeBooks, recentText);
-
-  // 5A: Hybrid sidecar reranking — if sidecar is configured, rerank top-15
   try {
-    const { isSidecarConfigured, sidecarGenerate } =
-      await import("./llm-sidecar.js");
-    if (isSidecarConfigured() && candidates.length > 3) {
-      const topN = candidates.slice(0, 15);
-      const rerankPrompt = buildRerankPrompt(topN, recentText);
-      const response = await sidecarGenerate({
-        prompt: rerankPrompt,
-        maxTokens: 200,
-      });
-      applyRerankResults(candidates, topN, response);
-    }
-  } catch (e) {
-    console.debug("[TunnelVision] Sidecar reranking skipped:", e.message);
-  }
+    const lookback = settings.smartContextLookback || 6;
+    const recentText = extractMentionsFromChat(chat, lookback);
+    if (!recentText) return;
 
-  // 5B: Embedding similarity — if embedding API available, add cosine similarity scores
-  try {
-    const { isEmbeddingAvailable, getEmbeddingSimilarityBoosts } =
-      await import("./embedding-cache.js");
-    if (isEmbeddingAvailable()) {
-      const boosts = await getEmbeddingSimilarityBoosts(candidates, recentText);
-      for (const c of candidates) {
-        const bonus = boosts.get(c.entry.uid);
-        if (bonus) {
-          c.score += bonus;
-        }
+    // Ensure world info data is in cache (the async part that saves time later)
+    await Promise.all(activeBooks.map((book) => getCachedWorldInfo(book)));
+
+    const candidates = scoreCandidates(activeBooks, recentText);
+
+    // 5A: Hybrid sidecar reranking — if sidecar is configured, rerank top-15
+    try {
+      const { isSidecarConfigured, sidecarGenerate } =
+        await import("./llm-sidecar.js");
+      if (isSidecarConfigured() && candidates.length > 3) {
+        const topN = candidates.slice(0, 15);
+        const rerankPrompt = buildRerankPrompt(topN, recentText);
+        const response = await sidecarGenerate({
+          prompt: rerankPrompt,
+          maxTokens: 200,
+        });
+        applyRerankResults(candidates, topN, response);
       }
-      candidates.sort((a, b) => b.score - a.score);
+    } catch (e) {
+      console.debug("[TunnelVision] Sidecar reranking skipped:", e.message);
     }
-  } catch (e) {
-    console.debug("[TunnelVision] Embedding similarity skipped:", e.message);
-  }
 
-  _preWarmedCandidates = candidates;
-  _preWarmCacheKey = cacheKey;
-  _preWarmSource = source;
-  _preWarmCachedAt = Date.now();
-  _cachedPreWarmEpoch = _preWarmEpoch;
-  reportPreWarmCandidates(candidates, cacheKey, source);
+    // 5B: Embedding similarity — if embedding API available, add cosine similarity scores
+    try {
+      const { isEmbeddingAvailable, getEmbeddingSimilarityBoosts } =
+        await import("./embedding-cache.js");
+      if (isEmbeddingAvailable()) {
+        const boosts = await getEmbeddingSimilarityBoosts(candidates, recentText);
+        for (const c of candidates) {
+          const bonus = boosts.get(c.entry.uid);
+          if (bonus) {
+            c.score += bonus;
+          }
+        }
+        candidates.sort((a, b) => b.score - a.score);
+      }
+    } catch (e) {
+      console.debug("[TunnelVision] Embedding similarity skipped:", e.message);
+    }
+
+    if (
+      requestId !== _preWarmRequestId
+      || _preWarmEpoch !== startEpoch
+      || buildPreWarmCacheKey() !== cacheKey
+    ) {
+      return;
+    }
+
+    _preWarmedCandidates = candidates;
+    _preWarmCacheKey = cacheKey;
+    _preWarmSource = source;
+    _preWarmCachedAt = Date.now();
+    _cachedPreWarmEpoch = _preWarmEpoch;
+    reportPreWarmCandidates(candidates, cacheKey, source);
+  } finally {
+    if (requestId === _preWarmRequestId) {
+      _preWarmInFlight = false;
+      _preWarmPendingKey = null;
+      _preWarmPendingEpoch = 0;
+    }
+  }
 }
 
 // ── Hybrid Reranking Helpers (5A) ────────────────────────────────
@@ -1977,6 +2021,9 @@ export const __smartContextDebug = {
     preWarmCachedAt,
     preWarmEpoch,
     cachedPreWarmEpoch,
+    preWarmInFlight,
+    preWarmPendingKey,
+    preWarmPendingEpoch,
     lastInjectedEntries,
   } = {}) => {
     if (preWarmedCandidates !== undefined)
@@ -1986,6 +2033,9 @@ export const __smartContextDebug = {
     if (preWarmCachedAt !== undefined) _preWarmCachedAt = preWarmCachedAt;
     if (preWarmEpoch !== undefined) _preWarmEpoch = preWarmEpoch;
     if (cachedPreWarmEpoch !== undefined) _cachedPreWarmEpoch = cachedPreWarmEpoch;
+    if (preWarmInFlight !== undefined) _preWarmInFlight = preWarmInFlight;
+    if (preWarmPendingKey !== undefined) _preWarmPendingKey = preWarmPendingKey;
+    if (preWarmPendingEpoch !== undefined) _preWarmPendingEpoch = preWarmPendingEpoch;
     if (lastInjectedEntries !== undefined)
       _lastInjectedEntries = lastInjectedEntries;
   },

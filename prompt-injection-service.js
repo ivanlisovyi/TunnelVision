@@ -34,6 +34,30 @@ const TV_PROMPT_LOG_PREFIX = '[TunnelVision][PromptInjection]';
 let _promptPlanEpoch = 0;
 let _lastAppliedPromptPlanEpoch = 0;
 let _lastAppliedPromptPlanSignature = null;
+let _lastAppliedPromptPlanChatLength = 0;
+let _lastAppliedPromptPlanChatFingerprint = null;
+
+function buildPromptRuntimeChatFingerprint(context = getContext()) {
+    try {
+        const chat = context?.chat || [];
+        const lastMsg = chat[chat.length - 1] || null;
+        return JSON.stringify({
+            chatLength: chat.length,
+            lastMessage: lastMsg
+                ? {
+                    is_user: !!lastMsg.is_user,
+                    name: lastMsg.name || '',
+                    mes: lastMsg.mes || '',
+                    toolInvocations: Array.isArray(lastMsg?.extra?.tool_invocations)
+                        ? lastMsg.extra.tool_invocations.length
+                        : 0,
+                }
+                : null,
+        });
+    } catch {
+        return null;
+    }
+}
 
 function clonePromptPlanState(payload = {}) {
     return {
@@ -294,7 +318,10 @@ export async function buildPromptInjectionPlan(deps = {}) {
     const promptBuildMode = deps.promptBuildMode || 'default';
 
     const settings = getSettingsImpl();
+    const context = (deps.getContextImpl || getContext)();
     const recursive = isRecursiveToolPassImpl({ getContextImpl: deps.getContextImpl });
+    const currentChatLength = context?.chat?.length || 0;
+    const currentChatFingerprint = buildPromptRuntimeChatFingerprint(context);
     const promptKeys = {
         mandatory: deps.promptKeys?.mandatory || TV_PROMPT_KEY,
         worldState: deps.promptKeys?.worldState || TV_WORLDSTATE_KEY,
@@ -424,6 +451,8 @@ export async function buildPromptInjectionPlan(deps = {}) {
                 notebookEnabled: settings.notebookEnabled !== false,
                 totalInjectionBudget: settings.totalInjectionBudget || 0,
             },
+            currentChatLength,
+            currentChatFingerprint,
         },
     };
 }
@@ -453,6 +482,18 @@ export async function getPromptInjectionRuntimeSnapshot(deps = {}) {
         expectedPlanSignature: buildPromptPlanSignature(payload),
         installedPlanEpoch: _lastAppliedPromptPlanEpoch,
         installedPlanSignature: _lastAppliedPromptPlanSignature,
+        currentChatLength: payload.auditContext?.currentChatLength || 0,
+        currentChatFingerprint: payload.auditContext?.currentChatFingerprint || null,
+        installedPlanChatLength: _lastAppliedPromptPlanChatLength,
+        installedPlanChatFingerprint: _lastAppliedPromptPlanChatFingerprint,
+        awaitingGenerationRefresh: Boolean(
+            _lastAppliedPromptPlanEpoch > 0
+            && (
+                (_lastAppliedPromptPlanChatFingerprint && payload.auditContext?.currentChatFingerprint
+                    && _lastAppliedPromptPlanChatFingerprint !== payload.auditContext.currentChatFingerprint)
+                || ((_lastAppliedPromptPlanChatLength || 0) !== (payload.auditContext?.currentChatLength || 0))
+            )
+        ),
     };
 }
 
@@ -524,6 +565,8 @@ export function applyPromptInjectionPlan(payload, deps = {}) {
 
     _lastAppliedPromptPlanEpoch = planEpoch;
     _lastAppliedPromptPlanSignature = buildPromptPlanSignature(payload);
+    _lastAppliedPromptPlanChatLength = payload.auditContext?.currentChatLength || 0;
+    _lastAppliedPromptPlanChatFingerprint = payload.auditContext?.currentChatFingerprint || null;
 }
 
 /**
@@ -623,6 +666,7 @@ export async function auditPromptInjectionRuntime(deps = {}) {
         && payload.installedPlanSignature
         && payload.expectedPlanSignature
         && payload.installedPlanSignature !== payload.expectedPlanSignature
+        && payload.awaitingGenerationRefresh !== true
     ) {
         findings.push(createRuntimeFinding({
             id: 'prompt-installed-plan-stale',
@@ -703,6 +747,9 @@ export async function auditPromptInjectionRuntime(deps = {}) {
             installedPlanEpoch: payload.installedPlanEpoch || 0,
             expectedPlanSignature: payload.expectedPlanSignature || null,
             installedPlanSignature: payload.installedPlanSignature || null,
+            currentChatLength: payload.currentChatLength || 0,
+            installedPlanChatLength: payload.installedPlanChatLength || 0,
+            awaitingGenerationRefresh: payload.awaitingGenerationRefresh === true,
         },
     });
 }

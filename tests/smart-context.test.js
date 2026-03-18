@@ -65,6 +65,7 @@ vi.mock('../../../st-context.js', () => ({
 
 import { scoreEntry, getFeedbackMap, processRelevanceFeedback, invalidatePreWarmCache, computeEntryTier, TIER_HOT, TIER_WARM, TIER_COLD, buildSmartContextPrompt, preWarmSmartContext, auditSmartContextRuntime, getSmartContextRuntimeSnapshot, __smartContextDebug } from '../smart-context.js';
 import { addBackgroundEvent, addEntryActivationEvents } from '../background-events.js';
+import { getCachedWorldInfo } from '../entry-manager.js';
 
 beforeEach(() => {
     // Reset state between tests
@@ -81,6 +82,10 @@ beforeEach(() => {
     };
     vi.mocked(addBackgroundEvent).mockClear();
     vi.mocked(addEntryActivationEvents).mockClear();
+    vi.mocked(getCachedWorldInfo).mockImplementation(async (book) => {
+        mockState.cachedWorldInfoCalls.push(book);
+        return mockState.cachedWorldInfoSyncByBook.get(book) || null;
+    });
     __smartContextDebug.setRuntimeSnapshotState({
         preWarmedCandidates: null,
         cachedKey: null,
@@ -88,6 +93,9 @@ beforeEach(() => {
         preWarmCachedAt: 0,
         preWarmEpoch: 0,
         cachedPreWarmEpoch: 0,
+        preWarmInFlight: false,
+        preWarmPendingKey: null,
+        preWarmPendingEpoch: 0,
         lastInjectedEntries: [],
     });
     __smartContextDebug.clearDerivedKeyCache();
@@ -703,6 +711,50 @@ describe('preWarmSmartContext', () => {
         expect(mockState.cachedWorldInfoCalls).toEqual(['Book A']);
     });
 
+    it('ignores older async prewarm runs that finish after a newer chat fingerprint has already refreshed the cache', async () => {
+        mockState.activeBooks = ['Book A'];
+        mockState.cachedWorldInfoSyncByBook.set('Book A', {
+            entries: {
+                1: makeEntry(),
+            },
+        });
+
+        mockChat.push(
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena heads toward the cathedral.' },
+        );
+
+        let resolveFirstLoad;
+        const firstLoad = new Promise((resolve) => {
+            resolveFirstLoad = resolve;
+        });
+        let loadCount = 0;
+        vi.mocked(getCachedWorldInfo).mockImplementation(async (book) => {
+            mockState.cachedWorldInfoCalls.push(book);
+            loadCount += 1;
+            if (loadCount === 1) {
+                return await firstLoad;
+            }
+            return mockState.cachedWorldInfoSyncByBook.get(book) || null;
+        });
+
+        const staleRun = preWarmSmartContext();
+
+        mockChat[mockChat.length - 1] = {
+            is_user: false,
+            mes: 'Elena heads toward the hidden archive instead.',
+        };
+
+        const freshRun = preWarmSmartContext();
+        resolveFirstLoad(mockState.cachedWorldInfoSyncByBook.get('Book A') || null);
+
+        await Promise.all([staleRun, freshRun]);
+
+        const snapshot = getSmartContextRuntimeSnapshot();
+        expect(snapshot.cachedKey).toBe(snapshot.cacheKey);
+        expect(snapshot.preWarmInFlight).toBe(false);
+    });
+
     it('refreshes prewarm after cache age expires', async () => {
         vi.useFakeTimers();
         try {
@@ -831,6 +883,9 @@ describe('preWarmSmartContext', () => {
                 preWarmSource: 'smart-context',
                 preWarmEpoch: 1,
                 cachedPreWarmEpoch: 1,
+                preWarmInFlight: false,
+                preWarmPendingKey: null,
+                preWarmPendingEpoch: 0,
                 preWarmedCandidateCount: 1,
                 injectedEntryCount: 1,
             });

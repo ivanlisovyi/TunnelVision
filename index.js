@@ -255,6 +255,9 @@ async function init() {
     if (event_types.WORLDINFO_SETTINGS_UPDATED) {
         eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, onWorldInfoUpdated);
     }
+    if (event_types.MESSAGE_RECEIVED) {
+        eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
+    }
     eventSource.on(event_types.APP_READY, onAppReady);
 
     // Suppress normal WI keyword scanning for TV-managed lorebooks
@@ -298,6 +301,25 @@ async function onAppReady() {
         eventName: 'app-ready',
         syncReason: 'app-ready',
         refreshUI: false,
+    });
+}
+
+function onMessageReceived() {
+    try {
+        const context = getContext();
+        const lastMsg = context.chat?.[context.chat.length - 1];
+        if (
+            Array.isArray(lastMsg?.extra?.tool_invocations)
+            && lastMsg.extra.tool_invocations.length > 0
+        ) {
+            return;
+        }
+    } catch {
+        // Fall through to best-effort orchestration bookkeeping.
+    }
+
+    recordOrchestrationEvent('message-received', {
+        invalidationReason: 'message_received',
     });
 }
 

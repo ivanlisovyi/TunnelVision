@@ -241,6 +241,7 @@ export function auditOrchestrationRuntime({ registrationSnapshot = null, promptC
             && promptContext.expectedPlanSignature
             && promptContext.installedPlanSignature
             && promptContext.expectedPlanSignature !== promptContext.installedPlanSignature
+            && promptContext.awaitingGenerationRefresh !== true
         ) {
             findings.push({
                 severity: 'warn',

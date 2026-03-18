@@ -715,6 +715,42 @@ describe('collectRuntimeAudits', () => {
         });
     });
 
+    it('does not warn about stale prompt plans while the next generation refresh is still pending', async () => {
+        mockState.audits.registration = makeAudit({
+            group: 'registration-integrity',
+            summary: 'Tool registration audit passed.',
+            context: {
+                activeBooks: ['Book A'],
+            },
+        });
+        mockState.audits.promptInjection = makeAudit({
+            group: 'prompt-injection-integrity',
+            summary: 'Prompt injection audit passed.',
+            context: {
+                activeBooks: ['Book A'],
+                installedPlanEpoch: 2,
+                expectedPlanSignature: 'expected-plan',
+                installedPlanSignature: 'stale-plan',
+                awaitingGenerationRefresh: true,
+            },
+        });
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[6]).toEqual({
+            group: 'orchestration-integrity',
+            ok: true,
+            summary: 'Orchestration audit passed.',
+            findings: [
+                { severity: 'info', reasonCode: null },
+            ],
+            reasonCodes: [],
+            safeRepairs: [],
+            requiresConfirmation: [],
+            context: mockState.orchestrationSnapshot,
+        });
+    });
+
     it('builds a failure orchestration audit when sync loses its reason while in flight', async () => {
         mockState.orchestrationSnapshot = {
             ...mockState.orchestrationSnapshot,

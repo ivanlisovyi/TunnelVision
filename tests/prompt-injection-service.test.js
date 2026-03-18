@@ -852,4 +852,37 @@ describe('applyPromptInjectionPlan', () => {
             && finding.severity === 'warn'
         )).toBe(true);
     });
+
+    it('suppresses stale installed prompt warnings while waiting for the next generation refresh', async () => {
+        mockState.settings = makeSettings({
+            worldStateEnabled: true,
+            smartContextEnabled: true,
+            notebookEnabled: true,
+            mandatoryPromptText: 'MANDATORY',
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.worldStatePrompt = 'WORLD';
+        mockState.smartContextPrompt = 'SMART';
+        mockState.notebookPrompt = 'NOTE';
+        mockState.context.chat = [
+            { is_user: true, mes: 'Tell me about Elena.' },
+        ];
+
+        const plan = await buildPromptInjectionPlan({
+            isRecursiveToolPassImpl: () => false,
+        });
+        applyPromptInjectionPlan(plan);
+
+        mockState.context.chat.push({
+            is_user: false,
+            mes: 'Elena heads toward the Grand Cathedral.',
+        });
+
+        const audit = await auditPromptInjectionRuntime({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(audit.reasonCodes).not.toContain('stale_prompt_plan');
+        expect(audit.context.awaitingGenerationRefresh).toBe(true);
+    });
 });
