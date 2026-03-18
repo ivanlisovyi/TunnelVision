@@ -810,6 +810,56 @@ export function clearWorldState() {
     } catch { /* ignore */ }
 }
 
+export function repairWorldStateSections() {
+    const state = getWorldState();
+    if (!state?.text || typeof state.text !== 'string') {
+        return false;
+    }
+
+    const sections = parseWorldStateSections(state.text);
+    setWorldState({
+        ...state,
+        sections,
+        sectionsEpoch: Number.isFinite(state.epoch) ? state.epoch : undefined,
+    });
+    return true;
+}
+
+export function rebuildWorldStateMetadata() {
+    const state = getWorldState();
+    const validState = isPlainObject(state) ? state : null;
+
+    if (!validState || (validState.text && !validateWorldStateStructure(validState.text).valid)) {
+        clearWorldState();
+        return true;
+    }
+
+    const rebuilt = {};
+    if (Number.isFinite(validState.lastUpdated)) rebuilt.lastUpdated = validState.lastUpdated;
+    if (Number.isFinite(validState.lastUpdateMsgIdx)) rebuilt.lastUpdateMsgIdx = validState.lastUpdateMsgIdx;
+    if (typeof validState.text === 'string') {
+        rebuilt.text = validState.text;
+        rebuilt.sections = parseWorldStateSections(validState.text);
+    }
+    if (typeof validState.previousText === 'string' && validateWorldStateStructure(validState.previousText).valid) {
+        rebuilt.previousText = validState.previousText;
+    }
+
+    setWorldState(rebuilt);
+    return true;
+}
+
+export function discardInvalidWorldStateHistory() {
+    const state = getWorldState();
+    if (!isPlainObject(state) || !state.previousText) {
+        return false;
+    }
+
+    const { previousText, ...nextState } = state;
+    setWorldState(nextState);
+    return typeof previousText === 'string' && previousText.length > 0;
+}
+
 /** Check if a world state update is currently in progress. */
 export function isWorldStateUpdating() {
     return _updateRunning;

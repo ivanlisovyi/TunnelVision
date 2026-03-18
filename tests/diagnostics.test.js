@@ -98,6 +98,16 @@ vi.mock('../runtime-health.js', () => ({
     }),
 }));
 
+vi.mock('../runtime-repairs.js', () => ({
+    executeSafeRuntimeAuditRepairs: vi.fn(async (audits) => {
+        const state = getMockState();
+        if (typeof state.runtimeRepairRun === 'function') {
+            await state.runtimeRepairRun(audits);
+        }
+        return state.runtimeRepairResult || { attempted: 0, applied: [], failed: [] };
+    }),
+}));
+
 vi.mock('../../../st-context.js', () => ({
     getContext: vi.fn(() => ({
         chat: [],
@@ -187,6 +197,8 @@ function resetMockState() {
                 context: null,
             },
         },
+        runtimeRepairResult: { attempted: 0, applied: [], failed: [] },
+        runtimeRepairRun: null,
     };
 }
 
@@ -466,6 +478,75 @@ describe('runDiagnostics structured runtime audits', () => {
         expect(results.some(result =>
             result.status === 'warn'
             && result.message === 'Entry-manager audit found integrity issues. Findings: 0 error(s), 1 warning(s), 0 info item(s). Reasons: cache_owner_conflict.',
+        )).toBe(true);
+    });
+
+    it('applies safe runtime repairs before returning diagnostics results', async () => {
+        const state = getMockState();
+        state.runtimeAudits.smartContext = {
+            group: 'smart-context-integrity',
+            ok: true,
+            summary: 'Smart-context audit found stale cache state.',
+            findings: [
+                { severity: 'warn', reasonCode: 'stale_cache_epoch' },
+            ],
+            reasonCodes: ['stale_cache_epoch'],
+            safeRepairs: [
+                { id: 'reset-smart-context-cache', label: 'Reset smart-context cache' },
+            ],
+            requiresConfirmation: [],
+            context: null,
+        };
+        state.runtimeRepairResult = {
+            attempted: 1,
+            applied: [{ id: 'reset-smart-context-cache', label: 'Reset smart-context cache', groups: ['smart-context-integrity'] }],
+            failed: [],
+        };
+        state.runtimeRepairRun = async () => {
+            state.runtimeAudits.smartContext = {
+                group: 'smart-context-integrity',
+                ok: true,
+                summary: 'Smart-context audit passed.',
+                findings: [{ severity: 'info', reasonCode: null }],
+                reasonCodes: [],
+                safeRepairs: [],
+                requiresConfirmation: [],
+                context: null,
+            };
+        };
+
+        const results = await runDiagnostics();
+
+        expect(results.some(result =>
+            result.status === 'pass'
+            && result.message === 'Smart-context audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).'
+            && result.fix === 'Applied safe repair(s): reset-smart-context-cache.',
+        )).toBe(true);
+    });
+
+    it('surfaces confirmation-required runtime repairs in diagnostics output', async () => {
+        const state = getMockState();
+        state.runtimeAudits.worldState = {
+            group: 'world-state-integrity',
+            ok: false,
+            summary: 'World-state audit found integrity issues.',
+            findings: [
+                { severity: 'error', reasonCode: 'invalid_world_state_metadata' },
+            ],
+            reasonCodes: ['invalid_world_state_metadata'],
+            safeRepairs: [],
+            requiresConfirmation: [
+                { id: 'rebuild-world-state-metadata', label: 'Rebuild persisted world-state metadata' },
+            ],
+            context: null,
+        };
+
+        const results = await runDiagnostics();
+
+        expect(results.some(result =>
+            result.status === 'fail'
+            && result.message === 'World-state audit found integrity issues. Findings: 1 error(s), 0 warning(s), 0 info item(s). Reasons: invalid_world_state_metadata.'
+            && result.fix === 'Requires confirmation: Rebuild persisted world-state metadata.',
         )).toBe(true);
     });
 });

@@ -689,12 +689,16 @@ export async function auditPromptInjectionRuntime(deps = {}) {
                 : 'Prompt injection audit passed.',
         findings,
         safeRepairs,
-        context: payload.auditContext || {
-            enabled: payload.enabled,
-            activeBooks: payload.activeBooks,
-            isRecursiveToolPass: payload.isRecursiveToolPass,
-            promptKeys,
+        context: {
+            ...(payload.auditContext || {
+                enabled: payload.enabled,
+                activeBooks: payload.activeBooks,
+                isRecursiveToolPass: payload.isRecursiveToolPass,
+                promptKeys,
+            }),
             installedPlanEpoch: payload.installedPlanEpoch || 0,
+            expectedPlanSignature: payload.expectedPlanSignature || null,
+            installedPlanSignature: payload.installedPlanSignature || null,
         },
     });
 }

@@ -10,6 +10,11 @@ const mockState = {
         entryManager: null,
     },
     orchestrationSnapshot: null,
+    repairExecution: {
+        attempted: 0,
+        applied: [],
+        failed: [],
+    },
 };
 
 function makeAudit({
@@ -58,11 +63,37 @@ vi.mock('../entry-manager.js', () => ({
     auditEntryManagerRuntime: vi.fn(() => mockState.audits.entryManager),
 }));
 
+vi.mock('../runtime-repairs.js', () => ({
+    executeSafeRuntimeAuditRepairs: vi.fn(async (audits) => {
+        if (typeof mockState.repairExecution.run === 'function') {
+            await mockState.repairExecution.run(audits);
+        }
+        return {
+            attempted: mockState.repairExecution.attempted || 0,
+            applied: mockState.repairExecution.applied || [],
+            failed: mockState.repairExecution.failed || [],
+        };
+    }),
+}));
+
 vi.mock('../runtime-orchestration.js', () => ({
     getOrchestrationRuntimeSnapshot: vi.fn(() => mockState.orchestrationSnapshot),
 }));
 
 vi.mock('../runtime-health.js', () => ({
+    RUNTIME_REASON_CODES: {
+        STALE_PROMPT_PLAN: 'stale_prompt_plan',
+    },
+    RUNTIME_REPAIR_CLASSES: {
+        SAFE_AUTO: 'safe_auto',
+    },
+    createRuntimeRepair: vi.fn((payload = {}) => ({
+        id: payload.id || null,
+        label: payload.label || '',
+        repairClass: payload.repairClass || 'safe_auto',
+        reasonCode: payload.reasonCode || null,
+        context: payload.context ?? null,
+    })),
     countRuntimeFindingsBySeverity: vi.fn((findings = []) => {
         const counts = { info: 0, warn: 0, error: 0 };
         for (const finding of findings) {
@@ -78,7 +109,9 @@ vi.mock('../runtime-health.js', () => ({
 import {
     collectRuntimeAudits,
     formatRuntimeAuditResult,
+    formatRuntimeAuditResultDetailed,
     runRuntimeAuditDiagnostics,
+    runRuntimeAuditDiagnosticsDetailed,
 } from '../runtime-diagnostics.js';
 
 function resetMockState() {
@@ -99,6 +132,8 @@ function resetMockState() {
             context: {
                 activeBooks: [],
                 installedPlanEpoch: 0,
+                expectedPlanSignature: null,
+                installedPlanSignature: null,
             },
         }),
         postTurn: makeAudit({
@@ -162,6 +197,11 @@ function resetMockState() {
             },
         },
     };
+    mockState.repairExecution = {
+        attempted: 0,
+        applied: [],
+        failed: [],
+    };
 }
 
 describe('formatRuntimeAuditResult', () => {
@@ -219,6 +259,61 @@ describe('formatRuntimeAuditResult', () => {
             status: 'fail',
             message: 'World-state audit found integrity issues. Findings: 1 error(s), 1 warning(s), 0 info item(s). Reasons: invalid_world_state_metadata, stale_world_state_output.',
             fix: null,
+        });
+    });
+
+    it('adds applied safe repairs to the legacy fix field', () => {
+        const result = formatRuntimeAuditResult(makeAudit({
+            group: 'smart-context-integrity',
+            summary: 'Smart-context audit passed.',
+            findings: [{ severity: 'info', reasonCode: null }],
+        }), {
+            applied: ['reset-smart-context-cache'],
+        });
+
+        expect(result).toEqual({
+            status: 'pass',
+            message: 'Smart-context audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).',
+            fix: 'Applied safe repair(s): reset-smart-context-cache.',
+        });
+    });
+
+    it('adds confirmation-required repairs to the legacy fix field', () => {
+        const result = formatRuntimeAuditResult(makeAudit({
+            group: 'world-state-integrity',
+            summary: 'World-state audit found integrity issues.',
+            findings: [{ severity: 'error', reasonCode: 'invalid_world_state_metadata' }],
+            requiresConfirmation: [
+                { id: 'rebuild-world-state-metadata', label: 'Rebuild persisted world-state metadata' },
+                { id: 'discard-invalid-world-state-history', label: 'Discard invalid previous world-state snapshot' },
+            ],
+        }));
+
+        expect(result).toEqual({
+            status: 'fail',
+            message: 'World-state audit found integrity issues. Findings: 1 error(s), 0 warning(s), 0 info item(s).',
+            fix: 'Requires confirmation: Rebuild persisted world-state metadata, Discard invalid previous world-state snapshot.',
+        });
+    });
+
+    it('preserves confirmation actions in the detailed runtime diagnostics shape', () => {
+        const result = formatRuntimeAuditResultDetailed(makeAudit({
+            group: 'world-state-integrity',
+            summary: 'World-state audit found integrity issues.',
+            findings: [{ severity: 'error', reasonCode: 'invalid_world_state_metadata' }],
+            requiresConfirmation: [
+                { id: 'rebuild-world-state-metadata', label: 'Rebuild persisted world-state metadata' },
+            ],
+        }));
+
+        expect(result).toEqual({
+            status: 'fail',
+            message: 'World-state audit found integrity issues. Findings: 1 error(s), 0 warning(s), 0 info item(s).',
+            fix: 'Requires confirmation: Rebuild persisted world-state metadata.',
+            group: 'world-state-integrity',
+            actions: [
+                { id: 'rebuild-world-state-metadata', label: 'Rebuild persisted world-state metadata' },
+            ],
         });
     });
 
@@ -455,6 +550,43 @@ describe('collectRuntimeAudits', () => {
             ],
             reasonCodes: ['derived_context_mismatch'],
             safeRepairs: [],
+            requiresConfirmation: [],
+            context: mockState.orchestrationSnapshot,
+        });
+    });
+
+    it('builds a warning orchestration audit when prompt plans stay stale after sync convergence', async () => {
+        mockState.audits.registration = makeAudit({
+            group: 'registration-integrity',
+            summary: 'Tool registration audit passed.',
+            context: {
+                activeBooks: ['Book A'],
+            },
+        });
+        mockState.audits.promptInjection = makeAudit({
+            group: 'prompt-injection-integrity',
+            summary: 'Prompt injection audit passed.',
+            context: {
+                activeBooks: ['Book A'],
+                installedPlanEpoch: 2,
+                expectedPlanSignature: 'expected-plan',
+                installedPlanSignature: 'stale-plan',
+            },
+        });
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[6]).toEqual({
+            group: 'orchestration-integrity',
+            ok: true,
+            summary: 'Orchestration audit found coordination issues.',
+            findings: [
+                { severity: 'warn', reasonCode: 'stale_prompt_plan' },
+            ],
+            reasonCodes: ['stale_prompt_plan'],
+            safeRepairs: [
+                expect.objectContaining({ id: 'rebuild-prompt-plan' }),
+            ],
             requiresConfirmation: [],
             context: mockState.orchestrationSnapshot,
         });
@@ -751,6 +883,67 @@ describe('runRuntimeAuditDiagnostics', () => {
             status: 'warn',
             message: 'Orchestration audit found coordination issues. Findings: 0 error(s), 1 warning(s), 0 info item(s). Reasons: generation_preflight_order_violation.',
             fix: null,
+        });
+    });
+
+    it('re-runs audits after safe repairs and annotates repaired groups', async () => {
+        mockState.audits.smartContext = makeAudit({
+            group: 'smart-context-integrity',
+            summary: 'Smart-context audit found stale cache state.',
+            findings: [
+                { severity: 'warn', reasonCode: 'stale_cache_epoch' },
+            ],
+            reasonCodes: ['stale_cache_epoch'],
+            safeRepairs: [
+                { id: 'reset-smart-context-cache', label: 'Reset smart-context caches' },
+            ],
+        });
+        mockState.repairExecution = {
+            attempted: 1,
+            applied: [{ id: 'reset-smart-context-cache', label: 'Reset smart-context caches', groups: ['smart-context-integrity'] }],
+            failed: [],
+            run: async () => {
+                mockState.audits.smartContext = makeAudit({
+                    group: 'smart-context-integrity',
+                    summary: 'Smart-context audit passed.',
+                    findings: [{ severity: 'info', reasonCode: null }],
+                });
+            },
+        };
+
+        const results = await runRuntimeAuditDiagnostics({ repair: true });
+
+        expect(results[3]).toEqual({
+            status: 'pass',
+            message: 'Smart-context audit passed. Findings: 0 error(s), 0 warning(s), 1 info item(s).',
+            fix: 'Applied safe repair(s): reset-smart-context-cache.',
+        });
+    });
+
+    it('returns detailed diagnostics with confirmation actions intact', async () => {
+        mockState.audits.worldState = makeAudit({
+            group: 'world-state-integrity',
+            ok: false,
+            summary: 'World-state audit found integrity issues.',
+            findings: [
+                { severity: 'error', reasonCode: 'invalid_world_state_metadata' },
+            ],
+            reasonCodes: ['invalid_world_state_metadata'],
+            requiresConfirmation: [
+                { id: 'rebuild-world-state-metadata', label: 'Rebuild persisted world-state metadata' },
+            ],
+        });
+
+        const results = await runRuntimeAuditDiagnosticsDetailed();
+
+        expect(results[4]).toEqual({
+            status: 'fail',
+            message: 'World-state audit found integrity issues. Findings: 1 error(s), 0 warning(s), 0 info item(s). Reasons: invalid_world_state_metadata.',
+            fix: 'Requires confirmation: Rebuild persisted world-state metadata.',
+            group: 'world-state-integrity',
+            actions: [
+                { id: 'rebuild-world-state-metadata', label: 'Rebuild persisted world-state metadata' },
+            ],
         });
     });
 });

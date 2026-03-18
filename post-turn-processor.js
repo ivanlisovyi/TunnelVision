@@ -458,6 +458,51 @@ export function auditPostTurnProcessorRuntime(
   });
 }
 
+export function resetPostTurnEphemeralState() {
+  const hadEphemeralState = _processorRunning || Boolean(_currentTask) || _swipePending;
+  _processorRunning = false;
+  _currentTask = null;
+  _swipePending = false;
+  return hadEphemeralState;
+}
+
+export function rebuildPostTurnMetadata() {
+  const state = getProcessorState();
+  const rebuilt = {};
+
+  if (Number.isFinite(state?.lastProcessedMsgIdx)) {
+    rebuilt.lastProcessedMsgIdx = state.lastProcessedMsgIdx;
+  }
+  if (Number.isFinite(state?.lastProcessedAt)) {
+    rebuilt.lastProcessedAt = state.lastProcessedAt;
+  }
+  if (state?.lastResult && typeof state.lastResult === 'object' && !Array.isArray(state.lastResult)) {
+    rebuilt.lastResult = state.lastResult;
+  }
+  if (isValidRollbackPayload(state?.rollback)) {
+    rebuilt.rollback = state.rollback;
+  }
+
+  _liveRollback = isValidRollbackPayload(rebuilt.rollback) ? rebuilt.rollback : null;
+  setProcessorState(Object.keys(rebuilt).length > 0 ? rebuilt : null);
+  return true;
+}
+
+export function clearPostTurnRollback() {
+  const state = getProcessorState();
+  if (!state?.rollback && !_liveRollback) {
+    return false;
+  }
+
+  const nextState = state && typeof state === 'object' && !Array.isArray(state)
+    ? { ...state }
+    : {};
+  delete nextState.rollback;
+  _liveRollback = null;
+  setProcessorState(Object.keys(nextState).length > 0 ? nextState : null);
+  return true;
+}
+
 // ── Tracker Entry Loading ────────────────────────────────────────
 
 async function loadTrackerEntries(activeBooks) {

@@ -6,6 +6,7 @@
 import { saveSettingsDebounced } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 import { world_names, loadWorldInfo } from '../../../world-info.js';
+import { callGenericPopup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { getAutoSummaryCount, resetAutoSummaryCount, setAutoSummaryCount } from './auto-summary.js';
 import { getWorldStateText, getWorldStateLastIndex, updateWorldState, clearWorldState, isWorldStateUpdating, hasPreviousWorldState, revertWorldState, DEFAULT_WS_INJECTION_PROMPT, DEFAULT_WS_UPDATE_PROMPT } from './world-state.js';
 import { getLastProcessingResult, getLastProcessedIndex } from './post-turn-processor.js';
@@ -29,9 +30,10 @@ import {
 } from './tree-store.js';
 import { buildTreeFromMetadata, buildTreeWithLLM, ingestChatMessages } from './tree-builder.js';
 import { registerTools, unregisterTools, getDefaultToolDescriptions, stripDynamicContent } from './tool-registry.js';
-import { runDiagnostics } from './diagnostics.js';
+import { runDiagnosticsDetailed } from './diagnostics.js';
 import { applyRecurseLimit } from './tool-registry.js';
 import { refreshHiddenToolCallMessages } from './activity-feed.js';
+import { executeRuntimeRepairAction } from './runtime-repairs.js';
 
 import { escapeHtml } from './entry-manager.js';
 import { getMaxContextTokens } from './agent-utils.js';
@@ -47,6 +49,7 @@ import {
 
 
 let currentLorebook = null;
+let _latestDiagnosticsResults = [];
 
 function selectCurrentLorebook(bookName) {
     currentLorebook = bookName || null;
@@ -89,6 +92,7 @@ export function bindUIEvents() {
     registerTreeEditorCallbacks({ loadLorebookUI, populateLorebookDropdown });
 
     $('#tv_run_diagnostics').on('click', onRunDiagnostics);
+    $('#tv_diagnostics_output').on('click', '.tv_diag_action', onDiagnosticsRepairAction);
 
     // Lorebook filter
     $('#tv_lorebook_filter').on('input', onLorebookFilter);
@@ -1536,16 +1540,63 @@ async function onRunDiagnostics() {
     $output.empty().show();
 
     try {
-        const results = await runDiagnostics();
-        for (const result of results) {
+        const results = await runDiagnosticsDetailed();
+        _latestDiagnosticsResults = Array.isArray(results) ? results : [];
+        for (const [resultIndex, result] of _latestDiagnosticsResults.entries()) {
             const icon = result.status === 'pass' ? 'fa-check' : result.status === 'warn' ? 'fa-triangle-exclamation' : 'fa-xmark';
             const cssClass = `tv_diag_${result.status}`;
-            $output.append(`<div class="tv_diag_item ${cssClass}"><i class="fa-solid ${icon}"></i> ${escapeHtml(result.message)}</div>`);
+            const fixHtml = result.fix
+                ? `<div class="tv_diag_fix">${escapeHtml(result.fix)}</div>`
+                : '';
+            const actionsHtml = Array.isArray(result.actions) && result.actions.length > 0
+                ? `<div class="tv_diag_actions">${result.actions.map(action => `<button type="button" class="menu_button tv_diag_action" data-result-index="${resultIndex}" data-repair-id="${escapeHtml(action.id)}">${escapeHtml(action.label)}</button>`).join('')}</div>`
+                : '';
+            $output.append(`<div class="tv_diag_item ${cssClass}"><i class="fa-solid ${icon}"></i><div class="tv_diag_body"><div class="tv_diag_message">${escapeHtml(result.message)}</div>${fixHtml}${actionsHtml}</div></div>`);
         }
     } catch (e) {
         $output.append(`<div class="tv_diag_item tv_diag_fail"><i class="fa-solid fa-xmark"></i> Diagnostics error: ${escapeHtml(e.message)}</div>`);
     } finally {
         $btn.prop('disabled', false).html('<i class="fa-solid fa-stethoscope"></i> Run Diagnostics');
+    }
+}
+
+async function onDiagnosticsRepairAction(event) {
+    const $button = $(event.currentTarget);
+    const resultIndex = Number($button.data('result-index'));
+    const repairId = String($button.data('repair-id') || '');
+    const result = _latestDiagnosticsResults[resultIndex];
+    const repair = Array.isArray(result?.actions)
+        ? result.actions.find(action => action?.id === repairId)
+        : null;
+
+    if (!repair) {
+        toastr.error('This repair action is no longer available. Re-run diagnostics and try again.', 'TunnelVision');
+        return;
+    }
+
+    const html = `<div class="tv-confirm-popup">
+    <div class="tv-confirm-title">Confirm runtime repair: <strong>${escapeHtml(repair.label)}</strong></div>
+    <div class="tv-confirm-hint">This repair may discard malformed runtime metadata or rollback state. Continue?</div>
+</div>`;
+    const confirmation = await callGenericPopup(html, POPUP_TYPE.CONFIRM);
+    if (confirmation !== POPUP_RESULT.AFFIRMATIVE) {
+        return;
+    }
+
+    $button.prop('disabled', true);
+    try {
+        const execution = await executeRuntimeRepairAction(repair, { origin: 'diagnostics-ui:confirmed' });
+        if (execution.status === 'applied') {
+            toastr.success(`Applied repair: ${repair.label}`, 'TunnelVision');
+        } else if (execution.status === 'skipped') {
+            toastr.info(`No changes were needed for: ${repair.label}`, 'TunnelVision');
+        } else {
+            throw new Error(execution.error || 'Repair failed');
+        }
+        await onRunDiagnostics();
+    } catch (error) {
+        toastr.error(`Repair failed: ${error?.message || String(error)}`, 'TunnelVision');
+        $button.prop('disabled', false);
     }
 }
 

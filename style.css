@@ -821,10 +821,21 @@
 .tv_diag_item {
     padding: 4px 6px;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 6px;
     border-radius: 4px;
     transition: background 0.1s ease;
+}
+
+.tv_diag_body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.tv_diag_message {
+    line-height: 1.4;
 }
 
 .tv_diag_item:hover {
@@ -835,6 +846,24 @@
     width: 14px;
     text-align: center;
     font-size: 11px;
+}
+
+.tv_diag_fix {
+    font-size: 11px;
+    line-height: 1.4;
+    opacity: 0.85;
+}
+
+.tv_diag_actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.tv_diag_action {
+    padding: 2px 8px;
+    font-size: 11px;
+    min-height: 24px;
 }
 
 .tv_diag_pass { color: #4ade80; }

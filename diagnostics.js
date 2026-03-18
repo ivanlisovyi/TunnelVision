@@ -28,10 +28,15 @@ import {
     preflightToolRuntimeState,
 } from './tool-registry.js';
 import { buildUidMap, getCachedWorldInfo } from './entry-manager.js';
-import { runRuntimeAuditDiagnostics } from './runtime-diagnostics.js';
+import {
+    runRuntimeAuditDiagnostics,
+    runRuntimeAuditDiagnosticsDetailed,
+} from './runtime-diagnostics.js';
 
-async function checkRuntimeAuditIntegrity() {
-    return await runRuntimeAuditDiagnostics();
+async function checkRuntimeAuditIntegrity({ detailed = false } = {}) {
+    return detailed
+        ? await runRuntimeAuditDiagnosticsDetailed({ repair: true })
+        : await runRuntimeAuditDiagnostics({ repair: true });
 }
 
 
@@ -46,7 +51,7 @@ async function checkRuntimeAuditIntegrity() {
  * Run all diagnostic checks.
  * @returns {DiagResult[]}
  */
-export async function runDiagnostics() {
+async function runDiagnosticsInternal({ detailedRuntimeAudits = false } = {}) {
     const settingsBefore = JSON.stringify(getSettings());
     const results = [];
 
@@ -76,7 +81,7 @@ export async function runDiagnostics() {
     await collect(checkEntryUidsValid);
     await collect(checkTreesValid);
     await collect(checkToolRuntimeDuringDiagnostics);
-    await collect(checkRuntimeAuditIntegrity);
+    await collect(() => checkRuntimeAuditIntegrity({ detailed: detailedRuntimeAudits }));
     await collect(checkTrackerUids);
 
     // Phase 3: Independent read-only checks (parallel for speed)
@@ -140,6 +145,14 @@ export async function runDiagnostics() {
     } catch { /* best effort */ }
 
     return results;
+}
+
+export async function runDiagnostics() {
+    return await runDiagnosticsInternal({ detailedRuntimeAudits: false });
+}
+
+export async function runDiagnosticsDetailed() {
+    return await runDiagnosticsInternal({ detailedRuntimeAudits: true });
 }
 
 /** Check that extension settings are initialized. */
