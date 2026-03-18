@@ -3475,6 +3475,52 @@
     margin-top: 4px;
 }
 
+.tv-runtime-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.tv-runtime-dashboard .tv-health-section {
+    overflow: hidden;
+}
+
+.tv-runtime-dashboard .tv-health-type-grid {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    align-items: stretch;
+}
+
+.tv-runtime-dashboard .tv-health-stat {
+    min-width: 0;
+    min-height: 76px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+}
+
+.tv-runtime-dashboard .tv-health-stat-value {
+    font-size: 1.05em;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.tv-runtime-dashboard .tv-health-stat-label {
+    display: block;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.tv-runtime-dashboard .tv-health-avg {
+    margin-top: 8px;
+    line-height: 1.4;
+}
+
 /* Category distribution bars */
 .tv-health-cat-list {
     display: flex;

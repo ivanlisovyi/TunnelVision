@@ -258,6 +258,86 @@ describe('auditWorldStateRuntime', () => {
         expect(audit.requiresConfirmation).toEqual([]);
     });
 
+    it('uses the provided snapshot state when reporting a healthy audit context', () => {
+        const text = [
+            '## Current Scene',
+            'Day: 6',
+            'Date: Sunday 16 March 2025',
+            'Time: around 13:10-13:20',
+            'Location: Germany > Berlin > Cafe',
+            '',
+            '## Recent Changes',
+            'Elena arrived at the cafe after the cathedral meeting.',
+            '',
+            '## Off-Screen',
+            'Rain gathers over the city.',
+            '',
+            '## Pending',
+            'Elena must decide whether to trust Darius.',
+            '',
+            '## Active Threads',
+            'The cathedral archives remain contested.',
+        ].join('\n');
+        const sections = {
+            'Current Scene': [
+                '## Current Scene',
+                'Day: 6',
+                'Date: Sunday 16 March 2025',
+                'Time: around 13:10-13:20',
+                'Location: Germany > Berlin > Cafe',
+            ].join('\n'),
+            'Recent Changes': [
+                '## Recent Changes',
+                'Elena arrived at the cafe after the cathedral meeting.',
+            ].join('\n'),
+            'Off-Screen': [
+                '## Off-Screen',
+                'Rain gathers over the city.',
+            ].join('\n'),
+            'Pending': [
+                '## Pending',
+                'Elena must decide whether to trust Darius.',
+            ].join('\n'),
+            'Active Threads': [
+                '## Active Threads',
+                'The cathedral archives remain contested.',
+            ].join('\n'),
+        };
+
+        const audit = auditWorldStateRuntime({
+            metadataKey: 'tunnelvision_worldstate',
+            state: {
+                lastUpdated: Date.now(),
+                lastUpdateMsgIdx: 8,
+                epoch: 4,
+                sectionsEpoch: 4,
+                text,
+                sections,
+                previousText: '',
+            },
+            stateEpoch: 4,
+            sectionsEpoch: 4,
+            sections,
+            updateRunning: true,
+            priorityRequested: false,
+            priorityContext: { source: 'test' },
+            chatRef: { lastChatLength: 9 },
+        });
+
+        expect(audit.ok).toBe(true);
+        expect(audit.findings).toHaveLength(1);
+        expect(audit.findings[0]).toMatchObject({
+            id: 'worldstate-runtime-valid',
+            severity: 'info',
+            context: expect.objectContaining({
+                updateRunning: true,
+                priorityRequested: false,
+                stateEpoch: 4,
+                sectionsEpoch: 4,
+            }),
+        });
+    });
+
     it('reports malformed persisted metadata as an integrity error', () => {
         mockState.context.chatMetadata.tunnelvision_worldstate = 'broken-state';
 

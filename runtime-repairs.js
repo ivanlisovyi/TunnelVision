@@ -49,7 +49,10 @@ const SAFE_RUNTIME_REPAIR_HANDLERS = Object.freeze({
         return true;
     },
     'rebuild-prompt-plan': async () => {
-        await prepareAndInjectGenerationPrompts();
+        await prepareAndInjectGenerationPrompts({
+            promptBuildMode: 'read-only',
+            isRecursiveToolPassImpl: () => false,
+        });
         return true;
     },
 });

@@ -7,6 +7,7 @@ const mockState = {
     cachedWorldInfoCalls: [],
     worldStatePrompt: '',
     smartContextPrompt: '',
+    smartContextRuntimeSnapshot: null,
     notebookPrompt: '',
     injectionSizes: null,
 };
@@ -49,6 +50,11 @@ vi.mock('../world-state.js', () => ({
 
 vi.mock('../smart-context.js', () => ({
     buildSmartContextPrompt: vi.fn(() => mockState.smartContextPrompt),
+    getSmartContextRuntimeSnapshot: vi.fn(() => mockState.smartContextRuntimeSnapshot || {
+        cacheKey: null,
+        cacheFresh: false,
+        preWarmCachedAt: 0,
+    }),
 }));
 
 vi.mock('../../../../script.js', () => ({
@@ -116,15 +122,17 @@ vi.mock('../runtime-health.js', () => ({
 import {
     buildPromptInjectionPlan,
     applyPromptInjectionPlan,
-    getPromptInjectionRuntimeSnapshot,
     mapPositionSetting,
     mapRoleSetting,
     TV_PROMPT_KEY,
     TV_WORLDSTATE_KEY,
     TV_SMARTCTX_KEY,
     TV_NOTEBOOK_KEY,
-    auditPromptInjectionRuntime,
 } from '../prompt-injection-service.js';
+import {
+    getPromptInjectionRuntimeSnapshot,
+    auditPromptInjectionRuntime,
+} from '../prompt-injection-runtime.js';
 import { buildSmartContextPrompt } from '../smart-context.js';
 import { buildWorldStatePrompt } from '../world-state.js';
 import { buildNotebookPrompt } from '../tools/notebook.js';
@@ -132,6 +140,7 @@ import { resetTurnEntryCount, invalidateDirtyWorldInfoCache } from '../entry-man
 import { setInjectionSizes } from '../agent-utils.js';
 import { resetNotebookWriteGuard } from '../tools/notebook.js';
 import { setExtensionPrompt } from '../../../../script.js';
+import { resetPromptInjectionInstallState } from '../prompt-injection-runtime-state.js';
 
 function makeSettings(overrides = {}) {
     return {
@@ -165,8 +174,10 @@ beforeEach(() => {
     mockState.cachedWorldInfoCalls = [];
     mockState.worldStatePrompt = '';
     mockState.smartContextPrompt = '';
+    mockState.smartContextRuntimeSnapshot = null;
     mockState.notebookPrompt = '';
     mockState.injectionSizes = null;
+    resetPromptInjectionInstallState();
     vi.clearAllMocks();
 });
 
@@ -884,5 +895,48 @@ describe('applyPromptInjectionPlan', () => {
 
         expect(audit.reasonCodes).not.toContain('stale_prompt_plan');
         expect(audit.context.awaitingGenerationRefresh).toBe(true);
+    });
+
+    it('suppresses stale installed prompt warnings when smart-context prewarm refreshes after the installed plan', async () => {
+        mockState.settings = makeSettings({
+            worldStateEnabled: true,
+            smartContextEnabled: true,
+            notebookEnabled: true,
+            mandatoryPromptText: 'MANDATORY',
+        });
+        mockState.activeBooks = ['Book A'];
+        mockState.worldStatePrompt = 'WORLD';
+        mockState.smartContextPrompt = 'SMART-A';
+        mockState.notebookPrompt = 'NOTE';
+        mockState.context.chat = [
+            { is_user: true, mes: 'Tell me about Elena.' },
+            { is_user: false, mes: 'Elena enters the archive.' },
+        ];
+        mockState.smartContextRuntimeSnapshot = {
+            cacheKey: 'chat-key',
+            cacheFresh: false,
+            preWarmCachedAt: 0,
+        };
+
+        const plan = await buildPromptInjectionPlan({
+            isRecursiveToolPassImpl: () => false,
+        });
+        applyPromptInjectionPlan(plan);
+
+        mockState.smartContextPrompt = 'SMART-B';
+        mockState.smartContextRuntimeSnapshot = {
+            cacheKey: 'chat-key',
+            cacheFresh: true,
+            preWarmCachedAt: 1000,
+        };
+
+        const audit = await auditPromptInjectionRuntime({
+            isRecursiveToolPassImpl: () => false,
+        });
+
+        expect(audit.reasonCodes).not.toContain('stale_prompt_plan');
+        expect(audit.context.awaitingGenerationRefresh).toBe(true);
+        expect(audit.context.smartContextCacheFresh).toBe(true);
+        expect(audit.context.installedPlanSmartContextCacheFresh).toBe(false);
     });
 });

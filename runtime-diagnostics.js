@@ -9,10 +9,10 @@
  */
 
 import { auditToolRegistrationRuntime } from './tool-registry.js';
-import { auditPromptInjectionRuntime } from './prompt-injection-service.js';
+import { auditPromptInjectionRuntime } from './prompt-injection-runtime.js';
 import { auditPostTurnProcessorRuntime } from './post-turn-processor.js';
-import { auditSmartContextRuntime } from './smart-context.js';
-import { auditWorldStateRuntime } from './world-state.js';
+import { auditSmartContextRuntime } from './smart-context-runtime.js';
+import { auditWorldStateRuntime } from './world-state-runtime.js';
 import { auditEntryManagerRuntime } from './entry-manager.js';
 import { getOrchestrationRuntimeSnapshot } from './runtime-orchestration.js';
 import { auditSidecarRuntime } from './llm-sidecar.js';

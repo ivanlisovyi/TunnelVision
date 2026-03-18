@@ -24,15 +24,11 @@ import { addBackgroundEvent, registerBackgroundTask } from './background-events.
 import { logRuntimeFailure } from './runtime-telemetry.js';
 import { buildArcsSummary } from './arc-tracker.js';
 import { withWorldInfoAttribution } from './world-info-attribution.js';
+import { worldStateRuntimeState } from './world-state-runtime-state.js';
 import {
-    RUNTIME_AUDIT_GROUPS,
-    RUNTIME_AUDIT_SEVERITIES,
-    RUNTIME_REASON_CODES,
-    RUNTIME_REPAIR_CLASSES,
-    createRuntimeAuditResult,
-    createRuntimeFinding,
-    createRuntimeRepair,
-} from './runtime-health.js';
+    auditWorldStateRuntime as auditWorldStateRuntimeState,
+    getWorldStateRuntimeSnapshot as getWorldStateRuntimeSnapshotState,
+} from './world-state-runtime.js';
 
 const METADATA_KEY = 'tunnelvision_worldstate';
 
@@ -95,9 +91,6 @@ export const DEFAULT_WS_UPDATE_PROMPT = [
     'Respond with ONLY the world state content. No JSON, no code fences, no commentary.',
 ].join('\n');
 
-let _updateRunning = false;
-const _chatRef = { lastChatLength: 0 };
-
 // ── Persistence ──────────────────────────────────────────────────
 
 function getWorldState() {
@@ -144,40 +137,7 @@ function isPlainObject(value) {
 }
 
 export function getWorldStateRuntimeSnapshot() {
-    const state = getWorldState();
-    const sections = getWorldStateSections();
-    return {
-        metadataKey: METADATA_KEY,
-        state,
-        stateEpoch: Number.isFinite(state?.epoch) ? state.epoch : 0,
-        sectionsEpoch: Number.isFinite(state?.sectionsEpoch) ? state.sectionsEpoch : 0,
-        sections,
-        updateRunning: _updateRunning,
-        priorityRequested: _priorityRequested,
-        priorityContext: _priorityContext,
-        chatRef: { ..._chatRef },
-    };
-}
-
-function isValidWorldStateMetadata(state) {
-    if (state == null) return true;
-    if (!isPlainObject(state)) return false;
-
-    if (state.lastUpdated != null && !Number.isFinite(state.lastUpdated)) return false;
-    if (state.lastUpdateMsgIdx != null && !Number.isFinite(state.lastUpdateMsgIdx)) return false;
-    if (state.epoch != null && !Number.isFinite(state.epoch)) return false;
-    if (state.sectionsEpoch != null && !Number.isFinite(state.sectionsEpoch)) return false;
-    if (state.text != null && typeof state.text !== 'string') return false;
-    if (state.previousText != null && typeof state.previousText !== 'string') return false;
-    if (state.sections != null && !isPlainObject(state.sections)) return false;
-
-    if (isPlainObject(state.sections)) {
-        for (const [name, body] of Object.entries(state.sections)) {
-            if (typeof name !== 'string' || typeof body !== 'string') return false;
-        }
-    }
-
-    return true;
+    return getWorldStateRuntimeSnapshotState();
 }
 
 // ── Structural Validation ────────────────────────────────────────
@@ -532,7 +492,7 @@ async function buildUpdatePrompt(previousState, recentExcerpt, priorityContext =
  * @returns {Promise<Object|null>} The new state object, or null if skipped/failed
  */
 export async function updateWorldState(forceUpdate = false, priorityContext = null) {
-    if (_updateRunning) return null;
+    if (worldStateRuntimeState.updateRunning) return null;
     if (!forceUpdate && !shouldUpdate()) return null;
 
     const settings = getSettings();
@@ -559,7 +519,7 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
         }
     }
 
-    _updateRunning = true;
+    worldStateRuntimeState.updateRunning = true;
     const task = registerBackgroundTask({ label: 'World state', icon: 'fa-globe', color: '#00b894' });
 
     try {
@@ -646,21 +606,18 @@ export async function updateWorldState(forceUpdate = false, priorityContext = nu
             error: e.message || 'Unknown error',
             taskId: task.id,
         });
-        _updateRunning = false;
+        worldStateRuntimeState.updateRunning = false;
         task.fail(e, () => updateWorldState(true));
         return null;
     } finally {
         if (!task._ended) {
-            _updateRunning = false;
+            worldStateRuntimeState.updateRunning = false;
             task.end();
         }
     }
 }
 
 // ── Priority Update ──────────────────────────────────────────────
-
-let _priorityRequested = false;
-let _priorityContext = null;
 
 /**
  * Request an out-of-band world state update (debounced).
@@ -672,16 +629,16 @@ let _priorityContext = null;
  * @param {string}  [reason.sceneChangeType]
  */
 export function requestPriorityUpdate(reason) {
-    if (_priorityRequested || _updateRunning) return;
+    if (worldStateRuntimeState.priorityRequested || worldStateRuntimeState.updateRunning) return;
     const settings = getSettings();
     if (!settings.worldStateEnabled || settings.globalEnabled === false) return;
 
-    _priorityRequested = true;
-    _priorityContext = reason || null;
+    worldStateRuntimeState.priorityRequested = true;
+    worldStateRuntimeState.priorityContext = reason || null;
     setTimeout(() => {
-        _priorityRequested = false;
-        const ctx = _priorityContext;
-        _priorityContext = null;
+        worldStateRuntimeState.priorityRequested = false;
+        const ctx = worldStateRuntimeState.priorityContext;
+        worldStateRuntimeState.priorityContext = null;
         updateWorldState(true, ctx).catch(e => {
             console.error('[TunnelVision] Priority world state update failed:', e);
         });
@@ -702,10 +659,10 @@ function onAiMessageReceived() {
     } catch { /* proceed */ }
 
     const chatLength = getContext().chat?.length || 0;
-    const isSwipe = chatLength > 0 && chatLength <= _chatRef.lastChatLength;
+    const isSwipe = chatLength > 0 && chatLength <= worldStateRuntimeState.chatRef.lastChatLength;
 
     if (isSwipe) {
-        _chatRef.lastChatLength = chatLength;
+        worldStateRuntimeState.chatRef.lastChatLength = chatLength;
         // If the world state was last updated on the swiped message, invalidate it
         const state = getWorldState();
         if (state && state.lastUpdateMsgIdx >= chatLength - 1) {
@@ -720,7 +677,7 @@ function onAiMessageReceived() {
         return;
     }
 
-    _chatRef.lastChatLength = chatLength;
+    worldStateRuntimeState.chatRef.lastChatLength = chatLength;
 
     if (shouldUpdate()) {
         updateWorldState().catch(e => {
@@ -731,9 +688,9 @@ function onAiMessageReceived() {
 
 function onChatChanged() {
     try {
-        _chatRef.lastChatLength = getContext().chat?.length || 0;
+        worldStateRuntimeState.chatRef.lastChatLength = getContext().chat?.length || 0;
     } catch {
-        _chatRef.lastChatLength = 0;
+        worldStateRuntimeState.chatRef.lastChatLength = 0;
     }
 }
 
@@ -880,219 +837,11 @@ export function discardInvalidWorldStateHistory() {
 
 /** Check if a world state update is currently in progress. */
 export function isWorldStateUpdating() {
-    return _updateRunning;
+    return worldStateRuntimeState.updateRunning;
 }
 
 export function auditWorldStateRuntime(snapshot = getWorldStateRuntimeSnapshot()) {
-    const findings = [];
-    const safeRepairs = [];
-    const requiresConfirmation = [];
-    const {
-        state,
-        stateEpoch,
-        sectionsEpoch,
-        sections,
-        updateRunning,
-        priorityRequested,
-        priorityContext,
-        metadataKey,
-    } = snapshot;
-
-    if (!isValidWorldStateMetadata(state)) {
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-invalid-metadata',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-            message: 'Persisted world-state metadata is malformed.',
-            reasonCode: RUNTIME_REASON_CODES.INVALID_WORLD_STATE_METADATA,
-            repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-            repairActionId: 'rebuild-world-state-metadata',
-            context: { state },
-        }));
-
-        requiresConfirmation.push(createRuntimeRepair({
-            id: 'rebuild-world-state-metadata',
-            label: 'Rebuild persisted world-state metadata',
-            repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-            reasonCode: RUNTIME_REASON_CODES.INVALID_WORLD_STATE_METADATA,
-            context: { metadataKey },
-        }));
-    }
-
-    if (state?.text && !validateWorldStateStructure(state.text).valid) {
-        const validation = validateWorldStateStructure(state.text);
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-invalid-structure',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-            message: `Persisted world-state text failed structural validation: ${validation.reason}`,
-            reasonCode: RUNTIME_REASON_CODES.INVALID_WORLD_STATE_METADATA,
-            repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-            repairActionId: 'rebuild-world-state-metadata',
-            context: {
-                validation,
-                textLength: state.text.length,
-            },
-        }));
-    }
-
-    if (
-        state?.text
-        && isPlainObject(state?.sections)
-        && JSON.stringify(parseWorldStateSections(state.text)) !== JSON.stringify(state.sections)
-    ) {
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-sections-stale',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-            message: 'Persisted world-state sections are stale relative to the current text payload.',
-            reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'reparse-world-state-sections',
-            context: {
-                parsedSections: parseWorldStateSections(state.text),
-                persistedSections: state.sections,
-            },
-        }));
-
-        safeRepairs.push(createRuntimeRepair({
-            id: 'reparse-world-state-sections',
-            label: 'Rebuild parsed world-state sections from current text',
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
-            context: { metadataKey },
-        }));
-    }
-
-    if (
-        state?.text
-        && isPlainObject(state?.sections)
-        && stateEpoch > 0
-        && sectionsEpoch > 0
-        && sectionsEpoch !== stateEpoch
-    ) {
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-sections-epoch-stale',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-            message: 'World-state section metadata was built for an older world-state epoch.',
-            reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'reparse-world-state-sections',
-            context: {
-                stateEpoch,
-                sectionsEpoch,
-            },
-        }));
-
-        if (!safeRepairs.some(repair => repair.id === 'reparse-world-state-sections')) {
-            safeRepairs.push(createRuntimeRepair({
-                id: 'reparse-world-state-sections',
-                label: 'Rebuild parsed world-state sections from current text',
-                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-                reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
-                context: { metadataKey },
-            }));
-        }
-    }
-
-    if (state?.previousText && typeof state.previousText === 'string' && !validateWorldStateStructure(state.previousText).valid) {
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-previous-text-invalid',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-            message: 'Previous world-state snapshot is present but structurally invalid.',
-            reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
-            repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-            repairActionId: 'discard-invalid-world-state-history',
-            context: {
-                previousTextLength: state.previousText.length,
-            },
-        }));
-
-        requiresConfirmation.push(createRuntimeRepair({
-            id: 'discard-invalid-world-state-history',
-            label: 'Discard invalid previous world-state snapshot',
-            repairClass: RUNTIME_REPAIR_CLASSES.EXPLICIT,
-            reasonCode: RUNTIME_REASON_CODES.STALE_WORLD_STATE_OUTPUT,
-            context: { metadataKey: METADATA_KEY },
-        }));
-    }
-
-    if (updateRunning && priorityRequested) {
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-priority-overlap',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-            message: 'Priority world-state update is still queued while an update is already running.',
-            reasonCode: RUNTIME_REASON_CODES.WORLD_STATE_INJECTION_INTEGRITY_FAILURE,
-            context: {
-                updateRunning,
-                priorityRequested,
-                priorityContext,
-            },
-        }));
-    }
-
-    if (state?.text && (!sections || Object.keys(sections).length === 0)) {
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-missing-sections',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-            message: 'World-state text exists but no parsed sections are currently available.',
-            reasonCode: RUNTIME_REASON_CODES.WORLD_STATE_INJECTION_INTEGRITY_FAILURE,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'reparse-world-state-sections',
-            context: {
-                textLength: state.text.length,
-            },
-        }));
-
-        if (!safeRepairs.some(repair => repair.id === 'reparse-world-state-sections')) {
-            safeRepairs.push(createRuntimeRepair({
-                id: 'reparse-world-state-sections',
-                label: 'Rebuild parsed world-state sections from current text',
-                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-                reasonCode: RUNTIME_REASON_CODES.WORLD_STATE_INJECTION_INTEGRITY_FAILURE,
-                context: { metadataKey },
-            }));
-        }
-    }
-
-    if (findings.length === 0) {
-        findings.push(createRuntimeFinding({
-            id: 'worldstate-runtime-valid',
-            subsystem: 'world-state',
-            severity: RUNTIME_AUDIT_SEVERITIES.INFO,
-            message: 'World-state metadata, sections, and update state validated.',
-            context: {
-                hasState: Boolean(state),
-                sectionCount: sections ? Object.keys(sections).length : 0,
-                stateEpoch,
-                sectionsEpoch,
-                updateRunning: _updateRunning,
-                priorityRequested: _priorityRequested,
-            },
-        }));
-    }
-
-    return createRuntimeAuditResult({
-        group: RUNTIME_AUDIT_GROUPS.WORLD_STATE,
-        ok: findings.every(finding => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR),
-        summary: findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.ERROR)
-            ? 'World-state audit found integrity issues.'
-            : findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN)
-                ? 'World-state audit found coordination issues.'
-                : 'World-state audit passed.',
-        findings,
-        safeRepairs,
-        requiresConfirmation,
-        context: {
-            ...snapshot,
-            hasState: Boolean(state),
-            sectionCount: sections ? Object.keys(sections).length : 0,
-        },
-    });
+    return auditWorldStateRuntimeState(snapshot);
 }
 
 /** Whether a previous world state version is available for reverting. */

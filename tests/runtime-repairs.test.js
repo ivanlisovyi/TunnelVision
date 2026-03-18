@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { prepareAndInjectGenerationPrompts } from '../prompt-injection-service.js';
 
 const mockState = {
     calls: [],
@@ -144,6 +145,12 @@ describe('executeSafeRuntimeAuditRepairs', () => {
             ],
             failed: [],
         });
+        expect(vi.mocked(prepareAndInjectGenerationPrompts)).toHaveBeenCalledWith({
+            promptBuildMode: 'read-only',
+            isRecursiveToolPassImpl: expect.any(Function),
+        });
+        const call = vi.mocked(prepareAndInjectGenerationPrompts).mock.calls.at(-1)?.[0];
+        expect(call?.isRecursiveToolPassImpl?.()).toBe(false);
     });
 
     it('does not report repairs as applied when a handler explicitly returns false', async () => {

@@ -15,16 +15,11 @@ import { buildNotebookPrompt, resetNotebookWriteGuard } from './tools/notebook.j
 import { buildWorldStatePrompt } from './world-state.js';
 import { buildSmartContextPrompt } from './smart-context.js';
 import { MIN_INJECTION_BUDGET_CHARS, BUDGET_TRIM_NEWLINE_RATIO } from './constants.js';
-import {
-    RUNTIME_AUDIT_GROUPS,
-    RUNTIME_AUDIT_SEVERITIES,
-    RUNTIME_REASON_CODES,
-    RUNTIME_REPAIR_CLASSES,
-    createRuntimeAuditResult,
-    createRuntimeFinding,
-    createRuntimeRepair,
-} from './runtime-health.js';
 import { createNamedCorrelationId, logRuntimeFailure } from './runtime-telemetry.js';
+import {
+    buildPromptRuntimeChatFingerprint,
+    recordAppliedPromptPlanRuntimeState,
+} from './prompt-injection-runtime-state.js';
 
 export const TV_PROMPT_KEY = 'tunnelvision_mandatory';
 export const TV_NOTEBOOK_KEY = 'tunnelvision_notebook';
@@ -32,32 +27,6 @@ export const TV_WORLDSTATE_KEY = 'tunnelvision_worldstate';
 export const TV_SMARTCTX_KEY = 'tunnelvision_smartcontext';
 const TV_PROMPT_LOG_PREFIX = '[TunnelVision][PromptInjection]';
 let _promptPlanEpoch = 0;
-let _lastAppliedPromptPlanEpoch = 0;
-let _lastAppliedPromptPlanSignature = null;
-let _lastAppliedPromptPlanChatLength = 0;
-let _lastAppliedPromptPlanChatFingerprint = null;
-
-function buildPromptRuntimeChatFingerprint(context = getContext()) {
-    try {
-        const chat = context?.chat || [];
-        const lastMsg = chat[chat.length - 1] || null;
-        return JSON.stringify({
-            chatLength: chat.length,
-            lastMessage: lastMsg
-                ? {
-                    is_user: !!lastMsg.is_user,
-                    name: lastMsg.name || '',
-                    mes: lastMsg.mes || '',
-                    toolInvocations: Array.isArray(lastMsg?.extra?.tool_invocations)
-                        ? lastMsg.extra.tool_invocations.length
-                        : 0,
-                }
-                : null,
-        });
-    } catch {
-        return null;
-    }
-}
 
 function clonePromptPlanState(payload = {}) {
     return {
@@ -83,7 +52,7 @@ function clonePromptPlanState(payload = {}) {
     };
 }
 
-function buildPromptPlanSignature(payload = {}) {
+export function buildPromptPlanSignature(payload = {}) {
     return JSON.stringify(clonePromptPlanState(payload));
 }
 
@@ -457,46 +426,6 @@ export async function buildPromptInjectionPlan(deps = {}) {
     };
 }
 
-export async function getPromptInjectionRuntimeSnapshot(deps = {}) {
-    const payload = await buildPromptInjectionPlan({
-        ...deps,
-        promptBuildMode: deps.promptBuildMode || 'audit',
-        setInjectionSizesImpl: () => {},
-        resetTurnEntryCountImpl: () => {},
-        invalidateDirtyWorldInfoCacheImpl: () => {},
-        resetNotebookWriteGuardImpl: () => {},
-        stripOldToolResultsImpl: () => {},
-    });
-    return {
-        enabled: payload.enabled,
-        activeBooks: payload.activeBooks,
-        isRecursiveToolPass: payload.isRecursiveToolPass,
-        prompts: payload.prompts,
-        promptMeta: payload.promptMeta,
-        promptKeys: payload.promptKeys,
-        settings: payload.settings,
-        auditContext: {
-            ...(payload.auditContext || {}),
-            installedPlanEpoch: _lastAppliedPromptPlanEpoch,
-        },
-        expectedPlanSignature: buildPromptPlanSignature(payload),
-        installedPlanEpoch: _lastAppliedPromptPlanEpoch,
-        installedPlanSignature: _lastAppliedPromptPlanSignature,
-        currentChatLength: payload.auditContext?.currentChatLength || 0,
-        currentChatFingerprint: payload.auditContext?.currentChatFingerprint || null,
-        installedPlanChatLength: _lastAppliedPromptPlanChatLength,
-        installedPlanChatFingerprint: _lastAppliedPromptPlanChatFingerprint,
-        awaitingGenerationRefresh: Boolean(
-            _lastAppliedPromptPlanEpoch > 0
-            && (
-                (_lastAppliedPromptPlanChatFingerprint && payload.auditContext?.currentChatFingerprint
-                    && _lastAppliedPromptPlanChatFingerprint !== payload.auditContext.currentChatFingerprint)
-                || ((_lastAppliedPromptPlanChatLength || 0) !== (payload.auditContext?.currentChatLength || 0))
-            )
-        ),
-    };
-}
-
 /**
  * Installs the prepared prompt payloads into SillyTavern's extension prompt slots.
  *
@@ -563,10 +492,12 @@ export function applyPromptInjectionPlan(payload, deps = {}) {
         payload.promptMeta.notebook.role,
     );
 
-    _lastAppliedPromptPlanEpoch = planEpoch;
-    _lastAppliedPromptPlanSignature = buildPromptPlanSignature(payload);
-    _lastAppliedPromptPlanChatLength = payload.auditContext?.currentChatLength || 0;
-    _lastAppliedPromptPlanChatFingerprint = payload.auditContext?.currentChatFingerprint || null;
+    recordAppliedPromptPlanRuntimeState({
+        planEpoch,
+        planSignature: buildPromptPlanSignature(payload),
+        payload,
+        getSmartContextRuntimeSnapshotImpl: deps.getSmartContextRuntimeSnapshotImpl,
+    });
 }
 
 /**
@@ -587,171 +518,6 @@ export async function prepareAndInjectGenerationPrompts(deps = {}) {
         notebookChars: payload.prompts.notebook.length,
     });
     return payload;
-}
-
-export async function auditPromptInjectionRuntime(deps = {}) {
-    const payload = deps.payload || await getPromptInjectionRuntimeSnapshot(deps);
-    const findings = [];
-    const safeRepairs = [];
-    const promptKeys = payload.promptKeys || {
-        mandatory: TV_PROMPT_KEY,
-        worldState: TV_WORLDSTATE_KEY,
-        smartContext: TV_SMARTCTX_KEY,
-        notebook: TV_NOTEBOOK_KEY,
-    };
-
-    const expectedPromptKeys = {
-        mandatory: deps.promptKeys?.mandatory || TV_PROMPT_KEY,
-        worldState: deps.promptKeys?.worldState || TV_WORLDSTATE_KEY,
-        smartContext: deps.promptKeys?.smartContext || TV_SMARTCTX_KEY,
-        notebook: deps.promptKeys?.notebook || TV_NOTEBOOK_KEY,
-    };
-
-    if (payload.enabled && payload.isRecursiveToolPass && payload.prompts.mandatory) {
-        findings.push(createRuntimeFinding({
-            id: 'prompt-recursive-mandatory-leak',
-            subsystem: 'prompt-injection-service',
-            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-            message: 'Mandatory prompt content leaked into a recursive tool pass.',
-            reasonCode: RUNTIME_REASON_CODES.RECURSIVE_PASS_STATE_LEAK,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'rebuild-prompt-plan',
-            context: {
-                isRecursiveToolPass: payload.isRecursiveToolPass,
-                mandatoryLength: payload.prompts.mandatory.length,
-            },
-        }));
-    }
-
-    if (JSON.stringify(promptKeys) !== JSON.stringify(expectedPromptKeys)) {
-        findings.push(createRuntimeFinding({
-            id: 'prompt-key-integrity-failure',
-            subsystem: 'prompt-injection-service',
-            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-            message: 'Prompt injection keys do not match the expected runtime key set.',
-            reasonCode: RUNTIME_REASON_CODES.PROMPT_KEY_INTEGRITY_FAILURE,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'rebuild-prompt-plan',
-            context: {
-                promptKeys,
-                expectedPromptKeys,
-            },
-        }));
-    }
-
-    const rebudgeted = applyPromptBudget(payload.prompts, payload.settings?.totalInjectionBudget || 0, {
-        minBudgetChars: deps.minBudgetChars,
-        trimNewlineRatio: deps.trimNewlineRatio,
-    });
-
-    if (JSON.stringify(rebudgeted) !== JSON.stringify(payload.prompts)) {
-        findings.push(createRuntimeFinding({
-            id: 'prompt-budget-nondeterministic',
-            subsystem: 'prompt-injection-service',
-            severity: RUNTIME_AUDIT_SEVERITIES.ERROR,
-            message: 'Prompt budget application is not deterministic for the current plan inputs.',
-            reasonCode: RUNTIME_REASON_CODES.NONDETERMINISTIC_BUDGET,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'rebuild-prompt-plan',
-            context: {
-                currentPrompts: payload.prompts,
-                rebudgetedPrompts: rebudgeted,
-                totalInjectionBudget: payload.settings?.totalInjectionBudget || 0,
-            },
-        }));
-    }
-
-    if (
-        payload.installedPlanEpoch > 0
-        && payload.installedPlanSignature
-        && payload.expectedPlanSignature
-        && payload.installedPlanSignature !== payload.expectedPlanSignature
-        && payload.awaitingGenerationRefresh !== true
-    ) {
-        findings.push(createRuntimeFinding({
-            id: 'prompt-installed-plan-stale',
-            subsystem: 'prompt-injection-service',
-            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-            message: 'Installed prompt plan no longer matches the current runtime inputs.',
-            reasonCode: RUNTIME_REASON_CODES.STALE_PROMPT_PLAN,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'rebuild-prompt-plan',
-            context: {
-                installedPlanEpoch: payload.installedPlanEpoch,
-            },
-        }));
-    }
-
-    if (
-        payload.enabled
-        && payload.settings?.mandatoryTools
-        && payload.activeBooks?.length > 0
-        && !payload.isRecursiveToolPass
-        && !payload.prompts.mandatory
-    ) {
-        findings.push(createRuntimeFinding({
-            id: 'prompt-mandatory-plan-missing',
-            subsystem: 'prompt-injection-service',
-            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
-            message: 'Mandatory prompt content is missing for a first-pass generation with active books.',
-            reasonCode: RUNTIME_REASON_CODES.STALE_PROMPT_PLAN,
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            repairActionId: 'rebuild-prompt-plan',
-            context: {
-                activeBooks: payload.activeBooks,
-                mandatoryTools: payload.settings?.mandatoryTools === true,
-            },
-        }));
-    }
-
-    if (findings.length > 0) {
-        safeRepairs.push(createRuntimeRepair({
-            id: 'rebuild-prompt-plan',
-            label: 'Rebuild prompt injection plan',
-            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
-            reasonCode: findings[0]?.reasonCode || RUNTIME_REASON_CODES.STALE_PROMPT_PLAN,
-            context: {
-                activeBooks: payload.activeBooks,
-                isRecursiveToolPass: payload.isRecursiveToolPass,
-            },
-        }));
-    }
-
-    if (findings.length === 0) {
-        findings.push(createRuntimeFinding({
-            id: 'prompt-plan-valid',
-            subsystem: 'prompt-injection-service',
-            severity: RUNTIME_AUDIT_SEVERITIES.INFO,
-            message: 'Prompt injection plan integrity validated for the current runtime inputs.',
-            context: payload.auditContext || null,
-        }));
-    }
-
-    return createRuntimeAuditResult({
-        group: RUNTIME_AUDIT_GROUPS.PROMPT_INJECTION,
-        ok: findings.every(finding => finding.severity !== RUNTIME_AUDIT_SEVERITIES.ERROR),
-        summary: findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.ERROR)
-            ? 'Prompt injection audit found integrity issues.'
-            : findings.some(finding => finding.severity === RUNTIME_AUDIT_SEVERITIES.WARN)
-                ? 'Prompt injection audit found coordination issues.'
-                : 'Prompt injection audit passed.',
-        findings,
-        safeRepairs,
-        context: {
-            ...(payload.auditContext || {
-                enabled: payload.enabled,
-                activeBooks: payload.activeBooks,
-                isRecursiveToolPass: payload.isRecursiveToolPass,
-                promptKeys,
-            }),
-            installedPlanEpoch: payload.installedPlanEpoch || 0,
-            expectedPlanSignature: payload.expectedPlanSignature || null,
-            installedPlanSignature: payload.installedPlanSignature || null,
-            currentChatLength: payload.currentChatLength || 0,
-            installedPlanChatLength: payload.installedPlanChatLength || 0,
-            awaitingGenerationRefresh: payload.awaitingGenerationRefresh === true,
-        },
-    });
 }
 
 /**

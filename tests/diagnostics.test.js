@@ -50,7 +50,7 @@ vi.mock('../tool-registry.js', () => ({
     auditToolRegistrationRuntime: vi.fn(async () => getMockState().runtimeAudits.registration),
 }));
 
-vi.mock('../prompt-injection-service.js', () => ({
+vi.mock('../prompt-injection-runtime.js', () => ({
     auditPromptInjectionRuntime: vi.fn(async () => getMockState().runtimeAudits.promptInjection),
 }));
 
@@ -58,11 +58,11 @@ vi.mock('../post-turn-processor.js', () => ({
     auditPostTurnProcessorRuntime: vi.fn(() => getMockState().runtimeAudits.postTurn),
 }));
 
-vi.mock('../smart-context.js', () => ({
+vi.mock('../smart-context-runtime.js', () => ({
     auditSmartContextRuntime: vi.fn(() => getMockState().runtimeAudits.smartContext),
 }));
 
-vi.mock('../world-state.js', () => ({
+vi.mock('../world-state-runtime.js', () => ({
     auditWorldStateRuntime: vi.fn(() => getMockState().runtimeAudits.worldState),
 }));
 
