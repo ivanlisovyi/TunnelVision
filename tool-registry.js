@@ -238,6 +238,9 @@ async function inspectToolRuntimeState() {
         eligibilityErrors,
         lastAppliedRegistrationSignature: _lastAppliedRegistrationSignature,
         lastComputedRegistrationSignature: _lastComputedRegistrationSignature,
+        registrationEpoch: _registrationEpoch,
+        lastAppliedRegistrationEpoch: _lastAppliedRegistrationEpoch,
+        lastComputedRegistrationEpoch: _lastComputedRegistrationEpoch,
         registerVersion: _registerVersion,
         hasRegisterLock: Boolean(_registerLock),
         trackerListCached: Boolean(_trackerListCache),
@@ -348,6 +351,40 @@ export async function auditToolRegistrationRuntime({ repair = false, reason = 'd
                 expectedToolNames: snapshot.expectedToolNames,
             },
         }));
+    }
+
+    if (
+        snapshot.lastComputedRegistrationSignature
+        && snapshot.lastAppliedRegistrationSignature
+        && snapshot.lastComputedRegistrationSignature === snapshot.lastAppliedRegistrationSignature
+        && snapshot.lastComputedRegistrationEpoch > snapshot.lastAppliedRegistrationEpoch
+    ) {
+        findings.push(createRuntimeFinding({
+            id: 'registration-stale-applied-epoch',
+            subsystem: 'tool-registry',
+            severity: RUNTIME_AUDIT_SEVERITIES.WARN,
+            message: 'Registered tool state is using a stale applied epoch for the current registration signature.',
+            reasonCode: RUNTIME_REASON_CODES.REDUNDANT_REGISTRATION,
+            repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+            repairActionId: 'rebuild-tool-registration',
+            context: {
+                registrationEpoch: snapshot.registrationEpoch,
+                lastAppliedRegistrationEpoch: snapshot.lastAppliedRegistrationEpoch,
+                lastComputedRegistrationEpoch: snapshot.lastComputedRegistrationEpoch,
+            },
+        }));
+
+        if (!safeRepairs.some(repairAction => repairAction.id === 'rebuild-tool-registration')) {
+            safeRepairs.push(createRuntimeRepair({
+                id: 'rebuild-tool-registration',
+                label: 'Rebuild active tool registration',
+                repairClass: RUNTIME_REPAIR_CLASSES.SAFE_AUTO,
+                reasonCode: RUNTIME_REASON_CODES.REDUNDANT_REGISTRATION,
+                context: {
+                    reason,
+                },
+            }));
+        }
     }
 
     if (snapshot.missingToolNames.length > 0) {
@@ -596,6 +633,14 @@ function wrapWithConfirmation(originalAction, displayName) {
  *  coalesced so only the latest request actually runs after the lock is freed. */
 let _registerLock = null;
 let _registerVersion = 0;
+let _registrationEpoch = 0;
+let _lastAppliedRegistrationEpoch = 0;
+let _lastComputedRegistrationEpoch = 0;
+
+function bumpRegistrationEpoch() {
+    _registrationEpoch += 1;
+    return _registrationEpoch;
+}
 
 /**
  * Register all TunnelVision tools with ToolManager.
@@ -686,7 +731,9 @@ async function _doRegisterTools() {
 
     const signature = buildRegistrationSignature(preparedTools, activeBooks);
     _lastComputedRegistrationSignature = signature;
+    _lastComputedRegistrationEpoch = bumpRegistrationEpoch();
     if (signature === _lastAppliedRegistrationSignature) {
+        _lastAppliedRegistrationEpoch = _lastComputedRegistrationEpoch;
         console.debug('[TunnelVision] Tool registration skipped: definitions unchanged');
         return;
     }
@@ -706,6 +753,7 @@ async function _doRegisterTools() {
     }
 
     _lastAppliedRegistrationSignature = signature;
+    _lastAppliedRegistrationEpoch = bumpRegistrationEpoch();
 
     const eligible = allDefs.filter(({ def, name }) => def && !disabled[name]).length;
     const snapshot = await inspectToolRuntimeState();
@@ -726,6 +774,8 @@ export function unregisterTools() {
     }
     _lastAppliedRegistrationSignature = null;
     _lastComputedRegistrationSignature = null;
+    _lastAppliedRegistrationEpoch = bumpRegistrationEpoch();
+    _lastComputedRegistrationEpoch = _lastAppliedRegistrationEpoch;
 }
 
 /**

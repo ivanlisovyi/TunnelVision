@@ -87,7 +87,7 @@ export function formatRuntimeAuditResult(audit) {
  * Build a structured orchestration runtime audit from the index-level runtime snapshot.
  * @returns {object}
  */
-export function auditOrchestrationRuntime() {
+export function auditOrchestrationRuntime({ registrationSnapshot = null, promptContext = null } = {}) {
     const snapshot = getOrchestrationRuntimeSnapshot();
     const findings = [];
     const reasonCodes = [];
@@ -179,6 +179,24 @@ export function auditOrchestrationRuntime() {
         reasonCodes.push('generation_preflight_order_violation');
     }
 
+    if (
+        !snapshot.syncInFlight
+        && !snapshot.hasPendingSync
+        && registrationSnapshot
+        && promptContext
+    ) {
+        const registrationBooks = [...(registrationSnapshot.activeBooks || [])].sort();
+        const promptBooks = [...(promptContext.activeBooks || [])].sort();
+
+        if (JSON.stringify(registrationBooks) !== JSON.stringify(promptBooks)) {
+            findings.push({
+                severity: 'warn',
+                reasonCode: 'derived_context_mismatch',
+            });
+            reasonCodes.push('derived_context_mismatch');
+        }
+    }
+
     if (findings.length === 0) {
         findings.push({
             severity: 'info',
@@ -207,15 +225,22 @@ export function auditOrchestrationRuntime() {
  * @returns {Promise<object[]>}
  */
 export async function collectRuntimeAudits() {
-    return await Promise.all([
+    const audits = await Promise.all([
         auditToolRegistrationRuntime({ repair: false, reason: 'diagnostics' }),
         auditPromptInjectionRuntime(),
         Promise.resolve(auditPostTurnProcessorRuntime()),
         Promise.resolve(auditSmartContextRuntime()),
         Promise.resolve(auditWorldStateRuntime()),
         Promise.resolve(auditEntryManagerRuntime()),
-        Promise.resolve(auditOrchestrationRuntime()),
     ]);
+
+    return [
+        ...audits,
+        auditOrchestrationRuntime({
+            registrationSnapshot: audits[0]?.context || null,
+            promptContext: audits[1]?.context || null,
+        }),
+    ];
 }
 
 /**

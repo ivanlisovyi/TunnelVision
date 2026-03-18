@@ -442,7 +442,10 @@ export async function getPromptInjectionRuntimeSnapshot(deps = {}) {
         promptMeta: payload.promptMeta,
         promptKeys: payload.promptKeys,
         settings: payload.settings,
-        auditContext: payload.auditContext,
+        auditContext: {
+            ...(payload.auditContext || {}),
+            installedPlanEpoch: _lastAppliedPromptPlanEpoch,
+        },
         expectedPlanSignature: buildPromptPlanSignature(payload),
         installedPlanEpoch: _lastAppliedPromptPlanEpoch,
         installedPlanSignature: _lastAppliedPromptPlanSignature,

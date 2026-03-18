@@ -86,10 +86,20 @@ function resetMockState() {
         registration: makeAudit({
             group: 'registration-integrity',
             summary: 'Tool registration audit passed.',
+            context: {
+                activeBooks: [],
+                registrationEpoch: 0,
+                lastAppliedRegistrationEpoch: 0,
+                lastComputedRegistrationEpoch: 0,
+            },
         }),
         promptInjection: makeAudit({
             group: 'prompt-injection-integrity',
             summary: 'Prompt injection audit passed.',
+            context: {
+                activeBooks: [],
+                installedPlanEpoch: 0,
+            },
         }),
         postTurn: makeAudit({
             group: 'post-turn-processor-integrity',
@@ -414,6 +424,42 @@ describe('collectRuntimeAudits', () => {
         });
     });
 
+    it('builds a warning orchestration audit when registration and prompt active books drift', async () => {
+        mockState.audits.registration = makeAudit({
+            group: 'registration-integrity',
+            summary: 'Tool registration audit passed.',
+            context: {
+                activeBooks: ['Book A'],
+                registrationEpoch: 3,
+                lastAppliedRegistrationEpoch: 3,
+                lastComputedRegistrationEpoch: 3,
+            },
+        });
+        mockState.audits.promptInjection = makeAudit({
+            group: 'prompt-injection-integrity',
+            summary: 'Prompt injection audit passed.',
+            context: {
+                activeBooks: ['Book B'],
+                installedPlanEpoch: 2,
+            },
+        });
+
+        const audits = await collectRuntimeAudits();
+
+        expect(audits[6]).toEqual({
+            group: 'orchestration-integrity',
+            ok: true,
+            summary: 'Orchestration audit found coordination issues.',
+            findings: [
+                { severity: 'warn', reasonCode: 'derived_context_mismatch' },
+            ],
+            reasonCodes: ['derived_context_mismatch'],
+            safeRepairs: [],
+            requiresConfirmation: [],
+            context: mockState.orchestrationSnapshot,
+        });
+    });
+
     it('builds a failure orchestration audit when sync loses its reason while in flight', async () => {
         mockState.orchestrationSnapshot = {
             ...mockState.orchestrationSnapshot,
@@ -650,6 +696,35 @@ describe('runRuntimeAuditDiagnostics', () => {
         expect(results[6]).toEqual({
             status: 'warn',
             message: 'Orchestration audit found coordination issues. Findings: 0 error(s), 1 warning(s), 0 info item(s). Reasons: lost_invalidation_reason.',
+            fix: null,
+        });
+    });
+
+    it('reports cross-module active-book drift as a warning', async () => {
+        mockState.audits.registration = makeAudit({
+            group: 'registration-integrity',
+            summary: 'Tool registration audit passed.',
+            context: {
+                activeBooks: ['Book A'],
+                registrationEpoch: 3,
+                lastAppliedRegistrationEpoch: 3,
+                lastComputedRegistrationEpoch: 3,
+            },
+        });
+        mockState.audits.promptInjection = makeAudit({
+            group: 'prompt-injection-integrity',
+            summary: 'Prompt injection audit passed.',
+            context: {
+                activeBooks: ['Book B'],
+                installedPlanEpoch: 2,
+            },
+        });
+
+        const results = await runRuntimeAuditDiagnostics();
+
+        expect(results[6]).toEqual({
+            status: 'warn',
+            message: 'Orchestration audit found coordination issues. Findings: 0 error(s), 1 warning(s), 0 info item(s). Reasons: derived_context_mismatch.',
             fix: null,
         });
     });
