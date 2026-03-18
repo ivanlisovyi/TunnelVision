@@ -680,10 +680,6 @@ async function _doRegisterTools() {
     // Pre-fetch tracker list BEFORE unregistering so tools remain available during async I/O
     _trackerListCache = await getTrackerList();
 
-    // Unregister right before the synchronous re-registration loop to minimize
-    // the window where tools are absent.
-    unregisterTools();
-
     const settings = getSettings();
     const disabled = settings.disabledTools || {};
 
@@ -740,7 +736,7 @@ async function _doRegisterTools() {
 
     // Unregister right before the synchronous re-registration loop to minimize
     // the window where tools are absent.
-    unregisterTools();
+    unregisterTools({ preserveRegistrationState: true });
 
     let registered = 0;
     for (const { registrationDef } of preparedTools) {
@@ -764,7 +760,7 @@ async function _doRegisterTools() {
 /**
  * Unregister all TunnelVision tools.
  */
-export function unregisterTools() {
+export function unregisterTools({ preserveRegistrationState = false } = {}) {
     for (const name of ALL_TOOL_NAMES) {
         try {
             ToolManager.unregisterFunctionTool(name);
@@ -772,6 +768,10 @@ export function unregisterTools() {
             // Tool may not be registered — that's fine
         }
     }
+    if (preserveRegistrationState) {
+        return;
+    }
+
     _lastAppliedRegistrationSignature = null;
     _lastComputedRegistrationSignature = null;
     _lastAppliedRegistrationEpoch = bumpRegistrationEpoch();
