@@ -166,6 +166,13 @@ export function trigramSimilarity(a, b) {
 // ── Injection Size Tracking ───────────────────────────────────────
 
 let _injectionSizes = { mandatory: 0, worldState: 0, smartContext: 0, notebook: 0, total: 0 };
+let _lastInjectionPayload = {
+    mandatory: '',
+    worldState: '',
+    smartContext: '',
+    notebook: '',
+    updatedAt: 0,
+};
 
 /**
  * Record the character sizes of the last TunnelVision prompt injections.
@@ -184,6 +191,29 @@ export function setInjectionSizes(sizes) {
 /** @returns {{ mandatory: number, worldState: number, smartContext: number, notebook: number, total: number }} */
 export function getInjectionSizes() {
     return { ..._injectionSizes };
+}
+
+/**
+ * Record the exact last prompt texts injected for each TunnelVision source.
+ * Called from the default generation pipeline after prompt budgeting.
+ * @param {{ mandatory?: string, worldState?: string, smartContext?: string, notebook?: string }} payload
+ */
+export function setLastInjectionPayload(payload = {}) {
+    _lastInjectionPayload = {
+        mandatory: payload.mandatory || '',
+        worldState: payload.worldState || '',
+        smartContext: payload.smartContext || '',
+        notebook: payload.notebook || '',
+        updatedAt: Date.now(),
+    };
+}
+
+/**
+ * Get a snapshot of the last exact TunnelVision prompt texts injected.
+ * @returns {{ mandatory: string, worldState: string, smartContext: string, notebook: string, updatedAt: number }}
+ */
+export function getLastInjectionPayload() {
+    return { ..._lastInjectionPayload };
 }
 
 /**

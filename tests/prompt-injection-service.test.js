@@ -10,6 +10,7 @@ const mockState = {
     smartContextRuntimeSnapshot: null,
     notebookPrompt: '',
     injectionSizes: null,
+    lastInjectionPayload: null,
 };
 
 vi.mock('../tree-store.js', () => ({
@@ -36,6 +37,9 @@ vi.mock('../entry-manager.js', () => ({
 vi.mock('../agent-utils.js', () => ({
     setInjectionSizes: vi.fn((sizes) => {
         mockState.injectionSizes = sizes;
+    }),
+    setLastInjectionPayload: vi.fn((payload) => {
+        mockState.lastInjectionPayload = payload;
     }),
 }));
 
@@ -137,7 +141,7 @@ import { buildSmartContextPrompt } from '../smart-context.js';
 import { buildWorldStatePrompt } from '../world-state.js';
 import { buildNotebookPrompt } from '../tools/notebook.js';
 import { resetTurnEntryCount, invalidateDirtyWorldInfoCache } from '../entry-manager.js';
-import { setInjectionSizes } from '../agent-utils.js';
+import { setInjectionSizes, setLastInjectionPayload } from '../agent-utils.js';
 import { resetNotebookWriteGuard } from '../tools/notebook.js';
 import { setExtensionPrompt } from '../../../../script.js';
 import { resetPromptInjectionInstallState } from '../prompt-injection-runtime-state.js';
@@ -177,6 +181,7 @@ beforeEach(() => {
     mockState.smartContextRuntimeSnapshot = null;
     mockState.notebookPrompt = '';
     mockState.injectionSizes = null;
+    mockState.lastInjectionPayload = null;
     resetPromptInjectionInstallState();
     vi.clearAllMocks();
 });
@@ -422,6 +427,12 @@ twenty`;
             smartContext: 0,
             notebook: 4,
         });
+        expect(mockState.lastInjectionPayload).toEqual({
+            mandatory: plan.prompts.mandatory,
+            worldState: 'WORLD',
+            smartContext: '',
+            notebook: 'NOTE',
+        });
     });
 
     it('leaves prompts unchanged when they already fit within the remaining budget', async () => {
@@ -583,6 +594,7 @@ describe('auditPromptInjectionRuntime', () => {
         expect(invalidateDirtyWorldInfoCache).not.toHaveBeenCalled();
         expect(resetNotebookWriteGuard).not.toHaveBeenCalled();
         expect(setInjectionSizes).not.toHaveBeenCalled();
+        expect(setLastInjectionPayload).not.toHaveBeenCalled();
     });
 
     it('reports recursive pass leakage when mandatory prompt content appears during tool recursion', async () => {

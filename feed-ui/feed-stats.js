@@ -11,7 +11,7 @@ import { isSummaryTitle, isTrackerTitle } from '../tree-store.js';
 import { getCachedWorldInfo } from '../entry-manager.js';
 import { countStaleEntries } from '../entry-scoring.js';
 import { CHARS_PER_TOKEN } from '../constants.js';
-import { getInjectionSizes, getMaxContextTokens } from '../agent-utils.js';
+import { getInjectionSizes, getLastInjectionPayload, getMaxContextTokens } from '../agent-utils.js';
 import {
     getFeedItemsRaw,
     getLorebookStatsCache,
@@ -34,6 +34,42 @@ function icon(iconClass) {
     const i = document.createElement('i');
     i.className = `fa-solid ${iconClass}`;
     return i;
+}
+
+function formatInspectorTimestamp(timestamp) {
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return 'Current session snapshot';
+    try {
+        return `Captured ${new Date(timestamp).toLocaleString()}`;
+    } catch {
+        return 'Current session snapshot';
+    }
+}
+
+function buildInjectionInspector({ slot, text, size, updatedAt, onClose }) {
+    const inspector = el('div', 'tv-context-inspector');
+
+    const header = el('div', 'tv-context-inspector-header');
+    const titleWrap = el('div', 'tv-context-inspector-title-wrap');
+    titleWrap.appendChild(el('div', 'tv-context-inspector-title', slot.label));
+
+    const tokens = Math.round(size / CHARS_PER_TOKEN);
+    titleWrap.appendChild(el('div', 'tv-context-inspector-meta', `${size.toLocaleString()} chars • ~${tokens.toLocaleString()} tok • ${formatInspectorTimestamp(updatedAt)}`));
+    header.appendChild(titleWrap);
+
+    const closeBtn = el('button', 'tv-context-inspector-close');
+    closeBtn.type = 'button';
+    closeBtn.title = 'Close injection inspector';
+    closeBtn.setAttribute('aria-label', 'Close injection inspector');
+    closeBtn.appendChild(icon('fa-xmark'));
+    closeBtn.addEventListener('click', onClose);
+    header.appendChild(closeBtn);
+    inspector.appendChild(header);
+
+    const body = el('pre', 'tv-context-inspector-body');
+    body.textContent = text || 'No captured text available for this source yet.';
+    inspector.appendChild(body);
+
+    return inspector;
 }
 
 // ── Public API ───────────────────────────────────────────────────
@@ -167,6 +203,7 @@ export async function computeLorebookStats() {
 export function buildContextUsageBar() {
     const sizes = getInjectionSizes();
     if (sizes.total === 0) return null;
+    const lastPayload = getLastInjectionPayload();
 
     const maxTokens = getMaxContextTokens();
     const maxChars = maxTokens > 0 ? maxTokens * CHARS_PER_TOKEN : 0;
@@ -195,14 +232,58 @@ export function buildContextUsageBar() {
         { key: 'notebook', label: 'Notebook', color: '#fdcb6e' },
     ];
 
+    let activeInspectorKey = null;
+    let activeInspectorButton = null;
+    const inspectorMount = el('div', 'tv-context-inspector-mount');
+
+    function closeInspector() {
+        activeInspectorKey = null;
+        if (activeInspectorButton) {
+            activeInspectorButton.classList.remove('is-active');
+            activeInspectorButton.setAttribute('aria-expanded', 'false');
+            activeInspectorButton = null;
+        }
+        inspectorMount.replaceChildren();
+    }
+
+    function openInspector(slot, triggerBtn) {
+        const text = lastPayload?.[slot.key] || '';
+        if (activeInspectorKey === slot.key) {
+            closeInspector();
+            return;
+        }
+
+        if (activeInspectorButton) {
+            activeInspectorButton.classList.remove('is-active');
+            activeInspectorButton.setAttribute('aria-expanded', 'false');
+        }
+
+        activeInspectorKey = slot.key;
+        activeInspectorButton = triggerBtn;
+        activeInspectorButton.classList.add('is-active');
+        activeInspectorButton.setAttribute('aria-expanded', 'true');
+
+        inspectorMount.replaceChildren(buildInjectionInspector({
+            slot,
+            text,
+            size: text.length,
+            updatedAt: lastPayload?.updatedAt || 0,
+            onClose: closeInspector,
+        }));
+    }
+
     const sourceOverview = el('div', 'tv-context-source-overview');
     for (const slot of SLOT_CONFIG) {
         const val = sizes[slot.key] || 0;
         if (val === 0) continue;
 
         const share = sizes.total > 0 ? Math.round((val / sizes.total) * 100) : 0;
-        const item = el('span', 'tv-context-source-pill');
+        const item = el('button', 'tv-context-source-pill');
+        item.type = 'button';
+        item.setAttribute('aria-expanded', 'false');
+        item.setAttribute('aria-label', `${slot.label}: inspect injected text`);
         item.title = `${slot.label}: ${val.toLocaleString()} chars (~${Math.round(val / CHARS_PER_TOKEN)} tok, ${share}% of TV injection)`;
+        item.addEventListener('click', () => openInspector(slot, item));
 
         const dot = el('span', 'tv-context-source-dot');
         dot.style.background = slot.color;
@@ -242,6 +323,7 @@ export function buildContextUsageBar() {
     }
 
     wrapper.appendChild(barOuter);
+    wrapper.appendChild(inspectorMount);
 
     const parts = [];
     if (sizes.mandatory) parts.push(`Prompt: ${sizes.mandatory}`);

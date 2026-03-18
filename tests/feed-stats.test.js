@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { getInjectionSizes, getLastInjectionPayload, getMaxContextTokens } from '../agent-utils.js';
 
 vi.mock('../tool-registry.js', () => ({
     getActiveTunnelVisionBooks: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock('../entry-scoring.js', () => ({
 
 vi.mock('../agent-utils.js', () => ({
     getInjectionSizes: vi.fn(),
+    getLastInjectionPayload: vi.fn(),
     getMaxContextTokens: vi.fn(),
 }));
 
@@ -27,7 +29,6 @@ import { getActiveTunnelVisionBooks } from '../tool-registry.js';
 import { isSummaryTitle, isTrackerTitle } from '../tree-store.js';
 import { getCachedWorldInfo } from '../entry-manager.js';
 import { countStaleEntries } from '../entry-scoring.js';
-import { getInjectionSizes, getMaxContextTokens } from '../agent-utils.js';
 
 import {
     getFeedItemsRaw,
@@ -65,6 +66,13 @@ describe('feed-stats', () => {
             notebook: 0,
             total: 0,
         });
+        getLastInjectionPayload.mockReturnValue({
+            mandatory: '',
+            worldState: '',
+            smartContext: '',
+            notebook: '',
+            updatedAt: 0,
+        });
         getMaxContextTokens.mockReturnValue(0);
     });
 
@@ -96,13 +104,20 @@ describe('feed-stats', () => {
             expect(buildContextUsageBar()).toBeNull();
         });
 
-        it('renders usage label, segments, legend, and tooltip with max context', () => {
+        it('renders usage label, segments, source pills, and tooltip with max context', () => {
             getInjectionSizes.mockReturnValue({
                 mandatory: 400,
                 worldState: 200,
                 smartContext: 300,
                 notebook: 100,
                 total: 1000,
+            });
+            getLastInjectionPayload.mockReturnValue({
+                mandatory: 'M'.repeat(400),
+                worldState: 'W'.repeat(200),
+                smartContext: 'S'.repeat(300),
+                notebook: 'N'.repeat(100),
+                updatedAt: 12345,
             });
             getMaxContextTokens.mockReturnValue(500);
 
@@ -133,6 +148,42 @@ describe('feed-stats', () => {
             expect(bar.title).toContain('WS: 200');
             expect(bar.title).toContain('SC: 300');
             expect(bar.title).toContain('NB: 100');
+        });
+
+        it('opens an inline inspector with the exact source text when a source pill is clicked', () => {
+            getInjectionSizes.mockReturnValue({
+                mandatory: 0,
+                worldState: 28,
+                smartContext: 0,
+                notebook: 0,
+                total: 28,
+            });
+            getLastInjectionPayload.mockReturnValue({
+                mandatory: '',
+                worldState: 'CURRENT WORLD STATE SNAPSHOT',
+                smartContext: '',
+                notebook: '',
+                updatedAt: 1700000000000,
+            });
+
+            const bar = buildContextUsageBar();
+            const pill = bar.querySelector('.tv-context-source-pill');
+            expect(pill).not.toBeNull();
+
+            pill.click();
+
+            const inspector = bar.querySelector('.tv-context-inspector');
+            expect(inspector).not.toBeNull();
+            expect(inspector.querySelector('.tv-context-inspector-title')?.textContent).toBe('World State');
+            expect(inspector.querySelector('.tv-context-inspector-body')?.textContent).toBe('CURRENT WORLD STATE SNAPSHOT');
+            expect(pill.classList.contains('is-active')).toBe(true);
+            expect(pill.getAttribute('aria-expanded')).toBe('true');
+
+            pill.click();
+
+            expect(bar.querySelector('.tv-context-inspector')).toBeNull();
+            expect(pill.classList.contains('is-active')).toBe(false);
+            expect(pill.getAttribute('aria-expanded')).toBe('false');
         });
 
         it('renders without headroom segment when total meets or exceeds max context', () => {

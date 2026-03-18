@@ -3385,6 +3385,25 @@
     font-size: 0.68em;
     color: var(--SmartThemeQuoteColor, #aaa);
     white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.tv-context-source-pill:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+.tv-context-source-pill.is-active {
+    background: rgba(108, 92, 231, 0.14);
+    border-color: rgba(108, 92, 231, 0.32);
+    color: var(--SmartThemeBodyColor, #ddd);
+}
+
+.tv-context-source-pill:focus-visible,
+.tv-context-inspector-close:focus-visible {
+    outline: 1px solid rgba(253, 203, 110, 0.7);
+    outline-offset: 1px;
 }
 
 .tv-context-source-dot {
@@ -3401,6 +3420,74 @@
 .tv-context-source-value {
     font-weight: 600;
     color: var(--SmartThemeEmColor, #fff);
+}
+
+.tv-context-inspector-mount {
+    width: 100%;
+}
+
+.tv-context-inspector {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 2px;
+    padding: 10px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.tv-context-inspector-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.tv-context-inspector-title-wrap {
+    min-width: 0;
+}
+
+.tv-context-inspector-title {
+    font-size: 0.8em;
+    font-weight: 700;
+    color: var(--SmartThemeEmColor, #fff);
+}
+
+.tv-context-inspector-meta {
+    font-size: 0.68em;
+    color: var(--SmartThemeQuoteColor, #aaa);
+    margin-top: 2px;
+}
+
+.tv-context-inspector-close {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    color: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.tv-context-inspector-body {
+    margin: 0;
+    max-height: 240px;
+    overflow: auto;
+    padding: 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--SmartThemeBodyColor, #ddd);
+    white-space: pre-wrap;
+    word-break: break-word;
+    scrollbar-width: thin;
 }
 
 .tv-budget-bar {

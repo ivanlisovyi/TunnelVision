@@ -10,7 +10,7 @@ import { getContext } from '../../../st-context.js';
 import { getSettings } from './tree-store.js';
 import { getActiveTunnelVisionBooks, NOTEBOOK_NAME } from './tool-registry.js';
 import { resetTurnEntryCount, invalidateDirtyWorldInfoCache } from './entry-manager.js';
-import { setInjectionSizes } from './agent-utils.js';
+import { setInjectionSizes, setLastInjectionPayload } from './agent-utils.js';
 import { buildNotebookPrompt, resetNotebookWriteGuard } from './tools/notebook.js';
 import { buildWorldStatePrompt } from './world-state.js';
 import { buildSmartContextPrompt } from './smart-context.js';
@@ -239,6 +239,7 @@ export function applyPromptBudget(prompts, budget, deps = {}) {
  * @param {Function} [deps.buildNotebookPromptImpl]
  * @param {'default'|'audit'|'read-only'} [deps.promptBuildMode]
  * @param {Function} [deps.setInjectionSizesImpl]
+ * @param {Function} [deps.setLastInjectionPayloadImpl]
  * @param {Function} [deps.resetTurnEntryCountImpl]
  * @param {Function} [deps.invalidateDirtyWorldInfoCacheImpl]
  * @param {Function} [deps.resetNotebookWriteGuardImpl]
@@ -278,6 +279,7 @@ export async function buildPromptInjectionPlan(deps = {}) {
         buildSmartContextPromptImpl = buildSmartContextPrompt,
         buildNotebookPromptImpl = buildNotebookPrompt,
         setInjectionSizesImpl = setInjectionSizes,
+            setLastInjectionPayloadImpl = setLastInjectionPayload,
         resetTurnEntryCountImpl = resetTurnEntryCount,
         invalidateDirtyWorldInfoCacheImpl = invalidateDirtyWorldInfoCache,
         resetNotebookWriteGuardImpl = resetNotebookWriteGuard,
@@ -385,6 +387,13 @@ export async function buildPromptInjectionPlan(deps = {}) {
         worldState: prompts.worldState.length,
         smartContext: prompts.smartContext.length,
         notebook: prompts.notebook.length,
+    });
+
+    setLastInjectionPayloadImpl({
+        mandatory: prompts.mandatory,
+        worldState: prompts.worldState,
+        smartContext: prompts.smartContext,
+        notebook: prompts.notebook,
     });
 
     console.log(`${TV_PROMPT_LOG_PREFIX} Prompt build complete`, {

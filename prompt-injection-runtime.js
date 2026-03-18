@@ -54,6 +54,7 @@ export async function getPromptInjectionRuntimeSnapshot(deps = {}) {
         ...deps,
         promptBuildMode: deps.promptBuildMode || 'audit',
         setInjectionSizesImpl: () => {},
+        setLastInjectionPayloadImpl: () => {},
         resetTurnEntryCountImpl: () => {},
         invalidateDirtyWorldInfoCacheImpl: () => {},
         resetNotebookWriteGuardImpl: () => {},

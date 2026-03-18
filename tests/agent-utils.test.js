@@ -1,11 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { trigrams, trigramSimilarity, callWithRetry, setInjectionSizes, getInjectionSizes, getMaxContextTokens } from '../agent-utils.js';
+import {
+    trigrams,
+    trigramSimilarity,
+    callWithRetry,
+    setInjectionSizes,
+    getInjectionSizes,
+    setLastInjectionPayload,
+    getLastInjectionPayload,
+    getMaxContextTokens,
+} from '../agent-utils.js';
 
 // ── setInjectionSizes / getInjectionSizes ────────────────────────
 
 describe('injection size tracking', () => {
     beforeEach(() => {
         setInjectionSizes({ mandatory: 0, worldState: 0, smartContext: 0, notebook: 0 });
+        setLastInjectionPayload({ mandatory: '', worldState: '', smartContext: '', notebook: '' });
     });
 
     it('defaults to all zeros', () => {
@@ -41,6 +51,32 @@ describe('injection size tracking', () => {
         const b = getInjectionSizes();
         a.mandatory = 999;
         expect(b.mandatory).toBe(100);
+    });
+
+    it('stores and retrieves the last exact injection payload', () => {
+        setLastInjectionPayload({
+            mandatory: 'MANDATORY',
+            worldState: 'WORLD',
+            smartContext: 'SMART',
+            notebook: 'NOTE',
+        });
+
+        const payload = getLastInjectionPayload();
+        expect(payload).toMatchObject({
+            mandatory: 'MANDATORY',
+            worldState: 'WORLD',
+            smartContext: 'SMART',
+            notebook: 'NOTE',
+        });
+        expect(payload.updatedAt).toBeGreaterThan(0);
+    });
+
+    it('returns a copy of the last injection payload', () => {
+        setLastInjectionPayload({ mandatory: 'ORIGINAL' });
+        const a = getLastInjectionPayload();
+        const b = getLastInjectionPayload();
+        a.mandatory = 'CHANGED';
+        expect(b.mandatory).toBe('ORIGINAL');
     });
 });
 
